@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="alle">
+  <title>alle</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4f46e5"/>
+      <stop offset="1" stop-color="#06b6d4"/>
+    </linearGradient>
+  </defs>
+
+  <!-- squircle background -->
+  <rect width="1024" height="1024" rx="232" fill="url(#bg)"/>
+
+  <!-- ∀ ("for all") = a stylized A; its three tips are exit nodes -->
+  <g fill="none" stroke="#ffffff" stroke-width="82" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M512 744 L300 300"/>
+    <path d="M512 744 L724 300"/>
+    <path d="M362 430 L662 430"/>
+  </g>
+
+  <!-- exit nodes: white ring with a gradient core (one client -> many exits) -->
+  <g>
+    <circle cx="512" cy="744" r="50" fill="#ffffff"/>
+    <circle cx="512" cy="744" r="21" fill="url(#bg)"/>
+    <circle cx="300" cy="300" r="50" fill="#ffffff"/>
+    <circle cx="300" cy="300" r="21" fill="url(#bg)"/>
+    <circle cx="724" cy="300" r="50" fill="#ffffff"/>
+    <circle cx="724" cy="300" r="21" fill="url(#bg)"/>
+  </g>
+</svg>

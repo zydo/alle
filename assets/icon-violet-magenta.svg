@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="alle violet magenta icon">
+  <title>alle (violet magenta)</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6d28d9"/>
+      <stop offset="0.54" stop-color="#a21caf"/>
+      <stop offset="1" stop-color="#ec4899"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1024" height="1024" rx="232" fill="url(#bg)"/>
+
+  <g fill="none" stroke="#ffffff" stroke-width="82" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M512 744 L300 300"/>
+    <path d="M512 744 L724 300"/>
+    <path d="M362 430 L662 430"/>
+  </g>
+
+  <g>
+    <circle cx="512" cy="744" r="50" fill="#ffffff"/>
+    <circle cx="512" cy="744" r="21" fill="url(#bg)"/>
+    <circle cx="300" cy="300" r="50" fill="#ffffff"/>
+    <circle cx="300" cy="300" r="21" fill="url(#bg)"/>
+    <circle cx="724" cy="300" r="50" fill="#ffffff"/>
+    <circle cx="724" cy="300" r="21" fill="url(#bg)"/>
+  </g>
+</svg>

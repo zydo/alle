@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "alle"
+version = "0.1.0"
+description = "The unofficial, universal VPN client: manage multiple VPN providers and locations in one place through a single sing-box process, with rule-based routing planned. CLI today; web UI and menu-bar GUI planned."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "zydo" }]
+keywords = ["vpn", "sing-box", "nordvpn", "wireguard", "proxy", "gateway"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: System :: Networking",
+]
+dependencies = ["pyyaml>=6.0"]
+
+[project.urls]
+Homepage = "https://github.com/zydo/alle"
+Issues = "https://github.com/zydo/alle/issues"
+
+[project.scripts]
+alle = "alle.cli:main"
+alled = "alle.daemon:run_applier"
+alle-tray = "alle.tray.app:main"
+
+[project.optional-dependencies]
+tray = ["PySide6>=6.7"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/alle"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[dependency-groups]
+dev = ["ruff>=0.6", "pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

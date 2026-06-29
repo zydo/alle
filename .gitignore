@@ -1,0 +1,13 @@
+# python / packaging
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.uv/
+
+# misc
+*.log
+.ruff_cache/
+.DS_Store

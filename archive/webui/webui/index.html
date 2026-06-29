@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>alle — channels</title>
+  <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+  <!-- No external font CDN: works offline and avoids a third-party dependency.
+       Inter / JetBrains Mono are used if installed locally, else the system
+       sans / monospace stack (see --sans / --mono in styles.css). -->
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+
+<body>
+  <div class="app">
+    <aside class="sidebar" aria-label="Sidebar">
+      <div class="brand">
+        <img class="logo" src="/icon.svg" alt="" width="26" height="26" />
+        <span class="brand-name">alle</span>
+        <span class="brand-ver" id="version">—</span>
+      </div>
+      <nav class="nav">
+        <button class="nav-item active" data-view="channels">
+          <span class="nav-ico">⧉</span> Channels
+        </button>
+        <button class="nav-item" data-view="providers">
+          <span class="nav-ico">⚇</span> Providers
+        </button>
+        <button class="nav-item" data-view="about">
+          <span class="nav-ico">ⓘ</span> About
+        </button>
+      </nav>
+      <div class="sidebar-foot">routing console</div>
+    </aside>
+
+    <div class="content">
+      <header class="topbar">
+        <h1 id="page-title">VPN Channels</h1>
+        <div class="top-actions" id="top-actions">
+          <button id="btn-latency" class="btn outline">
+            <span class="led-dot"></span> Connectivity Test
+          </button>
+          <button id="btn-new" class="btn primary">+ Add channel</button>
+          <button id="btn-add-provider" class="btn primary hidden">+ Add provider</button>
+        </div>
+      </header>
+
+      <main class="main">
+        <!-- Channels -->
+        <section id="view-channels" class="view">
+          <div id="cards" class="cards"></div>
+          <button id="add-tile" class="add-tile">+ Add channel</button>
+          <section id="empty" class="empty hidden">
+            <div class="empty-art">⧉</div>
+            <h2>No channels yet</h2>
+            <p>Create a channel to route traffic through a VPN location on its own port.</p>
+            <button class="btn primary lg" data-action="new">Create your first channel</button>
+          </section>
+        </section>
+
+        <!-- Providers -->
+        <section id="view-providers" class="view hidden">
+          <div id="providers-list" class="cards"></div>
+        </section>
+
+        <!-- About -->
+        <section id="view-about" class="view hidden">
+          <article class="card about">
+            <h2>alle <span id="about-ver" class="muted"></span></h2>
+            <p>Multi-location VPN gateways. Each channel is one gluetun container routing
+              through a VPN location, exposed as a local HTTP proxy port.</p>
+            <p class="muted">Built on the unmodified <a href="https://github.com/qdm12/gluetun" target="_blank"
+                rel="noreferrer">gluetun</a>
+              image (MIT). alle is independent and not affiliated with any VPN provider.</p>
+            <div class="kv"><span>Use a channel</span><code>curl -x http://localhost:PORT https://ifconfig.me</code>
+            </div>
+          </article>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <!-- editor drawer -->
+  <div id="scrim" class="scrim hidden"></div>
+  <aside id="drawer" class="drawer hidden" aria-label="Channel editor">
+    <div class="drawer-head">
+      <h2 id="drawer-title">Add channel</h2>
+      <button class="icon" data-action="close" aria-label="Close">✕</button>
+    </div>
+    <div id="no-provider" class="notice hidden">
+      <p>No VPN provider is configured yet. Add a provider with its access token first, then you can create channels.
+      </p>
+      <button class="btn primary" id="go-add-provider">Add a provider</button>
+    </div>
+    <form id="channel-form" class="form">
+      <label class="field">
+        <span class="field-label">Provider</span>
+        <select id="f-provider" name="provider" required></select>
+      </label>
+      <label class="field">
+        <span class="field-label">Country</span>
+        <select id="f-country" name="country" required disabled>
+          <option value="">Select a provider first</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label">City <span class="opt">optional</span></span>
+        <select id="f-city" name="city" disabled>
+          <option value="">Any city</option>
+        </select>
+      </label>
+      <p id="form-note" class="form-note hidden"></p>
+      <p id="form-error" class="form-error hidden"></p>
+      <div class="form-actions">
+        <button type="button" class="btn ghost" data-action="close">Cancel</button>
+        <button type="submit" id="f-submit" class="btn primary">Add channel</button>
+      </div>
+    </form>
+  </aside>
+
+  <!-- provider modal -->
+  <div id="prov-scrim" class="scrim hidden"></div>
+  <div id="prov-modal" class="modal hidden">
+    <div class="modal-head">
+      <h2 id="prov-title">Add provider</h2>
+      <button class="icon" data-action="prov-close" aria-label="Close">✕</button>
+    </div>
+    <form id="provider-form" class="form">
+      <label class="field">
+        <span class="field-label">Provider</span>
+        <select id="p-provider"></select>
+      </label>
+      <label class="field">
+        <span class="field-label">Access token</span>
+        <input id="p-token" type="password" placeholder="paste your access token" autocomplete="off" />
+        <span class="hint" id="p-hint"></span>
+      </label>
+      <p id="prov-error" class="form-error hidden"></p>
+      <div class="form-actions">
+        <button type="button" class="btn ghost" data-action="prov-close">Cancel</button>
+        <button type="submit" id="p-submit" class="btn primary">Validate &amp; save</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- log modal -->
+  <div id="log-scrim" class="scrim hidden"></div>
+  <div id="log-modal" class="modal modal-lg hidden">
+    <div class="modal-head">
+      <h2 id="log-title">Channel log</h2>
+      <button class="icon" data-action="log-close" aria-label="Close">✕</button>
+    </div>
+    <div id="log-error" class="log-error hidden"></div>
+    <pre id="log-body" class="log-body">loading…</pre>
+    <div class="form-actions">
+      <button type="button" class="btn outline" id="log-refresh">Refresh</button>
+      <button type="button" class="btn ghost" data-action="log-close">Close</button>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+
+</html>
