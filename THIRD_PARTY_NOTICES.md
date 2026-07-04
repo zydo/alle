@@ -41,15 +41,3 @@ with this application without prior consent.
 > alle does not redistribute the sing-box binary; each user downloads it
 > directly from the upstream release page. alle is an independent project and
 > is not affiliated with, endorsed by, or sponsored by the sing-box project.
-
-## Trademarks
-
-> NordVPN, NordLynx, and WireGuard are trademarks of their respective owners.
-> alle is an independent project and is not affiliated with, endorsed by, or
-> sponsored by any VPN provider.
-
-## Location & server data
-
-Provider location lists (e.g. `providers/nordvpn.json`) and the per-server
-WireGuard parameters alle connects with are fetched at runtime from each
-provider's public API and are not distributed with this project.

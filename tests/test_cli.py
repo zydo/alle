@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from alle import cli, service
+from alle import __version__, cli, service
 
 
 @pytest.fixture
@@ -40,7 +40,9 @@ def test_empty_read_commands_keep_human_output(capsys, no_singbox):
         "No providers added yet. Add one:  alle providers add nordvpn"
     )
     assert run_cli(["status"], capsys) == "Alle - Inactive"
-    assert run_cli(["test"], capsys) == "No channels to test."
+    assert run_cli(["test"], capsys) == (
+        "No channels configured. Add one:  alle channels add nordvpn --country …"
+    )
 
 
 def test_json_read_commands(capsys, no_singbox):
@@ -55,34 +57,239 @@ def test_json_read_commands(capsys, no_singbox):
     assert status["channels"] == []
 
 
-def test_config_provider_lifecycle_keeps_cli_messages(capsys, no_background, no_singbox):
+def test_test_json_empty(capsys, no_singbox):
+    data = json.loads(run_cli(["test", "--json"], capsys))
+    assert data["probed"] is False
+    assert data["speed"] is False
+    assert data["channels"] == []
+
+
+def test_version_command(capsys):
+    assert run_cli(["version"], capsys) == __version__
+
+
+def test_channel_commands_share_identity_columns(capsys, no_singbox):
+    """Every channel-listing command exposes the same identity fields
+    (provider, name, port, country, city), and the ones that always render a
+    table lead with those five columns. `status` only renders its table while
+    running, so it is checked via JSON only."""
+    store = service.Store.load()
+    store.add_provider("nordvpn")
+    store.add_channel(
+        "nordvpn", "United States", "Seattle", {"private_key": "x", "peer": {}}
+    )
+
+    basics = ["provider", "name", "port", "country", "city"]
+    for rows in (
+        service.channel_list()["channels"],
+        service.status_snapshot()["channels"],
+        service.test()["channels"],
+        service.metrics_snapshot()["channels"],
+    ):
+        assert rows
+        assert set(basics) <= set(rows[0])
+        assert rows[0]["port"].startswith(":")
+
+    for cmd in (["channels", "ls"], ["test"], ["metrics"]):
+        header = run_cli(cmd, capsys).splitlines()[0].split()
+        assert header[:5] == ["PROVIDER", "NAME", "PORT", "COUNTRY", "CITY"], (
+            cmd,
+            header,
+        )
+
+
+def test_config_provider_lifecycle_keeps_cli_messages(
+    capsys, no_background, no_singbox
+):
     added = run_cli(["providers", "add", "protonvpn"], capsys)
-    assert added.startswith("Added provider ProtonVPN.")
+    assert added.startswith("Added provider Proton VPN.")
 
     listed = run_cli(["providers", "ls"], capsys)
-    assert listed == "  ProtonVPN"
+    assert (
+        "Proton VPN" in listed and "0 .conf files" in listed
+    )  # config providers show a count
 
     channels = run_cli(["channels", "ls"], capsys)
-    assert channels == "protonvpn:\n    (no channels)"
+    assert channels.startswith(
+        "No channels yet."
+    )  # provider added, but nothing imported
 
     locations = run_cli(["locations", "protonvpn"], capsys)
-    assert locations.startswith("ProtonVPN: locations are not listed here.")
+    assert locations.startswith("Proton VPN: locations are not listed here.")
 
     removed = run_cli(["providers", "rm", "protonvpn", "-y"], capsys)
-    assert removed == "Removed ProtonVPN and its 0 channel(s)."
+    assert removed == "Removed Proton VPN and its 0 channel(s)."
 
 
-def test_existing_error_messages(capsys, no_background):
+SAMPLE_CONF = """\
+[Interface]
+# Key for alle-test
+PrivateKey = WEVHcHJpdmF0ZUtleUV4YW1wbGVCYXNlNjRQYWRkaW5nU1hvPQ==
+Address = 10.2.0.2/32
+DNS = 10.2.0.1
+
+[Peer]
+PublicKey = 2RxTx5coxCtv/b3fRKHTq5WjdUxvNxESsYjaXIJWmDA=
+AllowedIPs = 0.0.0.0/0
+Endpoint = 79.127.185.162:51820
+"""
+
+
+def test_config_import_requires_provider_added(capsys, no_background):
     with pytest.raises(SystemExit) as exc:
         cli.main(["channels", "add", "protonvpn", "--config", "/tmp/proton.conf"])
-    assert str(exc.value) == "ProtonVPN is not added — run `alle providers add protonvpn` first."
+    assert (
+        str(exc.value)
+        == "Proton VPN is not added — run `alle providers add protonvpn` first."
+    )
 
+
+def test_config_import_missing_file(capsys, no_background):
+    cli.main(["providers", "add", "protonvpn"])
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            ["channels", "add", "protonvpn", "--config", "/tmp/does-not-exist.conf"]
+        )
+    assert str(exc.value) == "config file not found: /tmp/does-not-exist.conf"
+
+
+def test_config_import_rejects_garbage(capsys, no_background, tmp_path):
+    bad = tmp_path / "bad.conf"
+    bad.write_text("not a wireguard config")
+    cli.main(["providers", "add", "protonvpn"])
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["channels", "add", "protonvpn", "--config", str(bad)])
+    assert "is not a usable WireGuard .conf" in str(exc.value)
+
+
+def test_config_import_stores_channel(capsys, no_background, tmp_path):
+    conf = tmp_path / "wg-US-CA-842.conf"
+    conf.write_text(SAMPLE_CONF)
     cli.main(["providers", "add", "protonvpn"])
     capsys.readouterr()
 
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["channels", "add", "protonvpn", "--config", "/tmp/proton.conf"])
-    assert str(exc.value) == (
-        "importing channels from a WireGuard .conf is not implemented yet (post-MVP). "
-        "For now, ProtonVPN channels cannot be added."
+    out = run_cli(["channels", "add", "protonvpn", "--config", str(conf)], capsys)
+    assert out.startswith(
+        "Imported channel wg_us_ca_842 under Proton VPN from wg-US-CA-842.conf"
     )
+
+    ch = service.Store.load().get_channel("protonvpn", "wg_us_ca_842")
+    assert ch is not None
+    assert ch.wg["peer"]["endpoint_host"] == "79.127.185.162"
+    assert ch.wg["peer"]["endpoint_port"] == 51820
+    assert ch.wg["address"] == ["10.2.0.2/32"]
+    # country/city are parsed from the file name's ISO codes (wg-US-CA-842), not guessed
+    assert ch.country == "United States" and ch.city == "California"
+
+
+def test_unparseable_config_shows_unknown(capsys, no_background, tmp_path):
+    conf = tmp_path / "myserver.conf"  # no ISO codes in the name
+    conf.write_text(SAMPLE_CONF)
+    cli.main(["providers", "add", "protonvpn"])
+    capsys.readouterr()
+    cli.main(["channels", "add", "protonvpn", "--config", str(conf)])
+    capsys.readouterr()
+    listed = run_cli(["channels", "ls"], capsys)
+    assert (
+        "(Unknown)" in listed
+    )  # country and city both unresolved -> braced placeholder
+
+
+def test_nordvpn_country_only_shows_any_city(capsys, no_background, tmp_path):
+    store = service.Store.load()
+    store.add_provider("nordvpn")
+    store.add_channel("nordvpn", "United States", "", {"private_key": "x", "peer": {}})
+    listed = run_cli(["channels", "ls"], capsys)
+    assert "(Any City)" in listed  # API channel, country but no city
+
+
+def test_channels_ls_is_a_flat_table_with_separator(capsys, no_background, tmp_path):
+    conf = tmp_path / "wg-US-CA-842.conf"
+    conf.write_text(SAMPLE_CONF)
+    cli.main(["providers", "add", "protonvpn"])
+    cli.main(["channels", "add", "protonvpn", "--config", str(conf)])
+    capsys.readouterr()
+    lines = run_cli(["channels", "ls"], capsys).splitlines()
+    assert lines[0].split() == [
+        "PROVIDER",
+        "NAME",
+        "PORT",
+        "COUNTRY",
+        "CITY",
+    ]  # single header
+    assert set(lines[1]) <= {"-", " "} and "-" in lines[1]  # dash separator
+    assert lines[2].startswith("Proton VPN")  # flat row, brand + PROVIDER column
+
+
+def test_config_import_id_comes_from_filename(capsys, no_background, tmp_path):
+    conf = tmp_path / "de-berlin-server.conf"
+    conf.write_text(SAMPLE_CONF)
+    cli.main(["providers", "add", "protonvpn"])
+    capsys.readouterr()
+    run_cli(["channels", "add", "protonvpn", "--config", str(conf)], capsys)
+    assert service.Store.load().get_channel("protonvpn", "de_berlin_server") is not None
+
+
+def test_reimporting_same_file_updates_in_place(capsys, no_background, tmp_path):
+    conf = tmp_path / "wg-US-CA-842.conf"
+    conf.write_text(SAMPLE_CONF)
+    cli.main(["providers", "add", "protonvpn"])
+    capsys.readouterr()  # discard the provider-add output
+    out1 = run_cli(["channels", "add", "protonvpn", "--config", str(conf)], capsys)
+    assert out1.startswith("Imported channel wg_us_ca_842 ")
+    imported = service.Store.load().get_channel("protonvpn", "wg_us_ca_842")
+    assert imported is not None
+    port1 = imported.port
+
+    # regenerate the config (rotated key) and re-import the same file name
+    conf.write_text(SAMPLE_CONF.replace("WEVH", "ZZZZ"))
+    out2 = run_cli(["channels", "add", "protonvpn", "--config", str(conf)], capsys)
+    assert out2.startswith("Updated channel wg_us_ca_842 ")
+
+    channels = service.Store.load().provider_channels("protonvpn")
+    assert len(channels) == 1  # updated in place — no wg_us_ca_842_2
+    assert channels[0].port == port1  # local port stays stable
+    assert channels[0].wg["private_key"].startswith("ZZZZ")  # rotated key applied
+
+
+def test_config_and_location_flags_are_mutually_exclusive(
+    capsys, no_background, tmp_path
+):
+    conf = tmp_path / "srv.conf"
+    conf.write_text(SAMPLE_CONF)
+    cli.main(["providers", "add", "protonvpn"])
+    capsys.readouterr()
+    for extra in (["--country", "United States"], ["--city", "Los Angeles"]):
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["channels", "add", "protonvpn", "--config", str(conf), *extra])
+        assert "--config cannot be combined with --country/--city" in str(exc.value)
+
+
+def test_providers_ls_counts_config_files(capsys, no_background, tmp_path):
+    conf = tmp_path / "wg-US-CA-842.conf"
+    conf.write_text(SAMPLE_CONF)
+    cli.main(["providers", "add", "protonvpn"])
+    capsys.readouterr()
+    assert "0 .conf files" in run_cli(["providers", "ls"], capsys)
+
+    cli.main(["channels", "add", "protonvpn", "--config", str(conf)])
+    capsys.readouterr()
+    assert "1 .conf file" in run_cli(["providers", "ls"], capsys)  # singular, updates
+
+    cli.main(["channels", "rm", "protonvpn", "--channel", "wg_us_ca_842"])
+    capsys.readouterr()
+    assert "0 .conf files" in run_cli(["providers", "ls"], capsys)  # updates back down
+
+
+def test_config_flag_rejected_for_api_provider(capsys, no_background, tmp_path):
+    conf = tmp_path / "srv.conf"
+    conf.write_text(SAMPLE_CONF)
+    cli.main(["providers", "add", "protonvpn"])  # ensure a config provider exists too
+    capsys.readouterr()
+    # add nordvpn provider without a credential prompt by going through the service store
+    service.Store.load().add_provider("nordvpn")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["channels", "add", "nordvpn", "--config", str(conf)])
+    assert "uses an API" in str(exc.value)

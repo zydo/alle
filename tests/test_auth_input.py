@@ -39,6 +39,11 @@ def test_arrow_key_escape_is_ignored():
     assert secret == "abc"
 
 
+def test_ss3_escape_is_ignored():
+    secret, _ = _drive("ab\x1bOPc\r")  # ESC O P = F1 in application mode
+    assert secret == "abc"
+
+
 def test_ctrl_c_aborts():
     with pytest.raises(KeyboardInterrupt):
         _drive("ab\x03")

@@ -33,10 +33,15 @@ def _save_all(providers: dict[str, dict]) -> None:
     p = _path()
     p.parent.mkdir(parents=True, exist_ok=True)
     header = "# Managed by alle. Provider login credentials — keep this file private.\n"
-    with p.open("w") as f:
+    # Created 0600 from the first byte — never a window where the file holds
+    # secrets under the default (usually world-readable) umask mode.
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+    with os.fdopen(fd, "w") as f:
         f.write(header)
-        yaml.safe_dump({"providers": providers}, f, sort_keys=False, default_flow_style=False)
-    os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)  # 0600 — owner read/write only
+        yaml.safe_dump(
+            {"providers": providers}, f, sort_keys=False, default_flow_style=False
+        )
+    os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)  # tighten a pre-existing looser file too
 
 
 def get(provider: str) -> dict | None:

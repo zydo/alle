@@ -27,11 +27,14 @@ def main(version: str) -> None:
     print("SINGBOX_SHA256 = {")
     for key in PLATFORMS:
         url = f"{BASE}/v{version}/sing-box-{version}-{key}.tar.gz"
-        with urllib.request.urlopen(url, timeout=120) as r:  # noqa: S310
+        with urllib.request.urlopen(url, timeout=120) as r:
             data = r.read()
         with tarfile.open(fileobj=io.BytesIO(data)) as tf:
             member = next(m for m in tf.getmembers() if m.name.endswith("/sing-box"))
-            binary = tf.extractfile(member).read()
+            extracted = tf.extractfile(member)
+            if extracted is None:
+                raise RuntimeError(f"archive member is not a file: {member.name}")
+            binary = extracted.read()
         print(f'    "{key}": "{hashlib.sha256(binary).hexdigest()}",')
     print("}")
 

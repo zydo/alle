@@ -5,8 +5,8 @@ WireGuard parameters:
 
 * ``token`` — the provider has an API. You add the provider once with a token/login
   (``alle providers add <name>``); thereafter ``alle channels add <name>
-  --country …`` resolves a concrete server from the API. Only NordVPN is wired
-  end-to-end today; Mullvad/IVPN/PIA are post-MVP token providers.
+  --country …`` resolves a concrete server from the API. NordVPN is the token
+  provider and is wired end-to-end.
 * ``config`` — portal-only providers (e.g. ProtonVPN) that hand out a WireGuard
   ``.conf``. There is no token; you add the provider so channels can be imported
   under it via ``channels add <name> --config <file>`` (Phase 1 in progress).
@@ -37,16 +37,16 @@ class ProviderError(Exception):
 
 def _get_json(url: str, headers: dict | None = None, timeout: int = 30):
     req = urllib.request.Request(url, headers=headers or {"User-Agent": "alle/1"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 (trusted https URL)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
 
 
 # ---- NordVPN ---------------------------------------------------------------
 
 # Client interface address for NordLynx; the same for every server/account.
-NORDVPN_WG_ADDRESS = ["10.5.0.2/32"]
+NORDVPN_WG_ADDRESS = ["10.5.0.2/32"]  # noqa: S1313
 
-_nord_countries_cache: list | None = None
+_nord_countries_cache: list[dict] | None = None
 
 
 def nordvpn_derive_key(creds: dict) -> str:
@@ -71,14 +71,16 @@ def nordvpn_derive_key(creds: dict) -> str:
     return key
 
 
-def _nord_countries() -> list:
+def _nord_countries() -> list[dict]:
     global _nord_countries_cache
-    if _nord_countries_cache is None:
+    countries = _nord_countries_cache
+    if countries is None:
         try:
-            _nord_countries_cache = _get_json(f"{NORD_API}/servers/countries")
+            countries = _get_json(f"{NORD_API}/servers/countries")
         except (urllib.error.URLError, ValueError) as e:
             raise ProviderError(f"could not fetch nordvpn country list: {e}") from e
-    return _nord_countries_cache
+        _nord_countries_cache = countries
+    return countries
 
 
 def nordvpn_locations() -> dict[str, list[str]]:
@@ -96,7 +98,9 @@ def _nord_ids(country: str, city: str) -> tuple[int, int | None]:
                 for ci in c.get("cities", []):
                     if ci["name"].lower() == city.lower():
                         return c["id"], ci["id"]
-                raise ProviderError(f"city {city!r} is not a nordvpn location in {country}.")
+                raise ProviderError(
+                    f"city {city!r} is not a nordvpn location in {country}."
+                )
             return c["id"], None
     raise ProviderError(f"country {country!r} is not a nordvpn location.")
 
@@ -107,13 +111,19 @@ def _nord_pubkey(server: dict) -> str:
             for m in tech.get("metadata", []):
                 if m.get("name") == "public_key":
                     return m["value"]
-    raise ProviderError(f"nordvpn server {server.get('hostname')} has no WireGuard public key.")
+    raise ProviderError(
+        f"nordvpn server {server.get('hostname')} has no WireGuard public key."
+    )
 
 
 def nordvpn_resolve(country: str, city: str) -> dict:
     """Pick the recommended WireGuard server for a location -> peer parameters."""
     country_id, city_id = _nord_ids(country, city)
-    flt = f"filters[country_city_id]={city_id}" if city_id else f"filters[country_id]={country_id}"
+    flt = (
+        f"filters[country_city_id]={city_id}"
+        if city_id
+        else f"filters[country_id]={country_id}"
+    )
     url = (
         f"{NORD_API}/servers/recommendations?{flt}"
         "&filters[servers_technologies][identifier]=wireguard_udp&limit=1"
@@ -121,7 +131,9 @@ def nordvpn_resolve(country: str, city: str) -> dict:
     try:
         servers = _get_json(url)
     except (urllib.error.URLError, ValueError) as e:
-        raise ProviderError(f"could not resolve a nordvpn server for {country}: {e}") from e
+        raise ProviderError(
+            f"could not resolve a nordvpn server for {country}: {e}"
+        ) from e
     if not servers:
         where = f"{city}, {country}" if city else country
         raise ProviderError(f"nordvpn has no WireGuard server available in {where}.")
@@ -154,14 +166,14 @@ def forget_nord_countries() -> None:
 class AuthField:
     """One credential a provider's login form asks for."""
 
-    key: str            # storage key in credentials.yaml
-    label: str          # prompt / form label shown to the user
+    key: str  # storage key in credentials.yaml
+    label: str  # prompt / form label shown to the user
     secret: bool = True  # hidden while typing and masked when displayed
 
 
 # The registry. ``kind`` is "token" (API-backed) or "config" (portal .conf).
-# ``functional`` marks providers wired end-to-end; the others are listed so the
-# CLI can present them, but adding channels under them is not yet supported.
+# ``functional`` marks providers wired end-to-end; alle only ships NordVPN (token)
+# and Proton VPN (config) — together they cover both archetypes.
 REGISTRY: dict[str, dict] = {
     "nordvpn": {
         "name": "NordVPN",
@@ -169,48 +181,25 @@ REGISTRY: dict[str, dict] = {
         "functional": True,
         "fields": [AuthField("token", "Access token")],
         "help": "my.nordaccount.com → Services → NordVPN → Manual setup → "
-                "generate a new access token.",
+        "generate a new access token.",
         "url": "https://my.nordaccount.com/",
         "derive_key": nordvpn_derive_key,
         "wg_address": NORDVPN_WG_ADDRESS,
         "resolve": nordvpn_resolve,
         "locations": nordvpn_locations,
-    },
-    "mullvad": {
-        "name": "Mullvad",
-        "kind": "token",
-        "functional": False,
-        "fields": [AuthField("account_number", "Account number")],
-        "help": "Your 16-digit account number from the Mullvad account page.",
-        "url": "https://mullvad.net/en/account/",
-    },
-    "ivpn": {
-        "name": "IVPN",
-        "kind": "token",
-        "functional": False,
-        "fields": [AuthField("account_id", "Account ID")],
-        "help": "Your account ID (ivpnXXXX-XXXX-XXXX) from the IVPN account area.",
-        "url": "https://www.ivpn.net/account/login/",
-    },
-    "pia": {
-        "name": "Private Internet Access",
-        "kind": "token",
-        "functional": False,
-        "fields": [
-            AuthField("username", "Username", secret=False),
-            AuthField("password", "Password"),
-        ],
-        "help": "Your PIA username (pXXXXXXX) and password.",
-        "url": "https://www.privateinternetaccess.com/account/login/",
+        # Drops the in-process country cache so the next "locations" call truly
+        # hits the API — what a forced refresh must do even in a long-lived
+        # process (the daemon, a future Web UI), not just a fresh CLI run.
+        "forget_locations": forget_nord_countries,
     },
     "protonvpn": {
-        "name": "ProtonVPN",
+        "name": "Proton VPN",
         "kind": "config",
         "functional": False,
-        "config_help": "ProtonVPN has no usable WireGuard API. Generate a WireGuard "
-                       "config in the Proton portal (Downloads → WireGuard configuration), "
-                       "then add it as a channel: "
-                       "alle channels add protonvpn --config /path/to/proton.conf",
+        "config_help": "Proton VPN has no usable WireGuard API. Generate a WireGuard "
+        "config in the Proton portal (Downloads → WireGuard configuration), "
+        "then add it as a channel: "
+        "alle channels add protonvpn --config /path/to/proton.conf",
         "url": "https://account.protonvpn.com/downloads",
     },
 }
@@ -223,7 +212,7 @@ PROVIDER_NAMES = {k: v["name"] for k, v in REGISTRY.items()}
 
 
 def known() -> list[str]:
-    """Every provider alle recognises (functional or planned), sorted."""
+    """Every provider alle recognises, sorted."""
     return sorted(REGISTRY)
 
 
@@ -288,12 +277,13 @@ def provider_wg(provider: str, country: str, city: str = "") -> dict:
     """
     spec = PROVIDERS.get(provider)
     if spec is None:
-        raise ProviderError(f"{display_name(provider)} cannot resolve locations from an API.")
+        raise ProviderError(
+            f"{display_name(provider)} cannot resolve locations from an API."
+        )
     creds = credentials.get(provider)
     if not creds:
         raise ProviderError(
-            f"{display_name(provider)} is not authenticated — "
-            f"run `alle providers add {provider}`."
+            f"{display_name(provider)} is not authenticated — run `alle providers add {provider}`."
         )
     private_key = spec["derive_key"](creds)
     peer = spec["resolve"](country, city)

@@ -1,7 +1,7 @@
 """Parse, validate and canonicalize a WireGuard (wg-quick) ``.conf``.
 
 The wg-quick format is provider-agnostic, so one parser serves every provider
-that hands out a WireGuard config (Mullvad, IVPN, Proton, self-hosted, ...). We
+that hands out a WireGuard config (Proton, self-hosted, ...). We
 read only the keys sing-box can act on and ignore wg-quick-only directives
 (``PostUp``, ``Table``, ``FwMark``, ...). An imported ``.conf`` is a snapshot of
 *one* peer (one server); to roam locations you re-import another file.
@@ -84,9 +84,11 @@ def parse(text: str) -> dict:
     ]
     if missing:
         raise ConfError("missing required field(s): " + ", ".join(missing))
+    if private_key is None or address is None or public_key is None or endpoint is None:
+        raise AssertionError("required WireGuard fields were checked but not narrowed")
 
-    host, port = _split_endpoint(endpoint)
     keepalive = peer.get("persistentkeepalive")
+    host, port = _split_endpoint(endpoint)
     return {
         "private_key": private_key,
         "address": _csv(address),
@@ -95,8 +97,11 @@ def parse(text: str) -> dict:
             "endpoint_host": host,
             "endpoint_port": port,
             "preshared_key": peer.get("presharedkey") or None,
-            "allowed_ips": _csv(peer.get("allowedips", "")) or list(DEFAULT_ALLOWED_IPS),
-            "keepalive": int(keepalive) if keepalive and keepalive.isdigit() else WG_KEEPALIVE,
+            "allowed_ips": _csv(peer.get("allowedips", ""))
+            or list(DEFAULT_ALLOWED_IPS),
+            "keepalive": int(keepalive)
+            if keepalive and keepalive.isdigit()
+            else WG_KEEPALIVE,
         },
     }
 

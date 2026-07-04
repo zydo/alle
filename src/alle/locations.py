@@ -29,7 +29,9 @@ def path_for(root: Path, provider: str) -> Path:
 
 def write(root: Path, provider: str) -> dict:
     if provider not in PROVIDERS:
-        raise ValueError(f"unknown provider '{provider}' (known: {', '.join(sorted(PROVIDERS))})")
+        raise ValueError(
+            f"unknown provider '{provider}' (known: {', '.join(sorted(PROVIDERS))})"
+        )
     countries = PROVIDERS[provider]["locations"]()
     out = {
         "_meta": {
@@ -49,9 +51,17 @@ def write(root: Path, provider: str) -> dict:
 
 
 def update(root: Path, providers) -> dict[str, dict]:
-    """Refresh the given providers from their APIs; returns {provider: meta}."""
+    """Refresh the given providers from their APIs; returns {provider: meta}.
+
+    "From their APIs" is a guarantee: any in-process location cache the provider
+    module keeps is dropped first, so a forced refresh fetches fresh data even
+    inside a long-lived process, not only in a new CLI invocation.
+    """
     results = {}
     for p in providers:
+        forget = PROVIDERS.get(p, {}).get("forget_locations")
+        if forget:
+            forget()
         print(f"Reading {p} locations from its API...", file=sys.stderr)
         meta = write(root, p)
         print(

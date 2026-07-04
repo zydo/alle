@@ -53,7 +53,7 @@ def follow(n: int = 50) -> None:
     existing = p.read_text(errors="replace").splitlines()
     for ln in existing[-n:]:
         print(ln, flush=True)
-    f = open(p, "r")
+    f = open(p)
     try:
         f.seek(0, os.SEEK_END)
         while True:
@@ -66,7 +66,7 @@ def follow(n: int = 50) -> None:
             try:
                 if p.stat().st_size < f.tell():
                     f.close()
-                    f = open(p, "r")
+                    f = open(p)
             except OSError:
                 pass
     finally:

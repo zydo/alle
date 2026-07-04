@@ -114,11 +114,16 @@ def _install(key: str, expected: str, target: Path) -> Path:
             raise SingBoxError(f"could not download sing-box from {url}: {e}") from e
         # the tarball is <dir>/sing-box (+ LICENSE); extract just the binary
         with tarfile.open(archive) as tf:
-            member = next((m for m in tf.getmembers() if m.name.endswith("/sing-box")), None)
+            member = next(
+                (m for m in tf.getmembers() if m.name.endswith("/sing-box")), None
+            )
             if member is None:
                 raise SingBoxError(f"{asset} did not contain a sing-box binary")
             target.parent.mkdir(parents=True, exist_ok=True)
-            with tf.extractfile(member) as src:
+            src = tf.extractfile(member)
+            if src is None:
+                raise SingBoxError(f"{asset} sing-box archive member is not a file")
+            with src:
                 target.write_bytes(src.read())
     target.chmod(0o755)
     got = _sha256_file(target)
@@ -209,26 +214,30 @@ class Runner:
         not edited out from under the running process by accident — alle
         relaxes the mode only when it rewrites the file itself.
 
-        sing-box is kept running even with no inbounds (an idle daemon held alive
-        by the Clash API controller), so ``alle start`` with zero channels still
-        reports an active daemon. It is only stopped explicitly by ``alle stop``.
+        A running process is never taken down by a config sing-box itself rejects:
+        ``sing-box check`` guards every reload, and a failed check restores the
+        last-known-good config and leaves the running process untouched. sing-box
+        is kept running even with no inbounds (an idle daemon held alive by the
+        Clash API controller), so ``alle start`` with zero channels still reports
+        an active daemon. It is only stopped explicitly by ``alle stop``.
         """
         new = json.dumps(config, indent=2)
         old = self.config_path.read_text() if self.config_path.exists() else None
+        if new == old and self.is_running():
+            return False  # no change and the daemon is already up — leave it alone
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self._write_protected(new)
-        if new == old and self.is_running():
-            return False
         if self.is_running():
-            # Apply in place via SIGHUP: sing-box re-reads the whole config and
-            # rebuilds without re-exec (PID and start time preserved, no bind-race
-            # during a stop→start gap). In-flight connections on changed outbounds
-            # may drop — there is no zero-interruption full-config swap — but it is
-            # the least disruptive way to add/remove a channel. Guarded by
-            # ``sing-box check`` so a bad config never takes down a working process;
-            # fall back to a full restart if the reload couldn't be signalled.
-            if self.check() and self.reload():
-                return True
+            if self.check():
+                if self.reload():
+                    return True  # reloaded in place (PID + start time preserved)
+                # config is valid but SIGHUP could not be delivered — full restart
+            else:
+                # sing-box rejected the new config: roll back to the last-known-good
+                # file so the still-running process (on the old config) is undisturbed.
+                if old is not None:
+                    self._write_protected(old)
+                return False
         self.restart()
         return True
 
@@ -260,7 +269,10 @@ class Runner:
             _pid_path().unlink(missing_ok=True)
             _started_path().unlink(missing_ok=True)
             return
-        os.kill(pid, signal.SIGTERM)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:  # exited between the liveness check and the signal
+            pass
         for _ in range(40):
             if self.running_pid() is None:
                 break
@@ -314,20 +326,31 @@ class Runner:
         return "\n".join(lines[-tail:]).strip() or "(no logs)"
 
     # ---- traffic stats via the Clash API -----------------------------------
-    def traffic(self) -> dict[str, tuple[int, int]]:
-        """Map outbound tag -> (upload_bytes, download_bytes), best effort.
+    def connections(self) -> list[dict]:
+        """Raw active connections from the Clash API, best effort.
 
-        Sums currently-tracked connections per outbound chain. Returns {} if the
-        Clash API is unreachable (e.g. sing-box still starting).
+        Each entry carries a stable ``id`` plus cumulative ``upload``/``download``
+        byte counters for that connection's lifetime and a ``chains`` list naming
+        the outbound(s) it exits through. Returns ``[]`` if the Clash API is
+        unreachable (e.g. sing-box still starting). This is the raw feed the
+        metrics accumulator turns into durable per-channel totals.
         """
         url = f"http://{CLASH_API_ADDRESS}/connections"
         try:
             with urllib.request.urlopen(url, timeout=2) as r:  # noqa: S310 (loopback)
                 data = json.load(r)
         except (OSError, ValueError):
-            return {}
+            return []
+        return data.get("connections") or []
+
+    def traffic(self) -> dict[str, tuple[int, int]]:
+        """Map outbound tag -> (upload_bytes, download_bytes), best effort.
+
+        Sums currently-tracked connections per outbound chain. Returns {} if the
+        Clash API is unreachable (e.g. sing-box still starting).
+        """
         out: dict[str, list[int]] = {}
-        for c in data.get("connections") or []:
+        for c in self.connections():
             chain = c.get("chains") or []
             if not chain:
                 continue

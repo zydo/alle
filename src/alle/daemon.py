@@ -32,6 +32,7 @@ from alle import applog, paths
 
 POLL_SECONDS = 1.0  # how often we check for a config change
 PROBE_INTERVAL = 30.0  # how often each channel is probed
+METRICS_INTERVAL = 2.0  # how often traffic counters are sampled from the Clash API
 
 
 def _pid_path() -> Path:
@@ -85,7 +86,10 @@ def stop() -> bool:
     if pid is None:
         _pid_path().unlink(missing_ok=True)
         return False
-    os.kill(pid, signal.SIGTERM)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:  # exited between the liveness check and the signal
+        pass
     for _ in range(40):
         if running_pid() is None:
             break
@@ -104,9 +108,37 @@ def run_applier() -> None:
     """Blocking reconcile + probe loop. Run inside the detached daemon process."""
     # Imported here so the lightweight lifecycle helpers above don't pull the
     # engine/sing-box stack into every CLI invocation.
+    import fcntl
+
+    from alle import metrics, reconnect, singbox
     from alle.engine import Engine
     from alle.state import Store, config_signature, _read_raw
 
+    # Exclusive instance lock: two CLI mutations racing through ensure_running()
+    # can both see "not running" and spawn two appliers — the flock makes the
+    # loser exit instead of fighting the winner over the one sing-box process.
+    # Held (not closed) for the daemon's lifetime; released by the OS on exit.
+    # The holder's pid is kept in the lock file so a losing duplicate can repair
+    # the pidfile its spawner just clobbered (otherwise `alle stop` would miss
+    # the real daemon).
+    instance_lock = open(paths.state_dir() / "applier.lock", "a+")  # noqa: SIM115
+    try:
+        fcntl.flock(instance_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            instance_lock.seek(0)
+            holder = int(instance_lock.read().strip())
+            os.kill(holder, 0)  # liveness check
+            _pid_path().write_text(str(holder))
+        except (ValueError, OSError):
+            pass
+        applog.log("applier already running; duplicate exiting")
+        return
+    instance_lock.truncate(0)
+    instance_lock.write(str(os.getpid()))
+    instance_lock.flush()
+
+    accumulator = metrics.Accumulator()
     stop_flag = {"stop": False}
 
     def _handle(_sig, _frame):
@@ -118,6 +150,7 @@ def run_applier() -> None:
     _pid_path().write_text(str(os.getpid()))
     last_sig = None
     last_probe = 0.0
+    last_metrics = 0.0
     try:
         while not stop_flag["stop"]:
             sig = config_signature(_read_raw())
@@ -126,15 +159,30 @@ def run_applier() -> None:
                     Engine(Store.load()).reconcile()
                 except Exception as e:  # noqa: BLE001 — one bad state must not kill the loop
                     applog.log(f"reconcile failed: {e}")
-                    print(f"applier: reconcile failed: {e}", file=sys.stderr, flush=True)
+                    print(
+                        f"applier: reconcile failed: {e}", file=sys.stderr, flush=True
+                    )
                 last_sig = sig
 
             now = time.monotonic()
+            # Traffic sampling runs on its own faster cadence than probing: the
+            # Clash API only reports live connections, so the more often we look
+            # the fewer short-lived connections slip through between samples.
+            if now - last_metrics >= METRICS_INTERVAL:
+                try:
+                    runner = singbox.Runner()
+                    if runner.is_running():
+                        accumulator.observe(runner.connections())
+                except Exception as e:  # noqa: BLE001
+                    applog.log(f"metrics sample failed: {e}")
+                last_metrics = now
+
             if now - last_probe >= PROBE_INTERVAL:
                 try:
                     eng = Engine(Store.load())
                     if eng.store.channels():
                         eng.probe_all()
+                        reconnect.run_pass(Store.load(), eng.runner)
                 except Exception as e:  # noqa: BLE001
                     applog.log(f"probe cycle failed: {e}")
                 last_probe = now

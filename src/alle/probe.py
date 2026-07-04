@@ -36,7 +36,7 @@ import urllib.request
 # Kept deliberately short — enough to avoid a single point of failure without
 # multiplying latency on the hot heartbeat path.
 IP_ECHO_SOURCES: list[tuple[str, str]] = [
-    ("cloudflare-trace", "https://1.1.1.1/cdn-cgi/trace"),
+    ("cloudflare-trace", "https://1.1.1.1/cdn-cgi/trace"),  # noqa: S1313
     ("icanhazip", "https://icanhazip.com"),
     ("ipify", "https://api.ipify.org"),
 ]

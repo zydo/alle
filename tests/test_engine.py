@@ -1,8 +1,11 @@
-"""Engine config assembly + reconcile behaviour, with the sing-box process
-stubbed out (pure logic, no downloads, no tunnels)."""
+"""Engine: config assembly, reconcile, and heartbeat probing — with the sing-box
+process stubbed out (pure logic, no downloads, no tunnels)."""
 
 from __future__ import annotations
 
+from typing import cast
+
+from alle import applog, singbox
 from alle.engine import Engine
 from alle.state import Store
 
@@ -42,16 +45,24 @@ def test_each_channel_becomes_an_inbound_and_endpoint():
     )
     config, errors = Engine(store)._build_config()
     assert errors == {}
-    assert [i["tag"] for i in config["inbounds"]] == ["in-nordvpn-uk_1", "in-nordvpn-us_1"]
-    assert [e["tag"] for e in config["endpoints"]] == ["out-nordvpn-uk_1", "out-nordvpn-us_1"]
-    assert {"inbound": ["in-nordvpn-us_1"], "outbound": "out-nordvpn-us_1"} in config["route"][
-        "rules"
+    assert [i["tag"] for i in config["inbounds"]] == [
+        "in-nordvpn-uk_1",
+        "in-nordvpn-us_1",
     ]
+    assert [e["tag"] for e in config["endpoints"]] == [
+        "out-nordvpn-uk_1",
+        "out-nordvpn-us_1",
+    ]
+    assert {"inbound": ["in-nordvpn-us_1"], "outbound": "out-nordvpn-us_1"} in config[
+        "route"
+    ]["rules"]
     assert config["route"]["final"] == "direct"
 
 
 def test_inbound_and_endpoint_shape():
-    config, _ = Engine(_store(("nordvpn", "us_1", 9000, "US", "", dict(WG))))._build_config()
+    config, _ = Engine(
+        _store(("nordvpn", "us_1", 9000, "US", "", dict(WG)))
+    )._build_config()
     inb = config["inbounds"][0]
     assert inb == {
         "type": "mixed",
@@ -76,7 +87,9 @@ def test_preshared_key_passed_through_when_present():
 
 
 def test_malformed_channel_omitted_and_reported():
-    store = _store(("nordvpn", "us_1", 8888, "US", "", {}))  # no usable WireGuard config
+    store = _store(
+        ("nordvpn", "us_1", 8888, "US", "", {})
+    )  # no usable WireGuard config
     config, errors = Engine(store)._build_config()
     assert config["inbounds"] == []
     assert "nordvpn/us_1" in errors and "no usable" in errors["nordvpn/us_1"]
@@ -98,10 +111,35 @@ class _FakeRunner:
 
 def test_reconcile_pushes_config():
     eng = Engine(_store(("nordvpn", "us_1", 8888, "US", "", dict(WG))))
-    eng.runner = _FakeRunner()
+    runner = _FakeRunner()
+    eng.runner = cast(singbox.Runner, runner)
     assert eng.reconcile() == {}
-    assert eng.runner.applied
-    assert [i["tag"] for i in eng.runner.applied[0]["inbounds"]] == ["in-nordvpn-us_1"]
+    assert runner.applied
+    assert [i["tag"] for i in runner.applied[0]["inbounds"]] == ["in-nordvpn-us_1"]
+
+
+def test_probe_all_logs_channel_details(monkeypatch):
+    store = Store.load()
+    store.add_provider("nordvpn")
+    ch = store.add_channel("nordvpn", "US", "", dict(WG))
+    eng = Engine(store)
+    runner = _FakeRunner()
+    runner._running = True
+    eng.runner = cast(singbox.Runner, runner)
+    monkeypatch.setattr(
+        "alle.engine.probe.probe_channel",
+        lambda port: {
+            "ok": True,
+            "at": 1,
+            "latency_ms": 12.3,
+            "ip": "1.2.3.4",
+            "error": None,
+        },
+    )
+    eng.probe_all()
+    log = applog.tail()
+    assert f"nordvpn/{ch.id} ok 12.3ms ip=1.2.3.4" in log
+    assert "1 healthy" in log
 
 
 def test_probe_all_records_stopped_when_not_running():
@@ -109,8 +147,10 @@ def test_probe_all_records_stopped_when_not_running():
     store.add_provider("nordvpn")
     ch = store.add_channel("nordvpn", "US", "", dict(WG))
     eng = Engine(store)
-    eng.runner = _FakeRunner()  # not running
+    eng.runner = cast(singbox.Runner, _FakeRunner())  # not running
     out = eng.probe_all()
     assert out[f"nordvpn/{ch.id}"]["error"] == "stopped"
     # persisted to state
-    assert Store.load().get_channel("nordvpn", ch.id).probe["error"] == "stopped"
+    persisted = Store.load().get_channel("nordvpn", ch.id)
+    assert persisted is not None
+    assert persisted.probe["error"] == "stopped"

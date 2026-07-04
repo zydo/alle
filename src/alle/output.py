@@ -10,6 +10,8 @@ import json
 import time
 from typing import Any
 
+from alle.providers import display_name
+
 
 def json_text(data: Any) -> str:
     return json.dumps(data, indent=2, ensure_ascii=False, default=_json_default)
@@ -19,6 +21,23 @@ def _json_default(value: Any) -> Any:
     if hasattr(value, "__dict__"):
         return value.__dict__
     return str(value)
+
+
+def _bytes(n: int) -> str:
+    """Human-readable byte size (1536 -> '1.5 KB'); base-1024 units."""
+    size = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def _mbps(bps: float | None) -> str:
+    """Bits-per-second to a human 'NN.N Mbps' (or '-' when the test failed)."""
+    if not bps:
+        return "-"
+    return f"{bps / 1e6:.1f} Mbps"
 
 
 def _ago(epoch: int) -> str:
@@ -36,31 +55,57 @@ def _ago(epoch: int) -> str:
     return f"{hours // 24}d ago"
 
 
+def _table(headers: list[str], rows: list[list[str]]) -> list[str]:
+    """Render a left-aligned table as ``[header, dash-separator, *rows]``.
+
+    Column widths fit the widest cell (or the header); columns are joined by two
+    spaces, and the separator underlines each column with dashes of its width —
+    the ``header`` / ``------`` / ``rows`` layout shared by every alle table.
+    """
+    n = len(headers)
+    widths = [len(headers[i]) for i in range(n)]
+    for r in rows:
+        for i in range(n):
+            widths[i] = max(widths[i], len(str(r[i])))
+
+    def line(cells) -> str:
+        return "  ".join(str(cells[i]).ljust(widths[i]) for i in range(n)).rstrip()
+
+    return [line(headers), "  ".join("-" * w for w in widths), *(line(r) for r in rows)]
+
+
 def providers_list(data: dict) -> str:
     providers = data["providers"]
     if not providers:
         return "No providers added yet. Add one:  alle providers add nordvpn"
-    return "\n".join(f"  {p['display_name']:20}  {p['credential']}".rstrip() for p in providers)
+    headers = ["PROVIDER", "TYPE", "DETAIL"]
+    rows = []
+    for p in providers:
+        if (
+            p.get("kind") == "config"
+        ):  # portal .conf providers: show how many are imported
+            n = p.get("channel_count", 0)
+            detail = f"{n} .conf file" + ("" if n == 1 else "s")
+            kind = "config"
+        else:  # token/API providers: show the masked credential
+            detail = p.get("credential", "") or "(no credential)"
+            kind = "token"
+        rows.append([p["display_name"], kind, detail])
+    return "\n".join(_table(headers, rows))
 
 
 def channels_list(data: dict) -> str:
-    providers = data["providers"]
-    if not providers:
+    if not data["providers"]:
         return "No providers added yet. Add one:  alle providers add nordvpn"
-
     channels = data["channels"]
-    cols = ("name", "port", "country", "city")
-    width = {c: max((len(str(r[c])) for r in channels), default=0) for c in cols}
-    lines: list[str] = []
-    for provider in providers:
-        lines.append(f"{provider}:")
-        rows = [r for r in channels if r["provider"] == provider]
-        if not rows:
-            lines.append("    (no channels)")
-            continue
-        for row in rows:
-            lines.append(("    " + "  ".join(str(row[c]).ljust(width[c]) for c in cols)).rstrip())
-    return "\n".join(lines)
+    if not channels:
+        return 'No channels yet. Add one:  alle channels add nordvpn --country "United States"'
+    headers = ["PROVIDER", "NAME", "PORT", "COUNTRY", "CITY"]
+    rows = [
+        [display_name(c["provider"]), c["name"], c["port"], c["country"], c["city"]]
+        for c in channels
+    ]
+    return "\n".join(_table(headers, rows))
 
 
 def locations(data: dict) -> str:
@@ -74,16 +119,139 @@ def locations(data: dict) -> str:
 
     provider = data["provider"]
     if "country" in data:
+        if not data.get("matched", True):
+            return (
+                f"{data['country']!r} is not a {data['display_name']} country. "
+                f"See the full list: alle locations {provider}"
+            )
         lines = [f"{provider} cities in {data['country']} ({len(data['cities'])}):"]
         lines.extend(f"  {city}" for city in data["cities"])
         return "\n".join(lines)
 
-    lines = [f"{provider}: {data['country_count']} countries, {data['city_count']} cities"]
+    lines = [
+        f"{provider}: {data['country_count']} countries, {data['city_count']} cities"
+    ]
     for item in data["countries"]:
         cities = item["cities"]
         lines.append(f"  {item['country']}" + (f"  ({len(cities)})" if cities else ""))
         lines.extend(f"      {city}" for city in cities)
     return "\n".join(lines)
+
+
+def metrics(data: dict) -> str:
+    channels = data["channels"]
+    if not channels:
+        if data.get("filter"):
+            return f"No channel named {data['filter']!r}. See: alle channels ls"
+        return "No channels configured. Add one:  alle channels add nordvpn --country …"
+
+    headers = [
+        "PROVIDER",
+        "NAME",
+        "PORT",
+        "COUNTRY",
+        "CITY",
+        "SENT",
+        "RECV",
+        "TOTAL",
+        "SEEN",
+    ]
+    rows = [
+        [
+            display_name(c["provider"]),
+            c["name"],
+            c["port"],
+            c["country"],
+            c["city"],
+            _bytes(c["sent"]),
+            _bytes(c["received"]),
+            _bytes(c["total"]),
+            _ago(c["updated_at"]),
+        ]
+        for c in channels
+    ]
+    return "\n".join(_table(headers, rows))
+
+
+def _latency(ms: float | int | None) -> str:
+    return f"{ms}ms" if ms is not None else "-"
+
+
+def _state_cell(c: dict) -> str:
+    """Health with the failure reason folded in, mirroring ``alle status``:
+    ``Healthy`` when the probe succeeded, ``Stopped`` when the runtime is down,
+    otherwise the probe's error reason (capitalized), falling back to ``Failed``."""
+    if c["healthy"]:
+        return "Healthy"
+    err = c.get("error") or ""
+    if err == "stopped":
+        return "Stopped"
+    return (err[:1].upper() + err[1:]) if err else "Failed"
+
+
+def test_result(data: dict) -> str:
+    channels = data["channels"]
+    if not channels:
+        if data.get("filter"):
+            return f"No channel named {data['filter']!r}. See: alle channels ls"
+        return "No channels configured. Add one:  alle channels add nordvpn --country …"
+
+    if data.get("speed"):
+        headers = [
+            "PROVIDER",
+            "NAME",
+            "PORT",
+            "COUNTRY",
+            "CITY",
+            "STATE",
+            "LATENCY",
+            "EXIT IP",
+            "DOWNLOAD",
+            "UPLOAD",
+        ]
+        rows = []
+        for c in channels:
+            speed = c.get("speed_result") or {}
+            rows.append(
+                [
+                    display_name(c["provider"]),
+                    c["name"],
+                    c["port"],
+                    c["country"],
+                    c["city"],
+                    _state_cell(c),
+                    _latency(c.get("latency_ms")),
+                    c.get("ip") or "-",
+                    _mbps(speed.get("download_bps")),
+                    _mbps(speed.get("upload_bps")),
+                ]
+            )
+        return "\n".join(_table(headers, rows))
+
+    headers = [
+        "PROVIDER",
+        "NAME",
+        "PORT",
+        "COUNTRY",
+        "CITY",
+        "STATE",
+        "LATENCY",
+        "EXIT IP",
+    ]
+    rows = [
+        [
+            display_name(c["provider"]),
+            c["name"],
+            c["port"],
+            c["country"],
+            c["city"],
+            _state_cell(c),
+            _latency(c.get("latency_ms")),
+            c.get("ip") or "-",
+        ]
+        for c in channels
+    ]
+    return "\n".join(_table(headers, rows))
 
 
 def status(snapshot: dict) -> str:
@@ -104,28 +272,34 @@ def status(snapshot: dict) -> str:
         )
         return "\n".join(lines)
 
+    headers = [
+        "PROVIDER",
+        "NAME",
+        "PORT",
+        "COUNTRY",
+        "CITY",
+        "STATE",
+        "AGO",
+        "LATENCY",
+        "IP",
+    ]
     rows = []
     for channel in channels:
-        latency = f"{channel['latency_ms']}ms" if channel["latency_ms"] is not None else "-"
-        ip = channel["ip"] or "-"
+        latency = (
+            f"{channel['latency_ms']}ms" if channel["latency_ms"] is not None else "-"
+        )
         probe = channel.get("probe") or {}
         rows.append(
-            {
-                "provider": channel["provider"],
-                "name": channel["name"],
-                "port": channel["port"],
-                "country": channel["country"],
-                "city": channel["city"],
-                "state": channel["state"],
-                "ago": _ago(probe.get("at", 0)) if probe else "-",
-                "lat": latency,
-                "ip": ip,
-            }
+            [
+                display_name(channel["provider"]),
+                channel["name"],
+                channel["port"],
+                channel["country"],
+                channel["city"],
+                channel["state"],
+                _ago(probe.get("at", 0)) if probe else "-",
+                latency,
+                channel["ip"] or "-",
+            ]
         )
-    cols = ("name", "port", "country", "city", "state", "ago", "lat", "ip")
-    width = {c: max((len(str(r[c])) for r in rows), default=0) for c in cols}
-    for provider in sorted({r["provider"] for r in rows}):
-        lines.append(f"{provider}:")
-        for row in (r for r in rows if r["provider"] == provider):
-            lines.append(("    " + "  ".join(str(row[c]).ljust(width[c]) for c in cols)).rstrip())
-    return "\n".join(lines)
+    return "\n".join(lines + _table(headers, rows))

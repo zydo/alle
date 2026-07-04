@@ -23,11 +23,11 @@ def test_set_get_remove_roundtrip():
 
 def test_multiple_providers_are_independent():
     credentials.set_("nordvpn", {"token": "t"})
-    credentials.set_("pia", {"username": "p1", "password": "secret"})
-    assert credentials.configured() == ["nordvpn", "pia"]
+    credentials.set_("protonvpn", {"username": "p1", "password": "secret"})
+    assert credentials.configured() == ["nordvpn", "protonvpn"]
     credentials.remove("nordvpn")
-    assert credentials.configured() == ["pia"]
-    assert credentials.get("pia") == {"username": "p1", "password": "secret"}
+    assert credentials.configured() == ["protonvpn"]
+    assert credentials.get("protonvpn") == {"username": "p1", "password": "secret"}
 
 
 def test_credentials_file_is_private():

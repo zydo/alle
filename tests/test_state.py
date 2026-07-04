@@ -90,12 +90,35 @@ def test_remove_provider_cascades_channels():
     assert not Store.load().has_provider("nordvpn")
 
 
+def test_upsert_reimport_clears_reconnect_giveup():
+    store = Store.load()
+    store.add_provider("protonvpn")
+    ch, created = store.upsert_channel(
+        "protonvpn", "wg-US-CA-842", "United States", "CA", dict(WG)
+    )
+    assert created is True
+    store.set_reconnect("protonvpn", ch.id, {"failed": True, "attempts": 5})
+
+    fresh = dict(WG, private_key="ROTATED=")
+    again, created = store.upsert_channel(
+        "protonvpn", "wg-US-CA-842", "United States", "CA", fresh
+    )
+    assert created is False
+    assert again.port == ch.port  # identity (id + port) is stable across re-imports
+    assert (
+        again.reconnect == {}
+    )  # re-import is human intervention: give-up state dropped
+
+
 def test_set_probe_round_trips():
     store = Store.load()
     store.add_provider("nordvpn")
     ch = store.add_channel("nordvpn", "US", "", dict(WG))
-    store.set_probe("nordvpn", ch.id, {"ok": True, "ip": "1.2.3.4", "latency_ms": 80, "at": 123})
+    store.set_probe(
+        "nordvpn", ch.id, {"ok": True, "ip": "1.2.3.4", "latency_ms": 80, "at": 123}
+    )
     got = Store.load().get_channel("nordvpn", ch.id)
+    assert got is not None
     assert got.probe["ok"] is True and got.probe["ip"] == "1.2.3.4"
 
 
@@ -126,7 +149,9 @@ def test_config_signature_ignores_probe_results():
 
     before = config_signature(_read_raw())
     store.set_probe("nordvpn", ch.id, {"ok": True, "ip": "9.9.9.9", "at": 1})
-    assert config_signature(_read_raw()) == before  # probe writes don't trigger reconcile
+    assert (
+        config_signature(_read_raw()) == before
+    )  # probe writes don't trigger reconcile
 
     store.add_channel("nordvpn", "UK", "", dict(WG))
     assert config_signature(_read_raw()) != before  # a new channel does

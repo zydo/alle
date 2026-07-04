@@ -3,11 +3,11 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "alle"
+name = "alle-proxy"
 version = "0.1.0"
 description = "The unofficial, universal VPN client: manage multiple VPN providers and locations in one place through a single sing-box process, with rule-based routing planned. CLI today; web UI and menu-bar GUI planned."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "zydo" }]
@@ -19,7 +19,7 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Topic :: System :: Networking",
 ]
-dependencies = ["pyyaml>=6.0"]
+dependencies = ["pyyaml>=6.0", "pycountry>=23.12"]
 
 [project.urls]
 Homepage = "https://github.com/zydo/alle"
@@ -28,20 +28,19 @@ Issues = "https://github.com/zydo/alle/issues"
 [project.scripts]
 alle = "alle.cli:main"
 alled = "alle.daemon:run_applier"
-alle-tray = "alle.tray.app:main"
-
-[project.optional-dependencies]
-tray = ["PySide6>=6.7"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/alle"]
 
 [tool.ruff]
-line-length = 100
-target-version = "py39"
+line-length = 88
+target-version = "py310"
 
 [dependency-groups]
-dev = ["ruff>=0.6", "pytest>=8.0"]
+dev = ["ruff>=0.6", "pytest>=8.0", "pytest-cov>=5.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["src/alle"]

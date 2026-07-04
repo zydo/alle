@@ -8,7 +8,7 @@ import pytest
 from alle import wgconf
 
 SAMPLE = """
-# Mullvad WireGuard configuration
+# WireGuard configuration
 [Interface]
 PrivateKey = aMf0PRIVATEkeyVALUE0000000000000000000000000=
 Address = 10.64.0.2/32,fc00:bbbb::2/128

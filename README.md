@@ -2,214 +2,265 @@
   <img src="assets/wordmark.svg" alt="alle" width="320">
 </p>
 
+<p align="center">
+  <a href="https://github.com/zydo/alle/actions/workflows/ci.yml"><img src="https://github.com/zydo/alle/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pypi.org/project/alle-proxy/"><img src="https://img.shields.io/pypi/v/alle-proxy.svg" alt="PyPI"></a>
+</p>
+
 # alle
 
-**alle is an unofficial, universal VPN client.** It lets you run multiple VPN
-locations side by side, each exposed as a local HTTP/SOCKS proxy port, all backed
-by one local sing-box process.
+An unofficial but more powerful VPN client for multiple VPN providers.
+
+# Why `alle`
+
+Most VPN clients are built around one global idea: connect this device to a single
+VPN server, then send everything through it until you disconnect or switch.
+
+That is not enough when different resources need to appear from different regions
+— a geo-fenced stream, a bank that blocks foreign IPs, a region-locked test
+environment. Switching origins means disconnecting from one server and reconnecting
+to another, and the official client on one machine usually cannot keep several
+locations active at once anyway.
+
+`alle` keeps multiple VPN exits live at the same time, from one provider or mixed
+across several. Say you want a US exit, a UK exit, and a Japan exit at once —
+NordVPN for the US and Japan, ProtonVPN for the UK:
 
 ```text
-127.0.0.1:8888  ->  sing-box  ->  VPN exit in the US
-127.0.0.1:8889  ->  sing-box  ->  VPN exit in the UK
+   streaming + admin   ──►  `alle`  ──►  United States   (NordVPN)
+   test runner         ──►  `alle`  ──►  Japan           (NordVPN)
+   bank login          ──►  `alle`  ──►  United Kingdom  (Proton VPN)
 ```
 
-alle has three planned user surfaces, each owning a distinct capability tier:
+Each app points at the exit it needs; they run concurrently and independently, so
+opening the bank never disturbs the stream.
 
-- **CLI** — the primary, complete surface. Channel management, rule-based routing, and
-  per-channel metrics. Channels are accessible as individual proxy ports; an optional
-  router entrypoint aggregates them behind configurable rules. No OS-level VPN.
-- **Web UI** — same channel/routing/metrics capabilities as the CLI, with a visual
-  routing rule editor. Does not set up an OS-level VPN profile.
-- **Desktop companion** (macOS, Windows, Linux) — channel management plus **OS-level
-  VPN**: configures a system network profile so all system traffic routes through
-  sing-box without per-app proxy setup.
+In short: not one global location you keep switching, but several exits alive at
+once, each used where it is needed.
 
-All three surfaces are clients of the same core engine; none owns separate state.
+## What `alle` does
+
+`alle` runs multiple VPN exits side by side. Each exit is exposed as its own
+local HTTP+SOCKS proxy on `127.0.0.1:<port>`. A planned single HTTP+SOCKS entry
+point will route traffic by rule to a VPN exit or to direct outbound with no
+proxy. Instead of changing your whole machine's VPN location, you point each app,
+browser profile, script, or test job at the path it needs.
+
+Under the hood, `alle` manages one
+[`sing-box`](https://github.com/SagerNet/sing-box) process. Each channel becomes
+one local proxy inbound routed through one WireGuard VPN peer. Channels can come
+from different providers, so a NordVPN exit and a Proton VPN `.conf` import can
+run at the same time.
 
 ## Current status
 
-- Functional provider: **NordVPN** (token/API archetype, end-to-end).
-- In progress: **ProtonVPN** `.conf` import (config/portal archetype).
-- Additional providers (Mullvad, IVPN, PIA, …) are post-MVP.
-- Runtime: one pinned, checksum-verified upstream `sing-box` binary, downloaded on
-  demand into `~/.alle/bin/`.
-- Platform scope today: macOS and Linux on mainstream amd64/arm64. Windows support
-  is planned but not claimed yet.
-- No Docker, no OpenVPN/IKEv2, no unencrypted SOCKS5 provider mode.
+`alle` is usable today as a CLI-first client for per-app/per-workflow VPN exits.
 
-## Install and run
+**Providers**
 
-```bash
-# run without installing
-uvx alle --help
+| Provider   | Support                                                                   |
+| ---------- | ------------------------------------------------------------------------- |
+| NordVPN    | Token/API setup, location selection, automatic WireGuard channel creation |
+| Proton VPN | WireGuard `.conf` import                                                  |
 
-# install as a tool
-uv tool install alle
+**Platforms**
 
-# from a checkout
-uv sync
-uv run alle --help
-```
+| Platform | Support   |
+| -------- | --------- |
+| macOS    | Supported |
+| Linux    | Supported |
+| Windows  | Planned   |
 
-Base installs are CLI-only. The optional tray skeleton is intentionally separate:
+**Features**
 
-```bash
-pip install "alle[tray]"
-# or from a checkout:
-uv run alle-tray
-```
+| Phase             | Status                                                                 |
+| ----------------- | ---------------------------------------------------------------------- |
+| Core CLI          | Providers, channels, per-channel proxies, status, tests, logs, metrics |
+| Routing           | Planned                                                                |
+| Web UI            | Planned                                                                |
+| Desktop companion | Planned                                                                |
+| Distribution      | PyPI CLI package; native installers planned                            |
 
-## Concepts
+## Install
 
-- **Provider** — a VPN service account added to alle, such as `nordvpn`.
-- **Channel** — one VPN location under a provider, exposed as a local proxy on
-  `127.0.0.1:<port>`. The CLI and Web UI expose each channel as its own port for
-  explicit proxy use.
-- **Router entrypoint** *(planned, Phase 2)* — a single local port that routes traffic
-  to the right channel via configurable rules (domain, CIDR, etc.). Individual channel
-  ports remain accessible alongside the router. Managed via `alle router` in the CLI.
-- **Metrics** *(planned, Phase 1 completion)* — per-channel cumulative sent/received
-  byte totals, accessible via `alle metrics [<channel>] [--json]`.
-- **OS-level VPN** *(Desktop companion, planned)* — a system network profile that
-  routes all system traffic into sing-box without per-app proxy configuration.
-- **alled** — the local background daemon that reconciles state into sing-box config
-  and heartbeat-probes channels. The `alled` console script runs the daemon body; the
-  hidden `alle applier` command remains for compatibility.
+`alle` requires Python 3.10 or newer.
 
-WireGuard is connectionless, so alle does not model channels as connected or
-disconnected. A channel exists in config; its displayed health comes from the most
-recent background probe.
-
-## CLI reference
-
-All examples below may be run as `uv run alle ...` from a checkout.
+With `pip`:
 
 ```bash
-# providers
-alle providers add <name>
-alle providers ls [--json]
-alle providers rm <name> [-y]
-
-# channels
-alle channels add <name> --country "United States" [--city "San Francisco"]
-alle channels add <name> --config /path/to/wireguard.conf   # stub; not yet functional
-alle channels ls [--json]
-alle channels rm <name> --channel <channel_name>
-
-# locations
-alle locations <name> [--refresh] [--json]
-alle locations <name> --country "United States" [--json]
-
-# lifecycle and inspection
-alle status [--json]
-alle start
-alle stop
-alle restart
-alle test
-alle logs [-f] [-n N]
+python -m pip install alle-proxy
 ```
 
-Human text is for terminals. `--json` on read commands is the stable
-machine-readable surface for scripts and future clients.
+With `pipx`:
+
+```bash
+pipx install alle-proxy
+```
+
+With `uv` as an installed tool:
+
+```bash
+uv tool install alle-proxy
+```
+
+Or run it directly with `uvx`:
+
+```bash
+uvx --from alle-proxy alle --help
+```
+
+After installation:
+
+```bash
+alle version
+alle --help
+```
 
 ## Quick start
 
+Add a provider, create a channel, start the runtime, then use the channel's local
+proxy port.
+
 ```bash
 alle providers add nordvpn
-alle channels add nordvpn --country "United States" --city "San Francisco"
+alle channels add nordvpn --country "United States"
 alle start
-alle status
+alle channels ls
+```
 
-curl -x http://127.0.0.1:8888 https://ifconfig.me
+`alle channels ls` prints the local proxy port for each channel:
+
+```text
+PROVIDER  NAME             PORT    COUNTRY        CITY
+--------  ---------------  ------  -------------  ----------
+NordVPN   united_states_1  :53124  United States  (Any City)
+```
+
+Use that port from any tool or app that supports an HTTP or SOCKS proxy:
+
+```bash
+curl -x http://127.0.0.1:53124 https://api.ipify.org
+```
+
+Check health and traffic:
+
+```bash
+alle status
 alle test
+alle metrics
+```
+
+**Provider setup**
+
+`alle` supports two provider setup styles today:
+
+**NordVPN** uses an access token:
+
+```bash
+alle providers add nordvpn
+alle locations nordvpn
+alle locations nordvpn --country "United States"
+alle channels add nordvpn --country "United States" --city "Seattle"
+```
+
+**Proton VPN** uses WireGuard config files downloaded from Proton:
+
+```bash
+alle providers add protonvpn
+alle channels add protonvpn --config ~/Downloads/wg-US-CA-842.conf
+```
+
+Re-importing the same `.conf` file updates that channel in place, keeping the
+same channel id and local port.
+
+**Common commands**
+
+Useful commands after setup:
+
+```bash
+alle providers ls
+alle channels ls
+alle status
+alle test
+alle metrics
+alle logs
 alle stop
 ```
 
-Adding or removing providers/channels updates `state.json`; the daemon applies the
-change automatically. `start`, `stop`, and `restart` control the local runtime.
-
-## Providers
-
-**NordVPN** and **ProtonVPN** are the two MVP targets across all development phases —
-not just an initial step. They represent the two archetypes that cover the
-implementation space of nearly every commercial VPN provider:
-
-| Provider | Archetype | Status |
-| --- | --- | --- |
-| NordVPN | Token/API — credential + automatic server resolution | implemented |
-| ProtonVPN | Config — import a WireGuard `.conf` downloaded from the portal | in progress |
-
-Additional providers (Mullvad, IVPN, PIA, …) are **post-MVP**. Each is a variant of
-one of the two archetypes and can be added in parallel or after the MVP is complete.
-
-Token providers prompt for credentials and store them in `credentials.yaml`.
-Config providers require no credential — you download a `.conf` from the provider
-portal and pass it to `alle channels add <provider> --config <file>`.
-
-## State files
-
-Everything lives under `~/.alle/` unless `$ALLE_HOME` is set:
-
-- `state.json` — providers, channels, WireGuard parameters, ports, latest probe
-  results; written `0600`.
-- `credentials.yaml` — provider credentials; written `0600`.
-- `providers/*.json` — cached provider location lists.
-- `singbox.json` — generated sing-box config; written read-only (`0400`).
-- `bin/sing-box@<version>` — pinned, checksum-verified sing-box binary.
-- `alle.log` — alle operation log.
-- `applier.pid` / `singbox.pid` and related runtime files while running.
-
-Use `ALLE_HOME=/tmp/alle-test uv run alle ...` for hermetic manual testing.
-
-## Architecture
-
-```text
-alle.service  (shared application operations)
-    |
-    +-- state.Store / credentials
-    +-- providers / locations
-    +-- engine.Engine
-    +-- daemon lifecycle
-    +-- singbox.Runner
-
-alle.cli      -> parses args, prompts, renders text/JSON   [channels + routing + metrics]
-alle-tray     -> optional PySide6 client skeleton
-alled         -> persistent local service (+ future HTTP control API)
-Web UI        -> planned: visual UI over same core (channels, routing rules, metrics)
-Desktop companion -> planned: channel management + OS-level VPN setup
-```
-
-The business layer does not print, prompt, call `sys.exit()`, or scrape CLI text.
-All surfaces are clients of the same core; none should accumulate business logic.
-
-## Roadmap
-
-- **Phase 1 (in progress):** Core + CLI fully functional — implement ProtonVPN `.conf`
-  import and add `alle metrics` per-channel bandwidth tracking to complete this phase.
-- **Phase 2:** Routing in core + CLI — `alle router` commands, rule-based entrypoint
-  port, individual channel ports remain accessible.
-- **Phase 3:** User-level system daemon — `alle daemon install/uninstall` for macOS
-  (LaunchAgent) and Linux (`systemd --user`); sing-box pre-downloaded at install time.
-- **Phase 4:** Web UI — visual channel management and routing rule editor; no OS VPN.
-- **Phase 5:** macOS desktop companion — menu-bar + OS-level VPN profile.
-- **Phase 6:** Windows desktop companion — system tray + OS VPN.
-- **Phase 7:** Linux desktop companion — tray/fallback window + OS VPN.
-- **Phase 8:** Distribution — PyPI (CLI-only), Homebrew (CLI + desktop extras), GitHub
-  Releases (pre-built binaries with sing-box bundled); CI and publish workflows
-  automated via GitHub Actions.
-
-## Development
+Most read commands support `--json` for scripts:
 
 ```bash
-uv run ruff check
-uv run pytest -q
-ALLE_HOME="$(mktemp -d)" uv run alle status
+alle status --json
+alle channels ls --json
+alle metrics --json
 ```
 
-During feature work, test the core and CLI by default. GUI/Web UI testing belongs to
-GUI/Web UI tasks.
+For the complete command reference, see the
+[CLI Reference](docs/cli-reference.md).
+
+## Rule-based routing
+
+To be implemented.
+
+## How it works
+
+- `alle` keeps its local state under `~/.alle/`, or under `$ALLE_HOME` when that
+  environment variable is set. This includes providers, channels, credentials,
+  metrics, generated config, logs, and runtime files.
+
+- `alle` manages one [`sing-box`](https://github.com/SagerNet/sing-box) process
+  instead of starting one VPN process per channel. The generated config contains
+  one local HTTP+SOCKS inbound per channel.
+
+- Each channel routes to one WireGuard peer. NordVPN channels are created from
+  the provider API; Proton VPN channels are created by importing a WireGuard
+  `.conf` file. After creation, both behave the same way.
+
+- WireGuard is connectionless, so `alle` does not model channels as connected or
+  disconnected. A channel exists in config; its health comes from the latest
+  probe.
+
+- Local proxy ports are assigned by the OS and stored in state. Use
+  `alle channels ls` to see the current ports.
+
+- The background runtime applies state changes, keeps the `sing-box` process in
+  sync, probes channel health, and records per-channel traffic totals.
+
+- `alle` uses a pinned upstream `sing-box` release and verifies its checksum
+  before running it.
+
+## Security and privacy
+
+- Provider credentials and WireGuard private keys are stored locally under
+  `~/.alle/` or `$ALLE_HOME`.
+- Credential and state files are written with private file permissions where
+  supported by the OS.
+- `alle` does not read provider tokens from environment variables; credentials
+  are added explicitly with `alle providers add`.
+- `alle` downloads a pinned upstream `sing-box` release and verifies its checksum
+  before running it.
+- Local proxy ports bind to loopback. Traffic only uses a VPN exit when an app is
+  pointed at one of those proxies.
+
+## Roadmap and non-goals
+
+Planned next steps:
+
+- Rule-based routing through a single local HTTP+SOCKS entry point.
+- More WireGuard-capable VPN providers. See
+  [VPN Provider Research](docs/vpn-provider-research.md).
+- Web UI for managing channels and routing rules.
+- Desktop companion with OS-level VPN integration.
+- Windows support and broader distribution.
+
+Non-goals:
+
+- OpenVPN or IKEv2/IPsec support.
+- VPN providers without usable WireGuard support, such as ExpressVPN, HideMyAss,
+  Perfect Privacy, Privado, SlickVPN, VPN.ac/VPNSecure, and Giganews.
+- SOCKS5-only or unencrypted proxy providers.
+- Bundling `sing-box` inside the Python package.
 
 ## License
 
-MIT; see [LICENSE](LICENSE). alle downloads and runs the unmodified upstream
-`sing-box` binary as a separate process; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+MIT

@@ -21,6 +21,32 @@ from alle.providers import ProviderError
 from alle.state import Channel, Store
 
 
+def _probe_detail(ref: str, result: dict) -> str:
+    if result.get("ok"):
+        bits = [ref, "ok"]
+        if result.get("latency_ms") is not None:
+            bits.append(f"{result['latency_ms']}ms")
+        if result.get("ip"):
+            bits.append(f"ip={result['ip']}")
+        return " ".join(bits)
+
+    state = "stopped" if result.get("error") == "stopped" else "failed"
+    detail = f"{ref} {state}"
+    if result.get("error") and result.get("error") != state:
+        detail += f" {result['error']}"
+    return detail
+
+
+def _probe_log(channels: list[Channel], results: dict[str, dict]) -> str:
+    healthy = sum(1 for result in results.values() if result.get("ok"))
+    failed = len(results) - healthy
+    summary = f"probe: {len(channels)} channel(s), {healthy} healthy, {failed} failed"
+    if results and all(r.get("error") == "stopped" for r in results.values()):
+        summary = f"probe: sing-box stopped; {len(channels)} channel(s)"
+    details = "; ".join(_probe_detail(ref, results[ref]) for ref in sorted(results))
+    return f"{summary}: {details}" if details else summary
+
+
 class Engine:
     def __init__(self, store: Store):
         self.store = store
@@ -31,7 +57,9 @@ class Engine:
     def _endpoint(self, ch: Channel) -> dict:
         wg = ch.wg
         if not wg or "peer" not in wg:
-            raise ProviderError(f"channel {ch.provider}/{ch.id} has no usable WireGuard config.")
+            raise ProviderError(
+                f"channel {ch.provider}/{ch.id} has no usable WireGuard config."
+            )
         peer = wg["peer"]
         wg_peer = {
             "address": peer["endpoint_host"],
@@ -88,9 +116,13 @@ class Engine:
         """
         config, errors = self._build_config()
         self._errors = errors
+        for ref, err in sorted(errors.items()):
+            applog.log(f"reconcile: left {ref} out of the config: {err}")
         changed = self.runner.apply(config)
         if changed:
-            applog.log(f"reconciled sing-box: {len(config['inbounds'])} channel(s) live")
+            applog.log(
+                f"reconciled sing-box: {len(config['inbounds'])} channel(s) live"
+            )
         return errors
 
     # ---- probing -----------------------------------------------------------
@@ -117,5 +149,5 @@ class Engine:
                 result = probe.probe_channel(ch.port)
             self.store.set_probe(ch.provider, ch.id, result)
             out[ref] = result
-        applog.log(f"probed {len(channels)} channel(s)")
+        applog.log(_probe_log(channels, out))
         return out

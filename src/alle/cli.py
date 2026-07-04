@@ -11,15 +11,25 @@ process match it, and heartbeat-probes every channel — so adding or removing a
 channel is enough; there is no separate "apply" step. WireGuard is
 connectionless, so there is no enable/disable: a channel is "active" only if its
 latest probe succeeded.
+
+Read commands accept ``--json`` for **shell / cross-language scripting** (jq,
+monitoring hooks, CI): it is a direct serialization of the ``alle.service`` return
+value, not a scrape of the human text. It is deliberately *not* the programmatic
+interface for alle's own components — the Web UI, desktop companion, and any typed
+client use ``alle.service`` (and later the ``alled`` control API) directly rather
+than shelling out to the CLI and parsing its output.
 """
 
 from __future__ import annotations
 
 import argparse
 import getpass
+import itertools
 import sys
+import threading
+import time
 
-from alle import applog, daemon, output, service
+from alle import __version__, applog, daemon, output, service
 from alle.providers import (
     ProviderError,
     auth_fields,
@@ -27,6 +37,7 @@ from alle.providers import (
     display_name,
     kind,
     known,
+    match,
 )
 from alle.state import Store
 
@@ -49,11 +60,14 @@ def _read_secret_chars(read_char, echo) -> str:
                 echo("\b \b")
             continue
         if ch == "\x1b":  # escape sequence (bracketed paste, arrow keys, ...)
-            if read_char() == "[":
+            nxt = read_char()
+            if nxt == "[":  # CSI: consume through its final byte
                 while True:
                     c = read_char()
                     if c == "" or c.isalpha() or c == "~":
                         break
+            elif nxt == "O":  # SS3 (F1–F4, arrows in application mode): one final byte
+                read_char()
             continue
         buf.append(ch)
         echo("*")
@@ -141,7 +155,9 @@ def cmd_providers_add(args):
             f"  Note: adding channels under {display_name(provider)} isn't implemented "
             "yet — credential stored for when it is."
         )
-    print(f"Added provider {result['display_name']} (credential {result['credential_preview']}).")
+    print(
+        f"Added provider {result['display_name']} (credential {result['credential_preview']})."
+    )
 
 
 def cmd_providers_ls(args):
@@ -160,10 +176,13 @@ def cmd_providers_rm(args):
             f"{n} channel(s) AND its stored credential. You will need to re-add the "
             "provider (and re-enter the token) to use it again."
         )
-        if input("Type the provider name to confirm: ").strip().lower() != provider:
+        # Accept the key ("protonvpn") or the display name just shown ("Proton VPN").
+        if match(input("Type the provider name to confirm: ")) != provider:
             sys.exit("Aborted.")
     result = service.provider_remove(provider)
-    print(f"Removed {result['display_name']} and its {result['channels_removed']} channel(s).")
+    print(
+        f"Removed {result['display_name']} and its {result['channels_removed']} channel(s)."
+    )
 
 
 # ---- channels --------------------------------------------------------------
@@ -173,7 +192,15 @@ def cmd_channels_add(args):
     provider = _resolve_provider(args.provider)
     result = service.channel_add(provider, args.country, args.city, args.config)
     channel = result["channel"]
-    print(f"Added channel {channel.id} under {result['display_name']} on 127.0.0.1:{channel.port}.")
+    if result.get("imported_from"):
+        verb = "Updated" if result.get("updated") else "Imported"
+        source = f" from {result['imported_from']}"
+    else:
+        verb, source = "Added", ""
+    print(
+        f"{verb} channel {channel.id} under {result['display_name']}{source} "
+        f"on 127.0.0.1:{channel.port}."
+    )
     print("Applying… (see: alle status)")
 
 
@@ -209,11 +236,66 @@ def cmd_status(args):
 
 
 def cmd_test(args):
-    result = service.probe_all()
-    if not result["probed"]:
-        print("No channels to test.")
+    spinner = _Spinner("testing…") if args.speed and not args.json else None
+
+    def progress(row, phase):
+        if spinner is not None:
+            spinner.label = f"{row['provider']}/{row['name']}  {phase}…"
+
+    if spinner is not None:
+        with spinner:
+            result = service.test(
+                speed=args.speed, channel=args.channel, progress=progress
+            )
+    else:
+        result = service.test(speed=args.speed, channel=args.channel)
+
+    if args.json:
+        print(output.json_text(result))
         return
-    print(output.status(result["status"]))
+    print(output.test_result(result))
+
+
+def cmd_metrics(args):
+    _print_or_json(service.metrics_snapshot(args.channel), output.metrics, args.json)
+
+
+class _Spinner:
+    """A tiny stderr spinner for long, one-at-a-time work (the speed test).
+
+    Animates only on a real TTY; when stderr is redirected (pipe, CI) it stays
+    silent so captured output isn't polluted. ``label`` may be updated live to
+    reflect the current phase.
+    """
+
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, label: str):
+        self.label = label
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self):
+        if sys.stderr.isatty():
+            self._thread = threading.Thread(target=self._spin, daemon=True)
+            self._thread.start()
+        return self
+
+    def _spin(self):
+        for frame in itertools.cycle(self._FRAMES):
+            if self._stop.is_set():
+                break
+            sys.stderr.write(f"\r  {frame} {self.label}\033[K")
+            sys.stderr.flush()
+            time.sleep(0.1)
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        if self._thread:
+            self._thread.join()
+        if sys.stderr.isatty():
+            sys.stderr.write("\r\033[K")  # wipe the spinner line
+            sys.stderr.flush()
 
 
 # ---- start / stop / restart ------------------------------------------------
@@ -248,9 +330,16 @@ def cmd_restart(args):
 
 def cmd_logs(args):
     if args.follow:
-        applog.follow()
+        applog.follow(args.lines)
     else:
         print(service.logs_tail(args.lines))
+
+
+# ---- version ---------------------------------------------------------------
+
+
+def cmd_version(args):
+    print(__version__)
 
 
 # ---- applier (hidden) ------------------------------------------------------
@@ -285,8 +374,8 @@ def _show_help(parser: argparse.ArgumentParser):
 
 
 def _provider_help() -> str:
-    """Enumerate every recognised provider for argument help."""
-    return "provider name; one of: " + ", ".join(known())
+    """Enumerate the supported providers for argument help."""
+    return "supported provider; one of: " + ", ".join(known())
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -304,9 +393,13 @@ def build_parser() -> argparse.ArgumentParser:
     pls = pr_sub.add_parser("ls", help="list the providers you've added")
     pls.add_argument("--json", action="store_true", help="print machine-readable JSON")
     pls.set_defaults(func=cmd_providers_ls)
-    pd = pr_sub.add_parser("rm", help="remove a provider AND all its channels + credential")
+    pd = pr_sub.add_parser(
+        "rm", help="remove a provider AND all its channels + credential"
+    )
     pd.add_argument("provider", help=_provider_help())
-    pd.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
+    pd.add_argument(
+        "-y", "--yes", action="store_true", help="skip the confirmation prompt"
+    )
     pd.set_defaults(func=cmd_providers_rm)
 
     # channels
@@ -315,11 +408,17 @@ def build_parser() -> argparse.ArgumentParser:
     ch_sub = ch.add_subparsers(dest="channels_command")
     ca = ch_sub.add_parser("add", help="add a channel under a provider")
     ca.add_argument("provider", help=_provider_help())
-    ca.add_argument("--country", help="country (for API providers like nordvpn)")
-    ca.add_argument("--city", help="city (omit = any city in the country)")
-    ca.add_argument("--config", help="path to a WireGuard .conf (config-based providers)")
+    ca.add_argument("--country", help="country — API providers only (e.g. nordvpn)")
+    ca.add_argument("--city", help="city — API providers only (omit = any city)")
+    ca.add_argument(
+        "--config",
+        help="path to a WireGuard .conf — config providers only (e.g. protonvpn); "
+        "mutually exclusive with --country/--city",
+    )
     ca.set_defaults(func=cmd_channels_add)
-    cls = ch_sub.add_parser("ls", help="list configured channels by provider (no status)")
+    cls = ch_sub.add_parser(
+        "ls", help="list configured channels by provider (no status)"
+    )
     cls.add_argument("--json", action="store_true", help="print machine-readable JSON")
     cls.set_defaults(func=cmd_channels_ls)
     cr = ch_sub.add_parser("rm", help="remove a channel from a provider")
@@ -328,10 +427,14 @@ def build_parser() -> argparse.ArgumentParser:
     cr.set_defaults(func=cmd_channels_rm)
 
     # locations
-    lo = sub.add_parser("locations", help="list a provider's available countries/cities")
+    lo = sub.add_parser(
+        "locations", help="list a provider's available countries/cities"
+    )
     lo.add_argument("provider", help=_provider_help())
     lo.add_argument("--country", help="show cities for this country")
-    lo.add_argument("--refresh", action="store_true", help="force-refresh the location list")
+    lo.add_argument(
+        "--refresh", action="store_true", help="force-refresh the location list"
+    )
     lo.add_argument("--json", action="store_true", help="print machine-readable JSON")
     lo.set_defaults(func=cmd_locations)
 
@@ -345,18 +448,37 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("stop", help="stop sing-box (channels kept in config)").set_defaults(
         func=cmd_stop
     )
-    sub.add_parser("restart", help="stop then start (reload after upgrades/config)").set_defaults(
-        func=cmd_restart
+    sub.add_parser(
+        "restart", help="stop then start (reload after upgrades/config)"
+    ).set_defaults(func=cmd_restart)
+    te = sub.add_parser(
+        "test", help="probe channels now; optionally speed-test healthy ones"
     )
-    sub.add_parser("test", help="probe all channels now and print status").set_defaults(
-        func=cmd_test
+    te.add_argument(
+        "--speed", action="store_true", help="also run download/upload tests"
     )
+    te.add_argument("--channel", help="test only this channel (default: every channel)")
+    te.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    te.set_defaults(func=cmd_test)
+    me = sub.add_parser("metrics", help="show per-channel cumulative traffic totals")
+    me.add_argument(
+        "channel", nargs="?", help="filter to one channel by name (default: all)"
+    )
+    me.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    me.set_defaults(func=cmd_metrics)
     lg = sub.add_parser("logs", help="show alle's operation log")
     lg.add_argument("-f", "--follow", action="store_true", help="stream new log lines")
-    lg.add_argument("-n", "--lines", type=int, default=200, help="lines to show (default 200)")
+    lg.add_argument(
+        "-n", "--lines", type=int, default=200, help="lines to show (default 200)"
+    )
     lg.set_defaults(func=cmd_logs)
+    sub.add_parser("version", help="print alle's version").set_defaults(
+        func=cmd_version
+    )
 
-    sub.add_parser("applier").set_defaults(func=cmd_applier)  # internal: the daemon body
+    sub.add_parser("applier").set_defaults(
+        func=cmd_applier
+    )  # internal: the daemon body
 
     return p
 

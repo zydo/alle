@@ -1,0 +1,77 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          cache-suffix: publish-py3.14
+
+      - name: Verify tag matches pyproject.toml version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag '$GITHUB_REF_NAME' (normalized '$tag') does not match pyproject.toml version '$pkg'"
+            exit 1
+          fi
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  publish-pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/alle-proxy
+    permissions:
+      # Required for PyPI Trusted Publishing (OIDC).
+      # Configure the trusted publisher on PyPI before the first tag push.
+      id-token: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          generate_release_notes: true
