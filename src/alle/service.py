@@ -7,6 +7,7 @@ structured Python data; it deliberately does not print, prompt, or exit.
 
 from __future__ import annotations
 
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 from alle import (
@@ -121,21 +122,44 @@ def provider_list() -> dict:
     return {"providers": providers}
 
 
-def provider_remove(provider: str) -> dict:
+def _provider_removal_plan(providers: list[str]) -> list[dict]:
+    if not providers:
+        raise ServiceError("at least one provider is required.")
+    providers = list(dict.fromkeys(providers))
     store = Store.load()
-    if not store.has_provider(provider):
-        raise ServiceError(f"{display_name(provider)} is not added.")
-    count = len(store.provider_channels(provider))
-    store.remove_provider(provider)
-    credentials.remove(provider)
-    metrics.remove_provider(provider)
-    applog.log(f"removed provider {provider} ({count} channel(s))")
+    plan = []
+    for provider in providers:
+        if not store.has_provider(provider):
+            raise ServiceError(f"{display_name(provider)} is not added.")
+        plan.append(
+            {
+                "provider": provider,
+                "display_name": display_name(provider),
+                "channels_removed": len(store.provider_channels(provider)),
+            }
+        )
+    return plan
+
+
+def provider_remove(provider: str) -> dict:
+    return provider_remove_many([provider])["providers"][0]
+
+
+def provider_remove_many(providers: list[str], dry_run: bool = False) -> dict:
+    planned = _provider_removal_plan(providers)
+    if dry_run:
+        return {"providers": planned, "dry_run": True}
+
+    for item in planned:
+        provider = item["provider"]
+        credentials.remove(provider)
+        Store.load().remove_provider(provider)
+        metrics.remove_provider(provider)
+        applog.log(
+            f"removed provider {provider} ({item['channels_removed']} channel(s))"
+        )
     daemon.ensure_running()
-    return {
-        "provider": provider,
-        "display_name": display_name(provider),
-        "channels_removed": count,
-    }
+    return {"providers": planned, "dry_run": False}
 
 
 def channel_add(
@@ -296,22 +320,120 @@ def metrics_snapshot(channel: str | None = None) -> dict:
     }
 
 
-def channel_remove(provider: str, channel_id: str) -> dict:
-    store = Store.load()
-    if not store.has_provider(provider):
-        raise ServiceError(f"{display_name(provider)} is not added.")
-    if not store.get_channel(provider, channel_id):
-        raise ServiceError(
-            f"no channel {channel_id!r} under {display_name(provider)} (see: alle status)."
-        )
-    store.remove_channel(provider, channel_id)
-    metrics.remove_channel(provider, channel_id)
-    applog.log(f"removed channel {provider}/{channel_id}")
-    daemon.ensure_running()
+def _is_pattern(ref: str) -> bool:
+    return any(ch in ref for ch in "*?[")
+
+
+def _channel_ref_matches(channel_id: str, ref: str) -> bool:
+    return fnmatchcase(channel_id, ref) if _is_pattern(ref) else channel_id == ref
+
+
+def _channel_row(provider: str, channel_id: str) -> dict:
     return {
         "provider": provider,
         "display_name": display_name(provider),
         "channel": channel_id,
+        "ref": f"{provider}/{channel_id}",
+    }
+
+
+def _resolve_channel_ref(store: Store, ref: str, provider: str | None) -> list[dict]:
+    if "/" in ref and provider is None:
+        provider_ref, channel_ref = ref.split("/", 1)
+        matched_provider = match(provider_ref)
+        if matched_provider is None:
+            names = ", ".join(known())
+            raise ServiceError(f"unknown provider {provider_ref!r} (known: {names}).")
+        return _resolve_channel_ref(store, channel_ref, matched_provider)
+
+    if provider is not None:
+        matches = [
+            _channel_row(ch.provider, ch.id)
+            for ch in store.provider_channels(provider)
+            if _channel_ref_matches(ch.id, ref)
+        ]
+        if not matches:
+            raise ServiceError(
+                f"no channel {ref!r} under {display_name(provider)} "
+                "(see: alle channels ls)."
+            )
+        return matches
+
+    matches = [
+        _channel_row(ch.provider, ch.id)
+        for ch in store.channels()
+        if _channel_ref_matches(ch.id, ref)
+    ]
+    if not matches:
+        raise ServiceError(f"no channel named {ref!r} (see: alle channels ls).")
+    if not _is_pattern(ref) and len(matches) > 1:
+        providers = ", ".join(item["display_name"] for item in matches)
+        raise ServiceError(
+            f"channel {ref!r} exists under multiple providers ({providers}); "
+            f"use a qualified ref like: alle channels rm {matches[0]['ref']}"
+        )
+    return matches
+
+
+def _channel_removal_plan(
+    refs: list[str], provider: str | None = None, all_: bool = False
+) -> list[dict]:
+    store = Store.load()
+    if provider is not None and not store.has_provider(provider):
+        raise ServiceError(f"{display_name(provider)} is not added.")
+
+    if all_:
+        if refs:
+            raise ServiceError("--all cannot be combined with channel names.")
+        if provider is None:
+            raise ServiceError("--all for channels requires --provider.")
+        matches = [
+            _channel_row(ch.provider, ch.id) for ch in store.provider_channels(provider)
+        ]
+        if not matches:
+            raise ServiceError(f"no channels under {display_name(provider)}.")
+    else:
+        if not refs:
+            raise ServiceError("at least one channel name is required.")
+        matches = []
+        for ref in refs:
+            matches.extend(_resolve_channel_ref(store, ref, provider))
+
+    plan = []
+    seen = set()
+    for item in matches:
+        key = (item["provider"], item["channel"])
+        if key not in seen:
+            seen.add(key)
+            plan.append(item)
+    return plan
+
+
+def channel_remove_many(
+    channel_ids: list[str],
+    provider: str | None = None,
+    dry_run: bool = False,
+    all_: bool = False,
+) -> dict:
+    planned = _channel_removal_plan(channel_ids, provider, all_)
+    if dry_run:
+        return {"channels": planned, "dry_run": True}
+
+    for item in planned:
+        Store.load().remove_channel(item["provider"], item["channel"])
+        metrics.remove_channel(item["provider"], item["channel"])
+        applog.log(f"removed channel {item['provider']}/{item['channel']}")
+    daemon.ensure_running()
+    return {"channels": planned, "dry_run": False}
+
+
+def channel_remove(provider: str, channel_id: str) -> dict:
+    result = channel_remove_many([channel_id], provider)
+    removed = result["channels"][0]
+    return {
+        "provider": removed["provider"],
+        "display_name": removed["display_name"],
+        "channel": removed["channel"],
     }
 
 

@@ -164,25 +164,53 @@ def cmd_providers_ls(args):
     _print_or_json(service.provider_list(), output.providers_list, args.json)
 
 
-def cmd_providers_rm(args):
-    provider = _resolve_provider(args.provider)
-    store = Store.load()
-    if not store.has_provider(provider):
-        sys.exit(f"{display_name(provider)} is not added.")
-    n = len(store.provider_channels(provider))
-    if not args.yes:
+def _print_provider_removals(result: dict) -> None:
+    dry_run = result.get("dry_run", False)
+    verb = "Would remove" if dry_run else "Removed"
+    providers = result["providers"]
+    for item in providers:
         print(
-            f"WARNING: removing {display_name(provider)} will delete its "
-            f"{n} channel(s) AND its stored credential. You will need to re-add the "
-            "provider (and re-enter the token) to use it again."
+            f"{verb} {item['display_name']} and its "
+            f"{item['channels_removed']} channel(s)."
         )
-        # Accept the key ("protonvpn") or the display name just shown ("Proton VPN").
-        if match(input("Type the provider name to confirm: ")) != provider:
-            sys.exit("Aborted.")
-    result = service.provider_remove(provider)
-    print(
-        f"Removed {result['display_name']} and its {result['channels_removed']} channel(s)."
+    if len(providers) > 1:
+        print(f"{verb} {len(providers)} providers.")
+
+
+def cmd_providers_rm(args):
+    if args.all and args.providers:
+        raise service.ServiceError("--all cannot be combined with provider names.")
+
+    providers = (
+        Store.load().provider_names()
+        if args.all
+        else [_resolve_provider(provider) for provider in args.providers]
     )
+    if args.all and not providers:
+        print("No providers added.")
+        return
+    if args.dry_run:
+        _print_provider_removals(service.provider_remove_many(providers, dry_run=True))
+        return
+
+    plan = service.provider_remove_many(providers, dry_run=True)["providers"]
+    if not args.yes:
+        total_channels = sum(item["channels_removed"] for item in plan)
+        names = ", ".join(item["display_name"] for item in plan)
+        suffix = "s" if len(plan) != 1 else ""
+        print(
+            f"WARNING: removing provider{suffix} {names} will delete "
+            f"{total_channels} channel(s) AND stored credential(s). You will need "
+            "to re-add provider(s) to use them again."
+        )
+        if len(plan) == 1:
+            expected = plan[0]["provider"]
+            # Accept the key ("protonvpn") or the display name just shown ("Proton VPN").
+            if match(input("Type the provider name to confirm: ")) != expected:
+                sys.exit("Aborted.")
+        elif input("Type yes to confirm: ").strip().lower() != "yes":
+            sys.exit("Aborted.")
+    _print_provider_removals(service.provider_remove_many(providers))
 
 
 # ---- channels --------------------------------------------------------------
@@ -207,13 +235,68 @@ def cmd_channels_add(args):
 def cmd_channels_ls(args):
     """List configured channels grouped by provider — static config only, no
     connection status and independent of whether alle is up or down."""
-    _print_or_json(service.channel_list(), output.channels_list, args.json)
+    if sum(bool(flag) for flag in (args.json, args.ids, args.refs)) > 1:
+        raise service.ServiceError("--json, --ids, and --refs are mutually exclusive.")
+    data = service.channel_list()
+    if args.ids:
+        print("\n".join(channel["name"] for channel in data["channels"]))
+        return
+    if args.refs:
+        print(
+            "\n".join(
+                f"{channel['provider']}/{channel['name']}"
+                for channel in data["channels"]
+            )
+        )
+        return
+    _print_or_json(data, output.channels_list, args.json)
+
+
+def _legacy_channel_provider(args) -> str | None:
+    if not args.channel:
+        return None
+    if args.provider:
+        if args.refs:
+            raise service.ServiceError(
+                "--provider cannot be combined with a positional provider "
+                "when --channel is used."
+            )
+        return _resolve_provider(args.provider)
+    if len(args.refs) != 1:
+        raise service.ServiceError(
+            "legacy --channel form requires exactly one provider: "
+            "alle channels rm <provider> --channel <name>"
+        )
+    return _resolve_provider(args.refs[0])
+
+
+def _channel_refs_from_args(args) -> list[str]:
+    if not args.channel:
+        return args.refs
+    return [channel for group in args.channel for channel in group]
+
+
+def _print_channel_removals(result: dict) -> None:
+    dry_run = result.get("dry_run", False)
+    verb = "Would remove" if dry_run else "Removed"
+    channels = result["channels"]
+    for item in channels:
+        print(f"{verb} channel {item['channel']} from {item['display_name']}.")
+    if len(channels) > 1:
+        print(f"{verb} {len(channels)} channels.")
 
 
 def cmd_channels_rm(args):
-    provider = _resolve_provider(args.provider)
-    result = service.channel_remove(provider, args.channel)
-    print(f"Removed channel {result['channel']} from {result['display_name']}.")
+    provider = _legacy_channel_provider(args)
+    if provider is None and args.provider:
+        provider = _resolve_provider(args.provider)
+    result = service.channel_remove_many(
+        _channel_refs_from_args(args),
+        provider=provider,
+        dry_run=args.dry_run,
+        all_=args.all,
+    )
+    _print_channel_removals(result)
 
 
 # ---- locations -------------------------------------------------------------
@@ -396,7 +479,9 @@ def build_parser() -> argparse.ArgumentParser:
     pd = pr_sub.add_parser(
         "rm", help="remove a provider AND all its channels + credential"
     )
-    pd.add_argument("provider", help=_provider_help())
+    pd.add_argument("providers", nargs="*", help=_provider_help())
+    pd.add_argument("--all", action="store_true", help="remove all added providers")
+    pd.add_argument("--dry-run", action="store_true", help="show what would be removed")
     pd.add_argument(
         "-y", "--yes", action="store_true", help="skip the confirmation prompt"
     )
@@ -420,10 +505,30 @@ def build_parser() -> argparse.ArgumentParser:
         "ls", help="list configured channels by provider (no status)"
     )
     cls.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    cls.add_argument("--ids", action="store_true", help="print channel names only")
+    cls.add_argument(
+        "--refs", action="store_true", help="print provider-qualified channel refs"
+    )
     cls.set_defaults(func=cmd_channels_ls)
-    cr = ch_sub.add_parser("rm", help="remove a channel from a provider")
-    cr.add_argument("provider", help=_provider_help())
-    cr.add_argument("--channel", required=True, help="channel name to remove")
+    cr = ch_sub.add_parser("rm", help="remove one or more channels")
+    cr.add_argument(
+        "refs",
+        nargs="*",
+        help="channel name, glob, or provider/name ref to remove",
+    )
+    cr.add_argument("--provider", help="scope channel names/globs to this provider")
+    cr.add_argument(
+        "--channel",
+        nargs="+",
+        action="append",
+        help="legacy form: alle channels rm <provider> --channel <name>",
+    )
+    cr.add_argument(
+        "--all",
+        action="store_true",
+        help="remove every channel under --provider",
+    )
+    cr.add_argument("--dry-run", action="store_true", help="show what would be removed")
     cr.set_defaults(func=cmd_channels_rm)
 
     # locations

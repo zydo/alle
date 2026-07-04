@@ -11,7 +11,7 @@
 
 An unofficial but more powerful VPN client for multiple VPN providers.
 
-# Why `alle`
+# Why alle
 
 Most VPN clients are built around one global idea: connect this device to a single
 VPN server, then send everything through it until you disconnect or switch.
@@ -27,9 +27,9 @@ across several. Say you want a US exit, a UK exit, and a Japan exit at once —
 NordVPN for the US and Japan, ProtonVPN for the UK:
 
 ```text
-   streaming + admin   ──►  `alle`  ──►  United States   (NordVPN)
-   test runner         ──►  `alle`  ──►  Japan           (NordVPN)
-   bank login          ──►  `alle`  ──►  United Kingdom  (Proton VPN)
+   streaming + admin   ──►  alle  ──►  United States   (NordVPN)
+   test runner         ──►  alle  ──►  Japan           (NordVPN)
+   bank login          ──►  alle  ──►  United Kingdom  (Proton VPN)
 ```
 
 Each app points at the exit it needs; they run concurrently and independently, so
@@ -38,12 +38,12 @@ opening the bank never disturbs the stream.
 In short: not one global location you keep switching, but several exits alive at
 once, each used where it is needed.
 
-## What `alle` does
+## What alle does
 
 `alle` runs multiple VPN exits side by side. Each exit is exposed as its own
-local HTTP+SOCKS proxy on `127.0.0.1:<port>`. A planned single HTTP+SOCKS entry
-point will route traffic by rule to a VPN exit or to direct outbound with no
-proxy. Instead of changing your whole machine's VPN location, you point each app,
+local HTTP+SOCKS proxy on `127.0.0.1:<port>`. A single HTTP+SOCKS entry point
+will route traffic by rule to a VPN exit or to direct outbound with no proxy.
+Instead of changing your whole machine's VPN location, you point each app,
 browser profile, script, or test job at the path it needs.
 
 Under the hood, `alle` manages one
@@ -180,6 +180,7 @@ Useful commands after setup:
 ```bash
 alle providers ls
 alle channels ls
+alle channels ls --refs
 alle status
 alle test
 alle metrics
@@ -193,6 +194,15 @@ Most read commands support `--json` for scripts:
 alle status --json
 alle channels ls --json
 alle metrics --json
+```
+
+Channel and provider removals accept multiple targets:
+
+```bash
+alle channels rm japan_1 united_states_seattle_1
+alle channels rm protonvpn/wg_us_ca_842
+alle channels rm 'united_states_*' --dry-run
+alle providers rm nordvpn protonvpn -y
 ```
 
 For the complete command reference, see the

@@ -15,6 +15,16 @@ def test_json_text_serializes_objects_by_dict():
     assert '"value": 3' in output.json_text({"thing": Thing()})
 
 
+def test_json_text_falls_back_to_string():
+    class SlotThing:
+        __slots__ = ()
+
+        def __str__(self):
+            return "slotty"
+
+    assert output.json_text({"thing": SlotThing()}) == '{\n  "thing": "slotty"\n}'
+
+
 def test_providers_list_renders_config_singular_and_token_fallback():
     text = output.providers_list(
         {
@@ -63,6 +73,25 @@ def test_locations_output_covers_unavailable_country_and_full_list():
     assert "Seattle" in full
 
 
+def test_locations_output_country_match():
+    text = output.locations(
+        {
+            "available": True,
+            "provider": "nordvpn",
+            "display_name": "NordVPN",
+            "country": "Japan",
+            "matched": True,
+            "cities": ["Tokyo", "Osaka"],
+        }
+    )
+
+    assert text.splitlines() == [
+        "nordvpn cities in Japan (2):",
+        "  Tokyo",
+        "  Osaka",
+    ]
+
+
 def test_status_inactive_with_channels_and_active_empty():
     inactive = output.status(
         {
@@ -78,6 +107,44 @@ def test_status_inactive_with_channels_and_active_empty():
     active = output.status({"running": True, "channels": []})
     assert "Alle - Active" in active
     assert "no channels yet" in active
+
+
+def test_status_active_with_channel_rows(monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: 1_000)
+
+    text = output.status(
+        {
+            "running": True,
+            "channels": [
+                {
+                    "provider": "nordvpn",
+                    "name": "japan_1",
+                    "port": ":53124",
+                    "country": "Japan",
+                    "city": "(Any City)",
+                    "state": "Active",
+                    "probe": {"at": 990},
+                    "latency_ms": 42,
+                    "ip": "1.2.3.4",
+                },
+                {
+                    "provider": "protonvpn",
+                    "name": "wg_us_ca_842",
+                    "port": ":53125",
+                    "country": "United States",
+                    "city": "California",
+                    "state": "Pending",
+                    "probe": {},
+                    "latency_ms": None,
+                    "ip": None,
+                },
+            ],
+        }
+    )
+
+    assert "10s ago" in text
+    assert "42ms" in text
+    assert "Proton VPN" in text
 
 
 def test_metrics_filter_empty_and_age_units(monkeypatch):
@@ -109,6 +176,63 @@ def test_metrics_filter_empty_and_age_units(monkeypatch):
     assert "1.0 MB" in text
     assert "1.0 GB" in text
     assert "1h ago" in text
+
+
+def test_metrics_empty_without_filter_and_age_units(monkeypatch):
+    assert output.metrics({"channels": [], "filter": None}).startswith(
+        "No channels configured"
+    )
+
+    now = 100_000
+    monkeypatch.setattr(time, "time", lambda: now)
+    text = output.metrics(
+        {
+            "channels": [
+                {
+                    "provider": "nordvpn",
+                    "name": "old_1",
+                    "port": ":53124",
+                    "country": "Old",
+                    "city": "(Any City)",
+                    "sent": 0,
+                    "received": 0,
+                    "total": 1024**4,
+                    "updated_at": now - 3 * 24 * 3600,
+                }
+            ]
+        }
+    )
+
+    assert "1.0 TB" in text
+    assert "3d ago" in text
+
+
+def test_test_result_empty_filter_and_default_failure_state():
+    assert (
+        output.test_result({"channels": [], "filter": "missing"})
+        == "No channel named 'missing'. See: alle channels ls"
+    )
+
+    text = output.test_result(
+        {
+            "channels": [
+                {
+                    "provider": "nordvpn",
+                    "name": "failed_1",
+                    "port": ":53124",
+                    "country": "US",
+                    "city": "(Any City)",
+                    "healthy": False,
+                    "error": "",
+                    "latency_ms": None,
+                    "ip": None,
+                }
+            ],
+            "speed": False,
+        }
+    )
+
+    assert "Failed" in text
 
 
 def test_test_result_speed_and_failure_state_cells():

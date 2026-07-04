@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "alle-proxy"
 version = "0.1.0"
-description = "The unofficial, universal VPN client: manage multiple VPN providers and locations in one place through a single sing-box process, with rule-based routing planned. CLI today; web UI and menu-bar GUI planned."
+description = "A universal VPN client that manages multiple VPN connections with rule-based routing."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

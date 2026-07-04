@@ -16,11 +16,11 @@ exposes `alle` directly. The examples below omit the prefix.
   - [`alle providers`](#alle-providers)
     - [`alle providers add <provider>`](#alle-providers-add-provider)
     - [`alle providers ls [--json]`](#alle-providers-ls---json)
-    - [`alle providers rm <provider> [-y|--yes]`](#alle-providers-rm-provider--y--yes)
+    - [`alle providers rm <provider>... [-y|--yes]`](#alle-providers-rm-provider--y--yes)
   - [`alle channels`](#alle-channels)
     - [`alle channels add <provider> …`](#alle-channels-add-provider-)
-    - [`alle channels ls [--json]`](#alle-channels-ls---json)
-    - [`alle channels rm <provider> --channel <name>`](#alle-channels-rm-provider---channel-name)
+    - [`alle channels ls [--json|--ids|--refs]`](#alle-channels-ls---json--ids--refs)
+    - [`alle channels rm <channel>...`](#alle-channels-rm-channel)
   - [`alle locations`](#alle-locations)
   - [`alle status`](#alle-status)
   - [`alle start` / `stop` / `restart`](#alle-start--stop--restart)
@@ -100,14 +100,19 @@ NordVPN     token   ******8fb7
 Proton VPN  config  2 .conf files
 ```
 
-### `alle providers rm <provider> [-y|--yes]`
+### `alle providers rm <provider>... [-y|--yes]`
 
-Remove a provider **and all its channels and stored credential**. Prompts for
-confirmation unless `-y` is given.
+Remove one or more providers **and all their channels and stored credentials**.
+Prompts for confirmation unless `-y` is given.
 
 ```bash
 alle providers rm protonvpn -y
+alle providers rm nordvpn protonvpn -y
+alle providers rm --all --dry-run
 ```
+
+- `--dry-run` prints what would be removed without changing state.
+- `--all` removes every added provider; combine with `--dry-run` first when in doubt.
 
 ---
 
@@ -145,7 +150,7 @@ alle channels add protonvpn --config ~/Downloads/wg-US-CA-842.conf
   the country code is reliable; a missing/unknown subdivision shows as `(Unknown)`.
   `alle` never geo-locates the endpoint to guess.
 
-### `alle channels ls [--json]`
+### `alle channels ls [--json|--ids|--refs]`
 
 List configured channels (static config only — no live status). Columns: `PROVIDER`,
 `NAME`, `PORT`, `COUNTRY`, `CITY`.
@@ -158,13 +163,32 @@ NordVPN     united_states_seattle_1  :53125  United States  Seattle
 Proton VPN  wg_us_ca_842             :53126  United States  California
 ```
 
-### `alle channels rm <provider> --channel <name>`
-
-Remove one channel from a provider (also drops its stored metrics).
+For scripting, print just channel names or provider-qualified refs:
 
 ```bash
-alle channels rm nordvpn --channel japan_1
+alle channels ls --ids
+alle channels ls --refs
 ```
+
+### `alle channels rm <channel>...`
+
+Remove one or more channels (also drops stored metrics).
+
+```bash
+alle channels rm japan_1 united_states_seattle_1
+alle channels rm protonvpn/wg_us_ca_842
+alle channels rm 'united_states_*' --dry-run
+alle channels rm 'united_states_*'
+alle channels rm --provider nordvpn --all
+```
+
+- Plain channel names are resolved across providers. If the same name exists under
+  multiple providers, use a provider-qualified ref like `nordvpn/japan_1`.
+- Glob patterns (`*`, `?`, `[abc]`) match channel names. Quote patterns in shells so
+  the shell does not expand them before `alle` sees them.
+- `--provider <provider>` scopes names, globs, and `--all` to one provider.
+- `--dry-run` prints exactly what would be removed without changing state.
+- Compatibility form: `alle channels rm <provider> --channel <name>` still works.
 
 ---
 
