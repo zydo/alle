@@ -13,6 +13,9 @@ literal IP is pinned and will fail if that server is ever retired.
 
 from __future__ import annotations
 
+import base64
+import binascii
+
 from alle.credentials import mask
 
 WG_KEEPALIVE = 25
@@ -60,9 +63,24 @@ def _split_endpoint(endpoint: str) -> tuple[str, int]:
         host, _, port = endpoint[1:].partition("]:")
     else:
         host, _, port = endpoint.rpartition(":")
-    if not host or not port.isdigit():
+    if not host or not port.isdigit() or not 0 < int(port) <= 65535:
         raise ConfError(f"endpoint {endpoint!r} is not host:port")
     return host, int(port)
+
+
+def _require_wg_key(name: str, value: str) -> None:
+    """WireGuard keys are exactly 32 bytes, base64 (44 chars ending ``=``).
+
+    Checked at import time so a truncated paste or a mixed-up value fails with
+    a message naming the field, instead of surfacing later as an opaque
+    ``sing-box check`` rejection of the generated config.
+    """
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        decoded = b""
+    if len(decoded) != 32:
+        raise ConfError(f"{name} is not a valid WireGuard key (32 bytes, base64)")
 
 
 def parse(text: str) -> dict:
@@ -86,6 +104,12 @@ def parse(text: str) -> dict:
         raise ConfError("missing required field(s): " + ", ".join(missing))
     if private_key is None or address is None or public_key is None or endpoint is None:
         raise AssertionError("required WireGuard fields were checked but not narrowed")
+
+    _require_wg_key("[Interface] PrivateKey", private_key)
+    _require_wg_key("[Peer] PublicKey", public_key)
+    preshared = peer.get("presharedkey")
+    if preshared:
+        _require_wg_key("[Peer] PresharedKey", preshared)
 
     keepalive = peer.get("persistentkeepalive")
     host, port = _split_endpoint(endpoint)

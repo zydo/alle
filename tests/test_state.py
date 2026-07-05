@@ -141,6 +141,33 @@ def test_tags_are_globally_unique_and_parseable():
     assert tag_to_ref("direct") is None
 
 
+def test_corrupt_state_is_quarantined_not_silently_wiped(capsys):
+    store = Store.load()
+    store.add_provider("nordvpn")
+    store.add_channel("nordvpn", "US", "", dict(WG))
+    _state_file().write_text('{"providers": {"nordvpn"')  # truncated write
+
+    # The corrupt file reads as empty, but its bytes are preserved aside — so a
+    # follow-up mutation can never persist the emptiness over the only copy.
+    assert Store.load().provider_names() == []
+    backups = list(paths.state_dir().glob("state.json.corrupt-*"))
+    assert len(backups) == 1
+    assert backups[0].read_text() == '{"providers": {"nordvpn"'
+    assert "corrupt" in capsys.readouterr().err
+
+    # Recovery restarts from blank without touching the quarantined copy.
+    Store.load().add_provider("protonvpn")
+    assert Store.load().provider_names() == ["protonvpn"]
+    assert len(list(paths.state_dir().glob("state.json.corrupt-*"))) == 1
+
+
+def test_non_object_state_is_quarantined():
+    _state_file().parent.mkdir(parents=True, exist_ok=True)
+    _state_file().write_text('["not", "an", "object"]')  # valid JSON, wrong shape
+    assert Store.load().provider_names() == []
+    assert len(list(paths.state_dir().glob("state.json.corrupt-*"))) == 1
+
+
 def test_config_signature_ignores_probe_results():
     store = Store.load()
     store.add_provider("nordvpn")

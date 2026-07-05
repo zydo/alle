@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -35,6 +36,15 @@ class ProviderError(Exception):
     """Raised when a provider rejects credentials or returns nothing usable."""
 
 
+class ProviderAuthError(ProviderError):
+    """A credential problem retrying can never fix (missing/rejected token).
+
+    Kept as a distinct *type* so auto-reconnect can give up immediately on
+    auth failures without pattern-matching words in error messages — which
+    would misclassify transient errors that happen to contain the same words.
+    """
+
+
 def _get_json(url: str, headers: dict | None = None, timeout: int = 30):
     req = urllib.request.Request(url, headers=headers or {"User-Agent": "alle/1"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -46,14 +56,19 @@ def _get_json(url: str, headers: dict | None = None, timeout: int = 30):
 # Client interface address for NordLynx; the same for every server/account.
 NORDVPN_WG_ADDRESS = ["10.5.0.2/32"]  # noqa: S1313
 
-_nord_countries_cache: list[dict] | None = None
+# In-process country/city cache as (fetched_at_monotonic, data). Time-bounded
+# so a long-lived process (the daemon reconnecting channels weeks later, a
+# future Web UI) doesn't pin the list it fetched at startup forever; the
+# on-disk cache in locations.py has its own, longer expiry.
+NORD_CACHE_TTL = 3600.0
+_nord_countries_cache: tuple[float, list[dict]] | None = None
 
 
 def nordvpn_derive_key(creds: dict) -> str:
     """Exchange a NordVPN access token for the account's NordLynx private key."""
     token = (creds.get("token") or "").strip()
     if not token:
-        raise ProviderError("nordvpn access token is missing.")
+        raise ProviderAuthError("nordvpn access token is missing.")
     auth = base64.b64encode(f"token:{token}".encode()).decode()
     try:
         data = _get_json(
@@ -61,10 +76,13 @@ def nordvpn_derive_key(creds: dict) -> str:
             headers={"Authorization": f"Basic {auth}", "User-Agent": "alle/1"},
         )
     except urllib.error.HTTPError as e:
-        raise ProviderError(
-            f"nordvpn token rejected by API (HTTP {e.code}). "
-            "Generate a fresh token at my.nordaccount.com."
-        ) from e
+        if e.code in (401, 403):
+            raise ProviderAuthError(
+                f"nordvpn token rejected by API (HTTP {e.code}). "
+                "Generate a fresh token at my.nordaccount.com."
+            ) from e
+        # e.g. 5xx: the API is unhappy, not the credential — retryable
+        raise ProviderError(f"nordvpn credentials API failed (HTTP {e.code}).") from e
     key = data.get("nordlynx_private_key")
     if not key:
         raise ProviderError("nordvpn API did not return nordlynx_private_key.")
@@ -73,13 +91,16 @@ def nordvpn_derive_key(creds: dict) -> str:
 
 def _nord_countries() -> list[dict]:
     global _nord_countries_cache
-    countries = _nord_countries_cache
-    if countries is None:
-        try:
-            countries = _get_json(f"{NORD_API}/servers/countries")
-        except (urllib.error.URLError, ValueError) as e:
-            raise ProviderError(f"could not fetch nordvpn country list: {e}") from e
-        _nord_countries_cache = countries
+    cached = _nord_countries_cache
+    if cached is not None and time.monotonic() - cached[0] < NORD_CACHE_TTL:
+        return cached[1]
+    try:
+        countries = _get_json(f"{NORD_API}/servers/countries")
+    except (urllib.error.URLError, ValueError) as e:
+        if cached is not None:
+            return cached[1]  # refresh failed: stale beats failing (reconnect path)
+        raise ProviderError(f"could not fetch nordvpn country list: {e}") from e
+    _nord_countries_cache = (time.monotonic(), countries)
     return countries
 
 
@@ -282,7 +303,7 @@ def provider_wg(provider: str, country: str, city: str = "") -> dict:
         )
     creds = credentials.get(provider)
     if not creds:
-        raise ProviderError(
+        raise ProviderAuthError(
             f"{display_name(provider)} is not authenticated — run `alle providers add {provider}`."
         )
     private_key = spec["derive_key"](creds)

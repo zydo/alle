@@ -9,7 +9,7 @@
 
 # alle
 
-An unofficial but more powerful VPN client for multiple VPN providers.
+A universal VPN client that manages multiple VPN connections with rule-based routing.
 
 # Why alle
 
@@ -243,14 +243,19 @@ To be implemented.
 
 - Provider credentials and WireGuard private keys are stored locally under
   `~/.alle/` or `$ALLE_HOME`.
-- Credential and state files are written with private file permissions where
-  supported by the OS.
+- The state directory is kept owner-only (`0700`), and credential/state/config
+  files inside it are written with private permissions from the first byte.
 - `alle` does not read provider tokens from environment variables; credentials
   are added explicitly with `alle providers add`.
 - `alle` downloads a pinned upstream `sing-box` release and verifies its checksum
   before running it.
 - Local proxy ports bind to loopback. Traffic only uses a VPN exit when an app is
   pointed at one of those proxies.
+- The loopback proxies are unauthenticated: on a multi-user machine, any local
+  user or process can send traffic through your channels (and your provider
+  account). alle assumes a single-user machine; don't run it where that
+  assumption fails. The internal stats API *is* authenticated with a generated
+  per-installation secret, so connection metadata is not exposed locally.
 
 ## Roadmap and non-goals
 

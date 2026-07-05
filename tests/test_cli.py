@@ -140,17 +140,19 @@ def test_providers_rm_accepts_multiple_and_dry_run(capsys, no_background):
     assert not service.Store.load().has_provider("protonvpn")
 
 
+# Fully synthetic: keys decode to 32 bytes but are made-up values, and the
+# endpoint uses a TEST-NET-1 documentation address. Never real conf contents.
 SAMPLE_CONF = """\
 [Interface]
 # Key for alle-test
-PrivateKey = WEVHcHJpdmF0ZUtleUV4YW1wbGVCYXNlNjRQYWRkaW5nU1hvPQ==
-Address = 10.2.0.2/32
-DNS = 10.2.0.1
+PrivateKey = WEVHcHJpdmF0ZUtleUV4YW1wbGVWYWx1ZUFBQUFBQUE=
+Address = 10.0.0.2/32
+DNS = 10.0.0.1
 
 [Peer]
-PublicKey = 2RxTx5coxCtv/b3fRKHTq5WjdUxvNxESsYjaXIJWmDA=
+PublicKey = c3ludGhldGljLWFsbGUtdGVzdC1wdWJsaWMta2V5LTA=
 AllowedIPs = 0.0.0.0/0
-Endpoint = 79.127.185.162:51820
+Endpoint = 192.0.2.10:51820
 """
 
 
@@ -196,9 +198,9 @@ def test_config_import_stores_channel(capsys, no_background, tmp_path):
 
     ch = service.Store.load().get_channel("protonvpn", "wg_us_ca_842")
     assert ch is not None
-    assert ch.wg["peer"]["endpoint_host"] == "79.127.185.162"
+    assert ch.wg["peer"]["endpoint_host"] == "192.0.2.10"
     assert ch.wg["peer"]["endpoint_port"] == 51820
-    assert ch.wg["address"] == ["10.2.0.2/32"]
+    assert ch.wg["address"] == ["10.0.0.2/32"]
     # country/city are parsed from the file name's ISO codes (wg-US-CA-842), not guessed
     assert ch.country == "United States" and ch.city == "California"
 

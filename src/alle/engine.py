@@ -13,12 +13,16 @@ network I/O (through each proxy) and writes the result back into the store.
 
 from __future__ import annotations
 
+import re
 import time
 
 from alle import applog, probe, singbox
-from alle.constants import CLASH_API_ADDRESS
 from alle.providers import ProviderError
 from alle.state import Channel, Store
+
+# What a sing-box startup failure over a stolen port looks like in its log:
+# "start inbound/mixed[in-…]: listen tcp 127.0.0.1:<port>: bind: address already in use"
+_ADDR_IN_USE = re.compile(r"127\.0\.0\.1:(\d+).*?address already in use")
 
 
 def _probe_detail(ref: str, result: dict) -> str:
@@ -97,9 +101,15 @@ class Engine:
             )
             endpoints.append(endpoint)
             rules.append({"inbound": [ch.inbound_tag], "outbound": ch.outbound_tag})
+        api = singbox.clash_api()
         config = {
             "log": {"level": "warn", "timestamp": True},
-            "experimental": {"clash_api": {"external_controller": CLASH_API_ADDRESS}},
+            "experimental": {
+                "clash_api": {
+                    "external_controller": api["address"],
+                    "secret": api["secret"],
+                }
+            },
             "inbounds": inbounds,
             "outbounds": [{"type": "direct", "tag": "direct"}],
             "endpoints": endpoints,
@@ -113,17 +123,57 @@ class Engine:
 
         Returns ``{"<provider>/<id>": error}`` for channels that could not be
         built; those are simply left out of the live config.
+
+        Ports are allocated when a channel is added, so another process can
+        grab one before a later sing-box (re)start — and sing-box treats a
+        single unbindable inbound as fatal for the whole config. When a start
+        fails that way, the stolen ports are reallocated and the apply retried
+        once; anything else (or a second failure) propagates to the caller.
         """
         config, errors = self._build_config()
         self._errors = errors
         for ref, err in sorted(errors.items()):
             applog.log(f"reconcile: left {ref} out of the config: {err}")
-        changed = self.runner.apply(config)
+        try:
+            changed = self.runner.apply(config)
+        except singbox.SingBoxError as e:
+            if not self._recover_stolen_ports(str(e)):
+                raise
+            config, errors = self._build_config()  # store reloaded with new ports
+            self._errors = errors
+            changed = self.runner.apply(config)  # a second failure propagates
         if changed:
             applog.log(
                 f"reconciled sing-box: {len(config['inbounds'])} channel(s) live"
             )
         return errors
+
+    def _recover_stolen_ports(self, err_text: str) -> bool:
+        """Reallocate local ports named in an address-in-use start failure.
+
+        Covers both channel proxy ports (moved in the store) and the Clash API
+        port (its endpoint file is regenerated). True if anything was freed.
+        """
+        stolen = {int(port) for port in _ADDR_IN_USE.findall(err_text)}
+        if not stolen:
+            return False
+        recovered = False
+        api = singbox.clash_api()
+        api_port = int(api["address"].rsplit(":", 1)[1])
+        if api_port in stolen:
+            singbox.forget_clash_api()
+            applog.log(
+                f"reconcile: clash api port {api_port} was taken by another "
+                "process — regenerated the endpoint"
+            )
+            recovered = True
+        for provider, cid, old, new in self.store.reallocate_channel_ports(stolen):
+            applog.log(
+                f"reconcile: port {old} of {provider}/{cid} was taken by "
+                f"another process — moved to :{new}"
+            )
+            recovered = True
+        return recovered
 
     # ---- probing -----------------------------------------------------------
     def probe_all(self, channels: list[Channel] | None = None) -> dict[str, dict]:

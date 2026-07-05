@@ -19,8 +19,9 @@ SINGBOX_SHA256 = {
     "linux-arm64": "d21721e273f5aab8a20a1bfda378602fdca2b40d9a7145a781bbdef1f496a1d5",
 }
 
-# Local address the Clash API (used only for traffic stats) listens on.
-CLASH_API_ADDRESS = "127.0.0.1:9191"
+# The Clash API address/secret are not constants: they are generated per
+# installation (see singbox.clash_api) so the API is authenticated and two
+# users on one machine don't fight over a hard-coded port.
 
 # Tag prefixes inside the generated sing-box config, so a channel id maps to its
 # inbound/outbound deterministically.

@@ -25,12 +25,14 @@ import json
 import os
 import re
 import socket
+import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from alle import paths
+from alle import applog, paths
 
 STATE_VERSION = 1
 
@@ -139,13 +141,38 @@ def _blank() -> dict:
     return {"version": STATE_VERSION, "providers": {}}
 
 
+def _quarantine(p: Path, err: Exception) -> None:
+    """Move an unparseable state/credentials file aside instead of losing it.
+
+    Every mutation is a read-modify-write, so silently treating a corrupt file
+    as empty would make the *next* write persist that emptiness — destroying
+    every channel and its WireGuard keys with no trace. Renaming preserves the
+    bytes for manual recovery and makes the failure loud.
+    """
+    backup = p.with_name(f"{p.name}.corrupt-{int(time.time())}")
+    try:
+        os.replace(p, backup)
+    except OSError:
+        return  # can't move it; the caller still proceeds from a blank view
+    msg = f"{p.name} is corrupt ({err}); moved to {backup.name}, starting empty"
+    applog.log(msg)
+    print(f"alle: {msg}", file=sys.stderr)
+
+
 def _read_raw() -> dict:
     p = _state_path()
     if not p.exists():
         return _blank()
     try:
-        data = json.loads(p.read_text())
-    except (OSError, ValueError):
+        text = p.read_text()
+    except OSError:
+        return _blank()
+    try:
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError("root is not a JSON object")
+    except ValueError as e:
+        _quarantine(p, e)
         return _blank()
     data.setdefault("version", STATE_VERSION)
     data.setdefault("providers", {})
@@ -342,6 +369,29 @@ class Store:
                 else:
                     ch.pop("reconnect", None)
         self.data = _read_raw()
+
+    def reallocate_channel_ports(
+        self, ports: set[int]
+    ) -> list[tuple[str, str, int, int]]:
+        """Move every channel sitting on one of ``ports`` to a fresh free port.
+
+        Recovery for a port another process grabbed between allocation and a
+        sing-box (re)start — sing-box treats one unbindable inbound as fatal,
+        so a single stolen port would otherwise take every channel down.
+        Returns ``(provider, cid, old_port, new_port)`` per moved channel; the
+        state change moves the config signature, so the daemon re-reconciles.
+        """
+        moved = []
+        with transaction() as data:
+            for provider, prov in sorted((data.get("providers") or {}).items()):
+                for cid, ch in sorted((prov.get("channels") or {}).items()):
+                    old = int(ch.get("port") or 0)
+                    if old in ports:
+                        new = _next_free_port(data)
+                        ch["port"] = new
+                        moved.append((provider, cid, old, new))
+        self.data = _read_raw()
+        return moved
 
     def update_channel_wg(self, provider: str, cid: str, wg: dict) -> bool:
         """Replace a channel's WireGuard params (used by auto-reconnect to swap in a

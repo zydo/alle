@@ -9,7 +9,7 @@ from typing import cast
 import pytest
 
 from alle import applog, reconnect, singbox
-from alle.providers import ProviderError
+from alle.providers import ProviderAuthError, ProviderError
 from alle.state import Store
 
 WG = {
@@ -115,7 +115,7 @@ def test_non_retryable_auth_error_gives_up_immediately(channel):
     store = Store.load()
 
     def bad_token(p, c, city):
-        raise ProviderError("nordvpn token rejected by API (HTTP 401).")
+        raise ProviderAuthError("nordvpn token rejected by API (HTTP 401).")
 
     for i in range(reconnect.FAIL_THRESHOLD):
         store.set_probe("nordvpn", channel, dict(FAIL))
@@ -125,11 +125,29 @@ def test_non_retryable_auth_error_gives_up_immediately(channel):
     assert "401" in rc["error"]
 
 
+def test_transient_error_wording_does_not_trigger_giveup(channel):
+    # Non-retryability is decided by exception type, never by message text: a
+    # transient failure whose message contains "invalid"/"missing" must keep
+    # retrying instead of permanently failing the channel.
+    store = Store.load()
+
+    def flaky_api(p, c, city):
+        raise ProviderError("could not resolve a nordvpn server: invalid response")
+
+    for i in range(reconnect.FAIL_THRESHOLD):
+        store.set_probe("nordvpn", channel, dict(FAIL))
+        _pass(now=1000 + i, resolve=flaky_api)
+    rc = _rc(channel)
+    assert rc.get("failed") is not True  # still retryable
+    assert rc["attempts"] == 1
+    assert "invalid response" in rc["error"]
+
+
 def test_failed_channel_is_left_alone(channel):
     store = Store.load()
 
     def bad_token(p, c, city):
-        raise ProviderError("nordvpn token rejected by API (HTTP 401).")
+        raise ProviderAuthError("nordvpn token rejected by API (HTTP 401).")
 
     for i in range(reconnect.FAIL_THRESHOLD):
         store.set_probe("nordvpn", channel, dict(FAIL))

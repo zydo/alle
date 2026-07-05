@@ -19,15 +19,34 @@ from pathlib import Path
 from alle import paths
 
 
+MAX_LOG_BYTES = 5 * 1024 * 1024  # rotate a log file that grows past this
+
+
 def _log_path() -> Path:
     return paths.state_dir() / "alle.log"
+
+
+def rotate_if_needed(p: Path, max_bytes: int) -> None:
+    """Move ``p`` to ``<p>.1`` once it exceeds ``max_bytes`` (one backup kept).
+
+    Keeps append-forever logs (this one, sing-box's) from growing without
+    bound. Concurrent writers can race the rename; worst case a few lines land
+    in the rotated file, which is fine for an operations log.
+    """
+    try:
+        if p.stat().st_size >= max_bytes:
+            os.replace(p, p.with_name(p.name + ".1"))
+    except OSError:
+        pass
 
 
 def log(message: str) -> None:
     """Append one timestamped line. Best-effort: never raises into the caller."""
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {message}\n"
     try:
-        with open(_log_path(), "a") as f:
+        p = _log_path()
+        rotate_if_needed(p, MAX_LOG_BYTES)
+        with open(p, "a") as f:
             f.write(line)
     except OSError:
         pass

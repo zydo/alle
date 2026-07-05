@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import cast
 
+import pytest
+
 from alle import applog, singbox
 from alle.engine import Engine
 from alle.state import Store
@@ -86,6 +88,15 @@ def test_preshared_key_passed_through_when_present():
     assert config["endpoints"][0]["peers"][0]["pre_shared_key"] == "PSK="
 
 
+def test_config_authenticates_the_clash_api():
+    config, _ = Engine(_store())._build_config()
+    api = singbox.clash_api()
+    assert config["experimental"]["clash_api"] == {
+        "external_controller": api["address"],
+        "secret": api["secret"],
+    }
+
+
 def test_malformed_channel_omitted_and_reported():
     store = _store(
         ("nordvpn", "us_1", 8888, "US", "", {})
@@ -116,6 +127,66 @@ def test_reconcile_pushes_config():
     assert eng.reconcile() == {}
     assert runner.applied
     assert [i["tag"] for i in runner.applied[0]["inbounds"]] == ["in-nordvpn-us_1"]
+
+
+class _PortStealRunner:
+    """Fails the first apply with sing-box's address-in-use error, then works."""
+
+    def __init__(self, stolen_port):
+        self.stolen_port = stolen_port
+        self.applied = []
+
+    def apply(self, config):
+        self.applied.append(config)
+        if len(self.applied) == 1:
+            raise singbox.SingBoxError(
+                "sing-box exited immediately (code 1); last log lines:\n"
+                "FATAL[0000] start service: start inbound/mixed[in-x]: listen tcp "
+                f"127.0.0.1:{self.stolen_port}: bind: address already in use"
+            )
+        return True
+
+    def is_running(self):
+        return True
+
+
+def test_reconcile_reallocates_a_stolen_channel_port():
+    store = Store.load()
+    store.add_provider("nordvpn")
+    ch = store.add_channel("nordvpn", "US", "", dict(WG))
+    eng = Engine(Store.load())
+    runner = _PortStealRunner(ch.port)
+    eng.runner = cast(singbox.Runner, runner)
+
+    assert eng.reconcile() == {}
+    assert len(runner.applied) == 2  # failed once, retried after reallocation
+    moved = Store.load().get_channel("nordvpn", ch.id)
+    assert moved is not None and moved.port != ch.port
+    assert runner.applied[1]["inbounds"][0]["listen_port"] == moved.port
+
+
+def test_reconcile_regenerates_a_stolen_clash_api_port():
+    before = singbox.clash_api()
+    stolen = int(before["address"].rsplit(":", 1)[1])
+    eng = Engine(Store.load())
+    runner = _PortStealRunner(stolen)
+    eng.runner = cast(singbox.Runner, runner)
+
+    eng.reconcile()
+    after = singbox.clash_api()
+    assert after["secret"] != before["secret"]  # endpoint was regenerated
+    assert runner.applied[1]["experimental"]["clash_api"]["secret"] == after["secret"]
+
+
+def test_reconcile_propagates_non_port_failures():
+    class _BrokenRunner:
+        def apply(self, config):
+            raise singbox.SingBoxError("could not download sing-box: offline")
+
+    eng = Engine(Store.load())
+    eng.runner = cast(singbox.Runner, _BrokenRunner())
+    with pytest.raises(singbox.SingBoxError, match="offline"):
+        eng.reconcile()
 
 
 def test_probe_all_logs_channel_details(monkeypatch):

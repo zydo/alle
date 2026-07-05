@@ -38,6 +38,18 @@ def test_tail_missing_empty_and_limited_lines():
     assert applog.tail(2) == "two\nthree"
 
 
+def test_log_rotates_past_max_size(monkeypatch):
+    monkeypatch.setattr(applog, "MAX_LOG_BYTES", 128)
+    for i in range(20):
+        applog.log(f"line {i:02d} with some padding to grow the file")
+
+    path = applog._log_path()
+    backup = path.with_name(path.name + ".1")
+    assert backup.exists()  # the oversized file was moved aside, not truncated
+    assert path.stat().st_size < 256  # current file restarted small
+    assert "line 19" in applog.tail()  # latest lines are in the current file
+
+
 def test_follow_prints_existing_tail_and_closes(monkeypatch, capsys):
     path = applog._log_path()
     path.parent.mkdir(parents=True, exist_ok=True)

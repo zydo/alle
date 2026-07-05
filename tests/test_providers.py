@@ -137,6 +137,45 @@ def test_nord_locations_cache_and_forget(monkeypatch):
     assert calls == ["fetch", "fetch"]
 
 
+def test_nord_locations_cache_expires_after_ttl(monkeypatch):
+    calls = []
+
+    def fake_get_json(_url):
+        calls.append("fetch")
+        return [{"id": 1, "name": "US", "cities": []}]
+
+    providers.forget_nord_countries()
+    monkeypatch.setattr(providers, "_get_json", fake_get_json)
+    providers.nordvpn_locations()
+    assert calls == ["fetch"]
+
+    # age the cached entry past the TTL: the next call re-fetches
+    fetched_at, data = providers._nord_countries_cache
+    providers._nord_countries_cache = (fetched_at - providers.NORD_CACHE_TTL - 1, data)
+    providers.nordvpn_locations()
+    assert calls == ["fetch", "fetch"]
+
+
+def test_nord_locations_stale_cache_beats_refresh_failure(monkeypatch):
+    providers.forget_nord_countries()
+    monkeypatch.setattr(
+        providers,
+        "_get_json",
+        lambda _url: [{"id": 1, "name": "US", "cities": []}],
+    )
+    providers.nordvpn_locations()
+
+    # expire the cache, then make the refresh fail: stale data is served
+    fetched_at, data = providers._nord_countries_cache
+    providers._nord_countries_cache = (fetched_at - providers.NORD_CACHE_TTL - 1, data)
+    monkeypatch.setattr(
+        providers,
+        "_get_json",
+        lambda _url: (_ for _ in ()).throw(urllib.error.URLError("offline")),
+    )
+    assert providers.nordvpn_locations() == {"US": []}
+
+
 def test_nord_locations_fetch_error(monkeypatch):
     providers.forget_nord_countries()
     monkeypatch.setattr(

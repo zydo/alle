@@ -17,7 +17,9 @@ import hashlib
 import json
 import os
 import platform
+import secrets
 import signal
+import socket
 import subprocess
 import sys
 import tarfile
@@ -26,8 +28,8 @@ import time
 import urllib.request
 from pathlib import Path
 
-from alle import paths
-from alle.constants import CLASH_API_ADDRESS, SINGBOX_SHA256, SINGBOX_VERSION
+from alle import applog, paths, proc
+from alle.constants import SINGBOX_SHA256, SINGBOX_VERSION
 
 
 class SingBoxError(RuntimeError):
@@ -123,18 +125,77 @@ def _install(key: str, expected: str, target: Path) -> Path:
             src = tf.extractfile(member)
             if src is None:
                 raise SingBoxError(f"{asset} sing-box archive member is not a file")
-            with src:
-                target.write_bytes(src.read())
-    target.chmod(0o755)
-    got = _sha256_file(target)
-    if got != expected:
-        target.unlink(missing_ok=True)
-        raise SingBoxError(
-            f"sing-box checksum mismatch (expected {expected}, got {got}); "
-            "refusing to run an unverified binary."
-        )
+            # Stage next to the target and rename only after the checksum
+            # passes: the verified path never holds a partial or wrong binary,
+            # even mid-crash or with a concurrent ensure_binary() reading it.
+            fd, staged = tempfile.mkstemp(dir=str(target.parent), prefix=".sing-box-")
+            try:
+                with os.fdopen(fd, "wb") as out, src:
+                    out.write(src.read())
+                got = _sha256_file(Path(staged))
+                if got != expected:
+                    raise SingBoxError(
+                        f"sing-box checksum mismatch (expected {expected}, got {got}); "
+                        "refusing to run an unverified binary."
+                    )
+                os.chmod(staged, 0o755)
+                os.replace(staged, target)
+            finally:
+                if os.path.exists(staged):
+                    os.unlink(staged)
     print(f"alle: verified sing-box {SINGBOX_VERSION} ({key}).", file=sys.stderr)
     return target
+
+
+# ---- Clash API endpoint ------------------------------------------------------
+
+
+def _clash_api_path() -> Path:
+    return paths.state_dir() / "clash_api.json"
+
+
+def clash_api() -> dict:
+    """The local Clash API endpoint: ``{"address": "127.0.0.1:<port>", "secret"}``.
+
+    Generated once, kept ``0600``, and shared by the config builder (which tells
+    sing-box to require the secret) and the stats client. The secret gates an
+    API that exposes every connection's destination and can close connections —
+    without it, any local process or user could read or disturb the tunnels.
+    The port is allocated from the OS instead of hard-coded so two users (or
+    two ``ALLE_HOME``\\ s) on one machine don't fight over the same port.
+    """
+    p = _clash_api_path()
+    while True:
+        try:
+            cfg = json.loads(p.read_text())
+            address, secret_ = cfg.get("address"), cfg.get("secret")
+            if address and secret_:
+                return {"address": address, "secret": secret_}
+            p.unlink(missing_ok=True)  # incomplete — regenerate
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, AttributeError):
+            p.unlink(missing_ok=True)  # corrupt, but fully regenerable — rebuild
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        fresh = {"address": f"127.0.0.1:{port}", "secret": secrets.token_hex(16)}
+        try:
+            # O_EXCL: if two processes race to generate, exactly one wins and
+            # the loser re-reads the winner's file on the next pass.
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "w") as f:
+            json.dump(fresh, f, indent=2)
+            f.write("\n")
+        return fresh
+
+
+def forget_clash_api() -> None:
+    """Drop the generated Clash API endpoint so the next :func:`clash_api` call
+    allocates a fresh port + secret (used when another process stole the port)."""
+    _clash_api_path().unlink(missing_ok=True)
 
 
 # ---- process lifecycle -----------------------------------------------------
@@ -166,14 +227,14 @@ class Runner:
 
     def running_pid(self) -> int | None:
         pf = _pid_path()
-        if not pf.exists():
-            return None
         try:
             pid = int(pf.read_text().strip())
-            os.kill(pid, 0)
-            return pid
-        except (ValueError, OSError):
+        except (OSError, ValueError):
             return None
+        # PID-recycling guard: believe the pidfile only if the process behind
+        # the number really is a sing-box (see alle.proc), so a stale file can
+        # neither report a dead daemon as running nor let stop() kill a stranger.
+        return pid if proc.alive_matching(pid, ("sing-box",)) else None
 
     def is_running(self) -> bool:
         return self.running_pid() is not None
@@ -214,12 +275,13 @@ class Runner:
         not edited out from under the running process by accident — alle
         relaxes the mode only when it rewrites the file itself.
 
-        A running process is never taken down by a config sing-box itself rejects:
-        ``sing-box check`` guards every reload, and a failed check restores the
-        last-known-good config and leaves the running process untouched. sing-box
-        is kept running even with no inbounds (an idle daemon held alive by the
-        Clash API controller), so ``alle start`` with zero channels still reports
-        an active daemon. It is only stopped explicitly by ``alle stop``.
+        ``sing-box check`` guards every path, cold starts included (a bad config
+        used to reach the cold start and die silently right after fork): a failed
+        check restores the last-known-good config and leaves whatever process
+        state exists — running on the old config, or stopped — undisturbed.
+        sing-box is kept running even with no inbounds (an idle daemon held alive
+        by the Clash API controller), so ``alle start`` with zero channels still
+        reports an active daemon. It is only stopped explicitly by ``alle stop``.
         """
         new = json.dumps(config, indent=2)
         old = self.config_path.read_text() if self.config_path.exists() else None
@@ -227,41 +289,60 @@ class Runner:
             return False  # no change and the daemon is already up — leave it alone
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self._write_protected(new)
+        if not self.check():
+            # sing-box rejected the new config: roll back to the last-known-good
+            # file so a still-running process (on the old config) is undisturbed
+            # and a stopped one isn't started on a config known to be bad.
+            if old is not None:
+                self._write_protected(old)
+            return False
         if self.is_running():
-            if self.check():
-                if self.reload():
-                    return True  # reloaded in place (PID + start time preserved)
-                # config is valid but SIGHUP could not be delivered — full restart
-            else:
-                # sing-box rejected the new config: roll back to the last-known-good
-                # file so the still-running process (on the old config) is undisturbed.
-                if old is not None:
-                    self._write_protected(old)
-                return False
+            if self.reload():
+                return True  # reloaded in place (PID + start time preserved)
+            # config is valid but SIGHUP could not be delivered — full restart
         self.restart()
         return True
 
     def _write_protected(self, text: str) -> None:
-        """Write the config, then mark it read-only so casual edits are refused."""
+        """Write the config, then mark it read-only so casual edits are refused.
+
+        Created 0600 from the first byte — the config carries every channel's
+        WireGuard private key, so it must never exist under the default
+        (usually world-readable) umask mode, even briefly.
+        """
         if self.config_path.exists():
             os.chmod(self.config_path, 0o600)  # allow our own overwrite
-        self.config_path.write_text(text)
+        fd = os.open(self.config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
         os.chmod(self.config_path, 0o400)
 
     def start(self) -> None:
         if self.is_running():
             return
         binary = ensure_binary()
+        applog.rotate_if_needed(self.log_path, applog.MAX_LOG_BYTES)
         with open(self.log_path, "ab") as lf:
-            proc = subprocess.Popen(
+            child = subprocess.Popen(
                 [str(binary), "run", "-c", str(self.config_path)],
                 stdout=lf,
                 stderr=lf,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
             )
-        _pid_path().write_text(str(proc.pid))
+        _pid_path().write_text(str(child.pid))
         _started_path().write_text(str(int(time.time())))
+        # A config can pass `check` yet still die at startup (a port stolen by
+        # another process binds only at run time). Catch an immediate exit so
+        # the failure is loud instead of a dead PID behind a fresh pidfile.
+        time.sleep(0.3)
+        if child.poll() is not None:
+            _pid_path().unlink(missing_ok=True)
+            _started_path().unlink(missing_ok=True)
+            raise SingBoxError(
+                f"sing-box exited immediately (code {child.returncode}); "
+                f"last log lines:\n{self.logs(10)}"
+            )
 
     def stop(self) -> None:
         pid = self.running_pid()
@@ -290,19 +371,21 @@ class Runner:
         self.start()
 
     def check(self) -> bool:
-        """Validate the on-disk config with ``sing-box check``. True if it passes."""
-        try:
-            binary = ensure_binary()
-        except SingBoxError:
-            return False
-        proc = subprocess.run(
+        """Validate the on-disk config with ``sing-box check``. True if it passes.
+
+        Raises :class:`SingBoxError` when the binary itself cannot be obtained —
+        that is an environmental (retryable) failure, not a config problem, and
+        must not be mistaken for "config rejected" (which triggers a rollback).
+        """
+        binary = ensure_binary()
+        result = subprocess.run(
             [str(binary), "check", "-c", str(self.config_path)],
             capture_output=True,
             text=True,
         )
-        if proc.returncode != 0:
+        if result.returncode != 0:
             print(
-                f"alle: sing-box rejected the config:\n{proc.stderr.strip()}",
+                f"alle: sing-box rejected the config:\n{result.stderr.strip()}",
                 file=sys.stderr,
             )
             return False
@@ -335,9 +418,13 @@ class Runner:
         unreachable (e.g. sing-box still starting). This is the raw feed the
         metrics accumulator turns into durable per-channel totals.
         """
-        url = f"http://{CLASH_API_ADDRESS}/connections"
+        api = clash_api()
+        req = urllib.request.Request(
+            f"http://{api['address']}/connections",
+            headers={"Authorization": f"Bearer {api['secret']}"},
+        )
         try:
-            with urllib.request.urlopen(url, timeout=2) as r:  # noqa: S310 (loopback)
+            with urllib.request.urlopen(req, timeout=2) as r:  # noqa: S310 (loopback)
                 data = json.load(r)
         except (OSError, ValueError):
             return []

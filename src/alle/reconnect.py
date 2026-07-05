@@ -36,7 +36,13 @@ from __future__ import annotations
 import time
 
 from alle import applog
-from alle.providers import ProviderError, is_functional, kind, provider_wg
+from alle.providers import (
+    ProviderAuthError,
+    ProviderError,
+    is_functional,
+    kind,
+    provider_wg,
+)
 from alle.state import Store
 from alle.singbox import Runner
 
@@ -53,12 +59,12 @@ def _backoff(attempt: int) -> int:
 
 
 def _is_non_retryable(err: Exception) -> bool:
-    """True for auth-class failures that retrying can never fix (bad/missing token)."""
-    msg = str(err).lower()
-    return any(
-        marker in msg
-        for marker in ("401", "rejected", "not authenticated", "missing", "invalid")
-    )
+    """True for auth-class failures that retrying can never fix (bad/missing token).
+
+    Decided by exception *type*, not message text — a substring heuristic would
+    permanently fail a channel over a transient error whose message merely
+    contains a word like "invalid"."""
+    return isinstance(err, ProviderAuthError)
 
 
 def _probe_summary(probe: dict) -> str:

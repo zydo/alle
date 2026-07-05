@@ -150,10 +150,14 @@ def provider_remove_many(providers: list[str], dry_run: bool = False) -> dict:
     if dry_run:
         return {"providers": planned, "dry_run": True}
 
+    store = Store.load()
     for item in planned:
         provider = item["provider"]
+        # Store first: if a later step fails, the leftover is a stray credential
+        # on disk (which re-adding repairs), never a provider that is still
+        # listed but has silently lost its credential.
+        store.remove_provider(provider)
         credentials.remove(provider)
-        Store.load().remove_provider(provider)
         metrics.remove_provider(provider)
         applog.log(
             f"removed provider {provider} ({item['channels_removed']} channel(s))"

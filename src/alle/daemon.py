@@ -28,27 +28,49 @@ import sys
 import time
 from pathlib import Path
 
-from alle import applog, paths
+from alle import applog, paths, proc
 
 POLL_SECONDS = 1.0  # how often we check for a config change
 PROBE_INTERVAL = 30.0  # how often each channel is probed
 METRICS_INTERVAL = 2.0  # how often traffic counters are sampled from the Clash API
+RECONCILE_RETRY = 60.0  # retry a *failed* reconcile this often, sans state change
+
+# What the applier's command line looks like: ensure_running() spawns
+# ``<python> -m alle applier``; a hand-run ``alle applier`` (console script)
+# shows as ``.../bin/alle applier``. Used to reject recycled PIDs.
+_MARKERS = ("-m alle", "alle applier")
 
 
 def _pid_path() -> Path:
     return paths.state_dir() / "applier.pid"
 
 
+def _state_stamp() -> tuple[int, int]:
+    """Cheap change detector for state.json: ``(mtime_ns, size)``.
+
+    The 1 Hz poll compares this before parsing the file — every write replaces
+    state.json atomically (new inode, fresh mtime), so an unchanged stamp means
+    an unchanged file and the JSON parse + signature hash can be skipped.
+    """
+    from alle.state import _state_path
+
+    try:
+        st = os.stat(_state_path())
+    except OSError:
+        return (0, 0)
+    return (st.st_mtime_ns, st.st_size)
+
+
 def running_pid() -> int | None:
     pf = _pid_path()
-    if not pf.exists():
-        return None
     try:
         pid = int(pf.read_text().strip())
-        os.kill(pid, 0)  # liveness check
-        return pid
-    except (ValueError, OSError):
+    except (OSError, ValueError):
         return None
+    # PID-recycling guard: believe the pidfile only if the process behind the
+    # number really is an applier, so a stale file can neither block a fresh
+    # start nor let stop() kill a stranger.
+    return pid if proc.alive_matching(pid, _MARKERS) else None
 
 
 def is_running() -> bool:
@@ -67,6 +89,7 @@ def ensure_running() -> None:
         return
     env = dict(os.environ, ALLE_APPLIER="1")
     log = paths.state_dir() / "applier.log"
+    applog.rotate_if_needed(log, applog.MAX_LOG_BYTES)
     with open(log, "ab") as lf:
         proc = subprocess.Popen(
             [sys.executable, "-m", "alle", "applier"],
@@ -128,8 +151,8 @@ def run_applier() -> None:
         try:
             instance_lock.seek(0)
             holder = int(instance_lock.read().strip())
-            os.kill(holder, 0)  # liveness check
-            _pid_path().write_text(str(holder))
+            if proc.alive_matching(holder, _MARKERS):
+                _pid_path().write_text(str(holder))
         except (ValueError, OSError):
             pass
         applog.log("applier already running; duplicate exiting")
@@ -148,23 +171,37 @@ def run_applier() -> None:
     signal.signal(signal.SIGINT, _handle)
 
     _pid_path().write_text(str(os.getpid()))
+    last_stamp: tuple[int, int] | None = None
+    sig = None
     last_sig = None
     last_probe = 0.0
     last_metrics = 0.0
+    reconcile_ok = True
+    reconcile_retry_at = 0.0
     try:
         while not stop_flag["stop"]:
-            sig = config_signature(_read_raw())
-            if sig != last_sig:
+            now = time.monotonic()
+            stamp = _state_stamp()
+            if stamp != last_stamp:
+                last_stamp = stamp
+                sig = config_signature(_read_raw())
+            # A failed reconcile is retried on a timer even when the state file
+            # hasn't moved — the failure may be environmental (binary download
+            # offline, stolen port) and heal without a user edit.
+            if sig != last_sig or (not reconcile_ok and now >= reconcile_retry_at):
                 try:
                     Engine(Store.load()).reconcile()
+                    reconcile_ok = True
                 except Exception as e:  # noqa: BLE001 — one bad state must not kill the loop
-                    applog.log(f"reconcile failed: {e}")
+                    reconcile_ok = False
+                    reconcile_retry_at = now + RECONCILE_RETRY
+                    applog.log(
+                        f"reconcile failed (retrying in {int(RECONCILE_RETRY)}s): {e}"
+                    )
                     print(
                         f"applier: reconcile failed: {e}", file=sys.stderr, flush=True
                     )
                 last_sig = sig
-
-            now = time.monotonic()
             # Traffic sampling runs on its own faster cadence than probing: the
             # Clash API only reports live connections, so the more often we look
             # the fewer short-lived connections slip through between samples.

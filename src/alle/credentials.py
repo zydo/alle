@@ -10,11 +10,12 @@ preview of secret values, never the raw credential.
 from __future__ import annotations
 
 import os
-import stat
+import tempfile
 
 import yaml
 
 from alle import paths
+from alle.state import _quarantine
 
 
 def _path():
@@ -25,23 +26,43 @@ def _load_all() -> dict[str, dict]:
     p = _path()
     if not p.exists():
         return {}
-    data = yaml.safe_load(p.read_text()) or {}
-    return data.get("providers") or {}
+    try:
+        text = p.read_text()
+    except OSError:
+        return {}
+    try:
+        data = yaml.safe_load(text) or {}
+        if not isinstance(data, dict):
+            raise yaml.YAMLError("root is not a mapping")
+    except yaml.YAMLError as e:
+        # Preserve the bytes and fail loudly: a save after a silent empty read
+        # would otherwise wipe every provider's credential (see state._quarantine).
+        _quarantine(p, e)
+        return {}
+    providers = data.get("providers") or {}
+    return providers if isinstance(providers, dict) else {}
 
 
 def _save_all(providers: dict[str, dict]) -> None:
     p = _path()
     p.parent.mkdir(parents=True, exist_ok=True)
     header = "# Managed by alle. Provider login credentials — keep this file private.\n"
-    # Created 0600 from the first byte — never a window where the file holds
-    # secrets under the default (usually world-readable) umask mode.
-    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
-    with os.fdopen(fd, "w") as f:
-        f.write(header)
-        yaml.safe_dump(
-            {"providers": providers}, f, sort_keys=False, default_flow_style=False
-        )
-    os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)  # tighten a pre-existing looser file too
+    # mkstemp creates the temp file 0600 from the first byte — never a window
+    # where secrets sit under the default (usually world-readable) umask mode —
+    # and the atomic rename means a crash mid-write keeps the previous file.
+    fd, tmp = tempfile.mkstemp(
+        dir=str(p.parent), prefix=".credentials-", suffix=".yaml"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(header)
+            yaml.safe_dump(
+                {"providers": providers}, f, sort_keys=False, default_flow_style=False
+            )
+        os.replace(tmp, p)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def get(provider: str) -> dict | None:

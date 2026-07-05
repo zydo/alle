@@ -462,9 +462,16 @@ def _provider_help() -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = _HelpOnErrorParser(prog="alle", description=__doc__)
+    # Deliberately not __doc__: the module docstring is developer documentation;
+    # --help gets one line and the command list speaks for itself.
+    p = _HelpOnErrorParser(
+        prog="alle",
+        description="A universal VPN client that manages multiple VPN connections "
+        "with rule-based routing.",
+    )
     p.set_defaults(func=_show_help(p))
-    sub = p.add_subparsers(dest="command")
+    # metavar keeps the usage line short and hides help-less commands (applier)
+    sub = p.add_subparsers(dest="command", metavar="<command>")
 
     # providers
     pr = sub.add_parser("providers", help="manage VPN providers")
