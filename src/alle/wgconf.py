@@ -74,12 +74,17 @@ def _require_wg_key(name: str, value: str) -> None:
     Checked at import time so a truncated paste or a mixed-up value fails with
     a message naming the field, instead of surfacing later as an opaque
     ``sing-box check`` rejection of the generated config.
+
+    The decode→re-encode round trip requires the *canonical* form, matching
+    WireGuard's own key parser — and unlike ``validate=True`` alone it behaves
+    identically on every Python (only 3.11+ rejects excess padding natively).
     """
     try:
         decoded = base64.b64decode(value, validate=True)
+        ok = len(decoded) == 32 and base64.b64encode(decoded).decode() == value
     except (binascii.Error, ValueError):
-        decoded = b""
-    if len(decoded) != 32:
+        ok = False
+    if not ok:
         raise ConfError(f"{name} is not a valid WireGuard key (32 bytes, base64)")
 
 
