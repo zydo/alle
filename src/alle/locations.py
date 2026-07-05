@@ -1,10 +1,10 @@
 """Per-provider country/city lists, cached on disk under ``$ALLE_HOME``.
 
 Source of truth: the **provider's own API** (e.g. NordVPN's ``/v1/servers/countries``),
-fetched via ``providers.PROVIDERS[p]["locations"]``. Unlike the old gluetun-image
-extraction, this never lags behind what the provider actually offers — the same API
-also resolves the concrete server we connect to, so cached choices cannot drift
-away from what will actually be connected.
+fetched via ``providers.PROVIDERS[p]["locations"]`` — so the list never lags behind
+what the provider actually offers, and because the same API also resolves the
+concrete server we connect to, cached choices cannot drift away from what will
+actually be connected.
 
 The cache is refreshed on demand when missing, stale (older than ``MAX_AGE``), or
 built by a different source tag.
