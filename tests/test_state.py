@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import stat
 
+import pytest
+
 from alle import paths
-from alle.state import Store, config_signature
+from alle.state import ReferencedError, Store, config_signature
 
 WG = {
     "private_key": "PRIV=",
@@ -166,6 +168,94 @@ def test_non_object_state_is_quarantined():
     _state_file().write_text('["not", "an", "object"]')  # valid JSON, wrong shape
     assert Store.load().provider_names() == []
     assert len(list(paths.state_dir().glob("state.json.corrupt-*"))) == 1
+
+
+# ---- router entrypoint + rules --------------------------------------------------
+
+
+def test_router_port_is_a_contract():
+    store = Store.load()
+    port = store.ensure_router_port()
+    assert port > 0
+    assert store.ensure_router_port() == port  # allocated once, then stable
+    assert Store.load().router["port"] == port
+    store.add_provider("nordvpn")
+    ch = store.add_channel("nordvpn", "US", "", dict(WG))
+    assert ch.port != port  # channel allocation avoids the router's port
+
+
+def test_rules_get_stable_sequential_ids():
+    store = Store.load()
+    store.add_provider("nordvpn")
+    store.add_channel("nordvpn", "US", "", dict(WG))
+    a = store.add_rule("domain_suffix", "netflix.com", "nordvpn/us_1")
+    b = store.add_rule("ip_cidr", "10.0.0.0/8", "direct")
+    assert [a["id"], b["id"]] == ["r1", "r2"]
+    store.remove_rules(["r1"])
+    c = store.add_rule("all", "", "block")
+    assert c["id"] == "r3"  # ids are never reused while later ones exist
+    assert [r["id"] for r in Store.load().rules()] == ["r2", "r3"]
+
+
+def test_rule_channel_target_must_exist():
+    store = Store.load()
+    store.add_provider("nordvpn")
+    with pytest.raises(ValueError, match="no channel 'nordvpn/us_1'"):
+        store.add_rule("domain", "a.com", "nordvpn/us_1")
+    # direct/block targets need no channel
+    assert store.add_rule("domain", "a.com", "direct")["id"] == "r1"
+
+
+def test_referenced_channel_cannot_be_removed():
+    store = Store.load()
+    store.add_provider("nordvpn")
+    ch = store.add_channel("nordvpn", "US", "", dict(WG))
+    store.add_rule("domain_suffix", "netflix.com", f"nordvpn/{ch.id}")
+
+    with pytest.raises(ReferencedError) as exc:
+        store.remove_channel("nordvpn", ch.id)
+    assert f"nordvpn/{ch.id}" in exc.value.blockers
+    with pytest.raises(ReferencedError):
+        store.remove_provider("nordvpn")
+    assert Store.load().get_channel("nordvpn", ch.id) is not None  # untouched
+
+    store.remove_rules(["r1"])
+    assert store.remove_channel("nordvpn", ch.id) is True  # unreferenced → fine
+
+
+def test_killswitch_round_trips():
+    store = Store.load()
+    assert store.router["killswitch"] is False
+    store.set_killswitch(True)
+    assert Store.load().router["killswitch"] is True
+
+
+def test_reallocate_covers_the_router_port():
+    store = Store.load()
+    port = store.ensure_router_port()
+    moved = store.reallocate_channel_ports({port})
+    assert len(moved) == 1
+    who, what, old, new = moved[0]
+    assert (who, what, old) == ("router", "entrypoint", port)
+    assert new != port and Store.load().router["port"] == new
+
+
+def test_config_signature_tracks_router_changes():
+    from alle.state import _read_raw
+
+    store = Store.load()
+    empty = config_signature(_read_raw())
+    store.ensure_router_port()
+    with_port = config_signature(_read_raw())
+    assert with_port != empty  # port allocation must trigger a reconcile
+    store.add_provider("nordvpn")
+    store.add_channel("nordvpn", "US", "", dict(WG))
+    before = config_signature(_read_raw())
+    store.add_rule("domain", "a.com", "nordvpn/us_1")
+    after_rule = config_signature(_read_raw())
+    assert after_rule != before  # rule edits reconcile like channel edits
+    store.set_killswitch(True)
+    assert config_signature(_read_raw()) != after_rule
 
 
 def test_config_signature_ignores_probe_results():

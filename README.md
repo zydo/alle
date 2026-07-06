@@ -41,10 +41,10 @@ once, each used where it is needed.
 ## What alle does
 
 `alle` runs multiple VPN exits side by side. Each exit is exposed as its own
-local HTTP+SOCKS proxy on `127.0.0.1:<port>`. A single HTTP+SOCKS entry point
-will route traffic by rule to a VPN exit or to direct outbound with no proxy.
-Instead of changing your whole machine's VPN location, you point each app,
-browser profile, script, or test job at the path it needs.
+local HTTP+SOCKS proxy on `127.0.0.1:<port>`. A single HTTP+SOCKS router
+entrypoint routes traffic by rule (domain, IP) to a VPN exit, to direct
+outbound, or blocks it. Instead of changing your whole machine's VPN location,
+you point each app, browser profile, script, or test job at the path it needs.
 
 Under the hood, `alle` manages one
 [`sing-box`](https://github.com/SagerNet/sing-box) process. Each channel becomes
@@ -76,38 +76,43 @@ run at the same time.
 | Phase             | Status                                                                 |
 | ----------------- | ---------------------------------------------------------------------- |
 | Core CLI          | Providers, channels, per-channel proxies, status, tests, logs, metrics |
-| Routing           | Planned                                                                |
+| Routing           | Router entrypoint with domain/CIDR rules, kill-switch, shadow lint     |
 | Web UI            | Planned                                                                |
 | Desktop companion | Planned                                                                |
 | Distribution      | PyPI CLI package; native installers planned                            |
 
 ## Install
 
-`alle` requires Python 3.10 or newer.
+`alle` is a Python CLI (Python 3.10+) installed as a user-level tool — no sudo.
+Two recommended, fully explicit paths; each step is an ordinary command you can
+inspect, and the tool that installed `alle` is also the one that upgrades and
+uninstalls it.
 
-With `pip`:
-
-```bash
-python -m pip install alle-proxy
-```
-
-With `pipx`:
+**With [`uv`](https://docs.astral.sh/uv/getting-started/installation/):**
 
 ```bash
-pipx install alle-proxy
-```
-
-With `uv` as an installed tool:
-
-```bash
+# 1. install uv (see its docs for other methods)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# 2. install the alle CLI
 uv tool install alle-proxy
+# 3. register the background daemon as a login service
+#    (planned — today the runtime auto-starts on first use / `alle start`)
+alle daemon install
 ```
 
-Or run it directly with `uvx`:
+**With [`pipx`](https://pipx.pypa.io/stable/installation/):**
 
 ```bash
-uvx --from alle-proxy alle --help
+# 1. install pipx (e.g. `brew install pipx` or your distro's package)
+# 2. install the alle CLI
+pipx install alle-proxy
+# 3. register the background daemon as a login service
+#    (planned — today the runtime auto-starts on first use / `alle start`)
+alle daemon install
 ```
+
+Also works: `python -m pip install alle-proxy` into an environment you manage,
+or one-off runs with `uvx --from alle-proxy alle --help`.
 
 After installation:
 
@@ -115,6 +120,12 @@ After installation:
 alle version
 alle --help
 ```
+
+**Uninstall** with the same tool that installed it — `uv tool uninstall
+alle-proxy` or `pipx uninstall alle-proxy` (run `alle stop` first). `~/.alle`
+is left behind since it holds your provider credentials and WireGuard keys; a
+reinstall picks up where you left off. Remove it with `rm -rf ~/.alle` if you
+want everything gone.
 
 ## Quick start
 
@@ -210,7 +221,38 @@ For the complete command reference, see the
 
 ## Rule-based routing
 
-To be implemented.
+Besides the per-channel ports, `alle` runs one **router entrypoint** — a single
+local HTTP+SOCKS proxy that dispatches each connection by rule to a channel, to
+`direct` (no VPN), or to `block`. The entrypoint is always on: with no rules it
+is a transparent pass-through, and traffic only uses a VPN exit once you wire a
+rule to one. Its port is assigned once and stays stable (`alle status` shows it),
+so apps and future OS-level profiles can point at it permanently.
+
+```bash
+alle routes add nordvpn/united_states_1 --domain-suffix netflix.com
+alle routes add direct --cidr 192.168.0.0/16
+alle routes add block --domain tracker.example.com
+alle routes add nordvpn/japan_1 --all       # catch-all: VPN by default
+alle routes ls
+```
+
+- **Matchers** (one per rule): `--domain` (exact), `--domain-suffix` (the domain
+  and its subdomains), `--cidr` (destination IP/CIDR — matches IP-literal
+  destinations; domain destinations are not resolved for matching), and `--all`.
+- **First match wins**, in the order rules were added (`alle routes ls` shows
+  evaluation order). A rule that can never match because an earlier rule covers
+  it is flagged as *shadowed* when you add it and in `routes ls`.
+- **Unmatched traffic goes direct** — without a VPN — like other modern VPN
+  clients. To block unmatched traffic instead (a kill-switch for the router
+  entrypoint), turn it on explicitly: `alle routes killswitch on`. Per-channel
+  ports are never affected by the kill-switch.
+- **Channels referenced by rules cannot be removed.** `alle channels rm` (and
+  `alle providers rm`, for any of its channels) refuses while a rule targets the
+  channel, listing every referencing rule and the exact `alle routes rm …` to
+  run first. Remove the rules, then the channel — routing config never changes
+  as a side effect of something else.
+- Per-channel ports keep working exactly as before, with or without rules — the
+  router is an addition, never a replacement.
 
 ## How it works
 
@@ -220,7 +262,8 @@ To be implemented.
 
 - `alle` manages one [`sing-box`](https://github.com/SagerNet/sing-box) process
   instead of starting one VPN process per channel. The generated config contains
-  one local HTTP+SOCKS inbound per channel.
+  one local HTTP+SOCKS inbound per channel, plus the router entrypoint inbound
+  whose sing-box route rules are compiled from `alle routes`.
 
 - Each channel routes to one WireGuard peer. NordVPN channels are created from
   the provider API; Proton VPN channels are created by importing a WireGuard

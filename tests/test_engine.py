@@ -25,9 +25,11 @@ WG = {
 }
 
 
-def _store(*specs):
+def _store(*specs, router=None):
     """specs: (provider, id, port, country, city, wg) tuples."""
     data = {"version": 1, "providers": {}}
+    if router is not None:
+        data["router"] = router
     for provider, cid, port, country, city, wg in specs:
         prov = data["providers"].setdefault(provider, {"channels": {}})
         prov["channels"][cid] = {
@@ -38,6 +40,14 @@ def _store(*specs):
             "probe": {},
         }
     return Store(data=data)
+
+
+def _router(*rules, port=40000, killswitch=False):
+    numbered = [
+        {"id": f"r{i + 1}", "type": t, "value": v, "target": target}
+        for i, (t, v, target) in enumerate(rules)
+    ]
+    return {"port": port, "killswitch": killswitch, "rules": numbered}
 
 
 def test_each_channel_becomes_an_inbound_and_endpoint():
@@ -95,6 +105,91 @@ def test_config_authenticates_the_clash_api():
         "external_controller": api["address"],
         "secret": api["secret"],
     }
+
+
+def test_router_entrypoint_compiles_rules_in_order():
+    store = _store(
+        ("nordvpn", "us_1", 8888, "US", "", dict(WG)),
+        router=_router(
+            ("domain", "api.google.com", "nordvpn/us_1"),
+            ("domain_suffix", "netflix.com", "direct"),
+            ("ip_cidr", "10.0.0.0/8", "block"),
+            ("all", "", "nordvpn/us_1"),
+        ),
+    )
+    config, errors = Engine(store)._build_config()
+    assert errors == {}
+    router_in = next(i for i in config["inbounds"] if i["tag"] == "in-router")
+    assert router_in == {
+        "type": "mixed",
+        "tag": "in-router",
+        "listen": "127.0.0.1",
+        "listen_port": 40000,
+    }
+    rules = config["route"]["rules"]
+    assert rules[0] == {"inbound": ["in-nordvpn-us_1"], "outbound": "out-nordvpn-us_1"}
+    assert rules[1] == {"inbound": ["in-router"], "action": "sniff"}
+    assert rules[2] == {
+        "inbound": ["in-router"],
+        "domain": ["api.google.com"],
+        "outbound": "out-nordvpn-us_1",
+    }
+    assert rules[3] == {
+        "inbound": ["in-router"],
+        "domain_suffix": ["netflix.com"],
+        "outbound": "direct",
+    }
+    assert rules[4] == {
+        "inbound": ["in-router"],
+        "ip_cidr": ["10.0.0.0/8"],
+        "action": "reject",
+    }
+    assert rules[5] == {"inbound": ["in-router"], "outbound": "out-nordvpn-us_1"}
+    assert config["route"]["final"] == "direct"  # unmatched passes through
+
+
+def test_killswitch_appends_a_trailing_reject():
+    store = _store(router=_router(killswitch=True))
+    config, _ = Engine(store)._build_config()
+    assert config["route"]["rules"][-1] == {
+        "inbound": ["in-router"],
+        "action": "reject",
+    }
+
+
+def test_unallocated_router_port_means_no_router_inbound():
+    store = _store(
+        ("nordvpn", "us_1", 8888, "US", "", dict(WG)), router=_router(port=0)
+    )
+    config, errors = Engine(store)._build_config()
+    assert errors == {}
+    assert [i["tag"] for i in config["inbounds"]] == ["in-nordvpn-us_1"]
+
+
+def test_dangling_rule_reference_is_dropped_and_reported():
+    store = _store(
+        ("nordvpn", "us_1", 8888, "US", "", dict(WG)),
+        router=_router(
+            ("domain", "a.com", "nordvpn/gone_1"),  # no such channel
+            ("domain", "b.com", "nordvpn/us_1"),
+        ),
+    )
+    config, errors = Engine(store)._build_config()
+    assert "rule r1" in errors and "nordvpn/gone_1" in errors["rule r1"]
+    compiled = [r for r in config["route"]["rules"] if r.get("domain")]
+    assert [r["domain"] for r in compiled] == [["b.com"]]  # healthy rule survives
+
+
+def test_rule_targeting_unbuildable_channel_is_dropped():
+    store = _store(
+        ("nordvpn", "us_1", 8888, "US", "", {}),  # channel itself fails to build
+        router=_router(("domain", "a.com", "nordvpn/us_1")),
+    )
+    config, errors = Engine(store)._build_config()
+    assert "nordvpn/us_1" in errors and "rule r1" in errors
+    # neither a dangling outbound reference nor a half-built channel in the config
+    assert config["endpoints"] == []
+    assert all("domain" not in r for r in config["route"]["rules"])
 
 
 def test_malformed_channel_omitted_and_reported():

@@ -27,3 +27,8 @@ SINGBOX_SHA256 = {
 # inbound/outbound deterministically.
 INBOUND_PREFIX = "in-"
 OUTBOUND_PREFIX = "out-"
+
+# The always-on router entrypoint's inbound tag. Cannot collide with channel
+# tags (in-<provider>-<id>): provider keys are registry words, and tag_to_ref
+# ignores two-part tags, so stats/metrics never mistake it for a channel.
+ROUTER_INBOUND_TAG = "in-router"

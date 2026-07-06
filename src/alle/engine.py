@@ -17,6 +17,7 @@ import re
 import time
 
 from alle import applog, probe, singbox
+from alle.constants import OUTBOUND_PREFIX, ROUTER_INBOUND_TAG
 from alle.providers import ProviderError
 from alle.state import Channel, Store
 
@@ -85,6 +86,7 @@ class Engine:
 
     def _build_config(self) -> tuple[dict, dict[str, str]]:
         inbounds, endpoints, rules, errors = [], [], [], {}
+        built: set[tuple[str, str]] = set()
         for ch in self.store.channels():
             try:
                 endpoint = self._endpoint(ch)
@@ -101,6 +103,8 @@ class Engine:
             )
             endpoints.append(endpoint)
             rules.append({"inbound": [ch.inbound_tag], "outbound": ch.outbound_tag})
+            built.add((ch.provider, ch.id))
+        self._router_config(inbounds, rules, built, errors)
         api = singbox.clash_api()
         config = {
             "log": {"level": "warn", "timestamp": True},
@@ -116,6 +120,68 @@ class Engine:
             "route": {"rules": rules, "final": "direct"},
         }
         return config, errors
+
+    def _router_config(
+        self,
+        inbounds: list[dict],
+        rules: list[dict],
+        built: set[tuple[str, str]],
+        errors: dict[str, str],
+    ) -> None:
+        """Append the always-on router entrypoint and its compiled rules.
+
+        Layout (order is law): the per-channel exact rules already precede
+        these; then a ``sniff`` action (the pinned sing-box dropped inbound
+        sniffing — IP-dialing apps need it for domain rules), the user rules in
+        stored order, and unmatched handling — a trailing ``reject`` when the
+        kill-switch is on, otherwise fall-through to ``route.final: direct``.
+
+        Defense-in-depth: a rule whose channel target is not in this build
+        (removed behind our back, or the channel itself failed to build) is
+        dropped and reported via ``errors`` — sing-box would reject the whole
+        config over one missing outbound tag.
+        """
+        router = self.store.router
+        port = int(router.get("port") or 0)
+        if not port:
+            return  # not yet allocated (first daemon start does it)
+        inbounds.append(
+            {
+                "type": "mixed",
+                "tag": ROUTER_INBOUND_TAG,
+                "listen": "127.0.0.1",
+                "listen_port": port,
+            }
+        )
+        rules.append({"inbound": [ROUTER_INBOUND_TAG], "action": "sniff"})
+        matcher_fields = {
+            "domain": "domain",
+            "domain_suffix": "domain_suffix",
+            "ip_cidr": "ip_cidr",
+        }
+        for rule in router.get("rules") or []:
+            ref = f"rule {rule.get('id')}"
+            compiled: dict = {"inbound": [ROUTER_INBOUND_TAG]}
+            mtype = rule.get("type")
+            if mtype in matcher_fields:
+                compiled[matcher_fields[mtype]] = [rule.get("value")]
+            elif mtype != "all":
+                errors[ref] = f"unknown matcher type {mtype!r}"
+                continue
+            target = str(rule.get("target", ""))
+            if target == "direct":
+                compiled["outbound"] = "direct"
+            elif target == "block":
+                compiled["action"] = "reject"
+            else:
+                provider, _, cid = target.partition("/")
+                if (provider, cid) not in built:
+                    errors[ref] = f"references missing channel {target}"
+                    continue
+                compiled["outbound"] = f"{OUTBOUND_PREFIX}{provider}-{cid}"
+            rules.append(compiled)
+        if router.get("killswitch"):
+            rules.append({"inbound": [ROUTER_INBOUND_TAG], "action": "reject"})
 
     # ---- reconcile ---------------------------------------------------------
     def reconcile(self) -> dict[str, str]:
@@ -143,9 +209,9 @@ class Engine:
             self._errors = errors
             changed = self.runner.apply(config)  # a second failure propagates
         if changed:
-            applog.log(
-                f"reconciled sing-box: {len(config['inbounds'])} channel(s) live"
-            )
+            live = sum(1 for i in config["inbounds"] if i["tag"] != ROUTER_INBOUND_TAG)
+            router = "+ router" if len(config["inbounds"]) > live else "no router"
+            applog.log(f"reconciled sing-box: {live} channel(s) live, {router}")
         return errors
 
     def _recover_stolen_ports(self, err_text: str) -> bool:

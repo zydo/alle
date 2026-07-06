@@ -138,6 +138,53 @@ def locations(data: dict) -> str:
     return "\n".join(lines)
 
 
+def _router_where(router: dict) -> str:
+    port = router.get("port")
+    return f"127.0.0.1:{port}" if port else "(port assigned on next daemon start)"
+
+
+def _router_mode(router: dict) -> str:
+    """One phrase for the entrypoint's behavior — must never let a user believe
+    they are behind a VPN when the router is passing traffic through."""
+    n = router.get("rule_count", 0)
+    if not n and not router.get("killswitch"):
+        return "pass-through (no rules)"
+    mode = f"{n} rule(s), unmatched → {router['unmatched']}"
+    if router.get("killswitch"):
+        mode += " — kill-switch ON"
+    return mode
+
+
+def routes_list(data: dict) -> str:
+    router = data["router"]
+    head = f"Router entrypoint {_router_where(router)} — {_router_mode(router)}"
+    rules = data["rules"]
+    if not rules:
+        if data.get("filter"):
+            return f"No rules targeting {data['filter']!r}. See: alle routes ls"
+        return "\n".join(
+            [
+                head,
+                "No routing rules — the entrypoint passes everything through "
+                "without a VPN.",
+                "Add one:  alle routes add <provider>/<channel> --domain-suffix example.com",
+            ]
+        )
+    headers = ["ID", "MATCH", "TARGET", "NOTE"]
+    rows = [
+        [
+            r["id"],
+            r["match"],
+            r["target"],
+            f"shadowed by {r['shadowed_by']} — never matches"
+            if r.get("shadowed_by")
+            else "",
+        ]
+        for r in rules
+    ]
+    return "\n".join([head, *_table(headers, rows)])
+
+
 def metrics(data: dict) -> str:
     channels = data["channels"]
     if not channels:
@@ -266,6 +313,9 @@ def status(snapshot: dict) -> str:
         return "\n".join(lines)
 
     lines = ["Alle - Active"]
+    router = snapshot.get("router")
+    if router:
+        lines.append(f"  Router  {_router_where(router)} — {_router_mode(router)}")
     if not channels:
         lines.append(
             '  (no channels yet — add one: alle channels add nordvpn --country "United States")'

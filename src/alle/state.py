@@ -55,6 +55,7 @@ def _next_free_port(data: dict) -> int:
         for prov in (data.get("providers") or {}).values()
         for ch in (prov.get("channels") or {}).values()
     }
+    used.add(int((data.get("router") or {}).get("port") or 0))
     for _ in range(100):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", 0))
@@ -138,7 +139,36 @@ def _lock_path() -> Path:
 
 
 def _blank() -> dict:
-    return {"version": STATE_VERSION, "providers": {}}
+    return {"version": STATE_VERSION, "providers": {}, "router": _router_blank()}
+
+
+def _router_blank() -> dict:
+    """The router entrypoint's state: contract port (0 = not yet allocated),
+    the explicit kill-switch flag, and the ordered rule list."""
+    return {"port": 0, "killswitch": False, "rules": []}
+
+
+class ReferencedError(RuntimeError):
+    """Removal refused: routing rules still reference the channel(s).
+
+    ``blockers`` maps ``"provider/cid"`` to the referencing rule dicts. Raised
+    from *inside* the removal transaction so the restrict-only invariant holds
+    under concurrent writers, not just at CLI plan time.
+    """
+
+    def __init__(self, blockers: dict[str, list[dict]]):
+        self.blockers = blockers
+        super().__init__("channel(s) are referenced by routing rules")
+
+
+def _rules_referencing(data: dict, refs: set[tuple[str, str]]) -> dict[str, list[dict]]:
+    """``"provider/cid" -> [rule, …]`` for rules targeting any of ``refs``."""
+    out: dict[str, list[dict]] = {}
+    for rule in (data.get("router") or {}).get("rules") or []:
+        provider, _, cid = str(rule.get("target", "")).partition("/")
+        if cid and (provider, cid) in refs:
+            out.setdefault(f"{provider}/{cid}", []).append(dict(rule))
+    return out
 
 
 def _quarantine(p: Path, err: Exception) -> None:
@@ -176,6 +206,7 @@ def _read_raw() -> dict:
         return _blank()
     data.setdefault("version", STATE_VERSION)
     data.setdefault("providers", {})
+    data.setdefault("router", _router_blank())
     return data
 
 
@@ -244,8 +275,17 @@ class Store:
         self.data = _read_raw()
 
     def remove_provider(self, provider: str) -> int:
-        """Remove a provider and all its channels. Returns channels removed."""
+        """Remove a provider and all its channels. Returns channels removed.
+
+        Raises :class:`ReferencedError` if any of its channels is still the
+        target of a routing rule (restrict-only removal — checked inside the
+        transaction so a rule added concurrently cannot slip through).
+        """
         with transaction() as data:
+            chans = (data["providers"].get(provider) or {}).get("channels") or {}
+            blockers = _rules_referencing(data, {(provider, cid) for cid in chans})
+            if blockers:
+                raise ReferencedError(blockers)
             prov = data["providers"].pop(provider, None)
             count = len(prov.get("channels", {})) if prov else 0
         self.data = _read_raw()
@@ -338,8 +378,13 @@ class Store:
         return self.get_channel(provider, cid), created  # type: ignore[return-value]
 
     def remove_channel(self, provider: str, cid: str) -> bool:
+        """Remove one channel. Raises :class:`ReferencedError` if a routing rule
+        still targets it (restrict-only removal, enforced in the transaction)."""
         removed = False
         with transaction() as data:
+            blockers = _rules_referencing(data, {(provider, cid)})
+            if blockers:
+                raise ReferencedError(blockers)
             prov = data["providers"].get(provider) or {}
             removed = (prov.get("channels") or {}).pop(cid, None) is not None
         self.data = _read_raw()
@@ -380,6 +425,9 @@ class Store:
         so a single stolen port would otherwise take every channel down.
         Returns ``(provider, cid, old_port, new_port)`` per moved channel; the
         state change moves the config signature, so the daemon re-reconciles.
+        The router entrypoint's contract port is covered too (reported as
+        ``("router", "entrypoint", …)``) — stolen-port recovery is the one
+        sanctioned way that port may ever change.
         """
         moved = []
         with transaction() as data:
@@ -390,8 +438,99 @@ class Store:
                         new = _next_free_port(data)
                         ch["port"] = new
                         moved.append((provider, cid, old, new))
+            router = data.setdefault("router", _router_blank())
+            old = int(router.get("port") or 0)
+            if old and old in ports:
+                new = _next_free_port(data)
+                router["port"] = new
+                moved.append(("router", "entrypoint", old, new))
         self.data = _read_raw()
         return moved
+
+    # ---- router entrypoint + rules -------------------------------------------
+    @property
+    def router(self) -> dict:
+        return self.data.get("router") or _router_blank()
+
+    def rules(self) -> list[dict]:
+        """The ordered routing rules (evaluation order; first match wins)."""
+        return [dict(r) for r in self.router.get("rules") or []]
+
+    def ensure_router_port(self) -> int:
+        """Allocate the router entrypoint's contract port once; return it.
+
+        The port is a contract with external configuration (apps, OS profiles
+        point at it), so after first allocation it is never changed here —
+        only stolen-port recovery may move it.
+        """
+        port = int(self.router.get("port") or 0)
+        if port:
+            return port
+        with transaction() as data:
+            router = data.setdefault("router", _router_blank())
+            if not int(router.get("port") or 0):
+                router["port"] = _next_free_port(data)
+            port = router["port"]
+        self.data = _read_raw()
+        return port
+
+    def add_rule(self, matcher_type: str, value: str, target: str) -> dict:
+        """Append a routing rule (order is law) and return it with its id.
+
+        A channel target must exist at append time — verified inside the
+        transaction (raises ``ValueError``), the mirror image of the removal
+        guard: a rule can never be born dangling, and a referenced channel can
+        never be removed.
+        """
+        with transaction() as data:
+            provider, _, cid = target.partition("/")
+            if cid:
+                chans = (data["providers"].get(provider) or {}).get("channels") or {}
+                if cid not in chans:
+                    raise ValueError(f"no channel {target!r} to route to")
+            router = data.setdefault("router", _router_blank())
+            rules = router.setdefault("rules", [])
+            taken = [
+                int(r["id"][1:])
+                for r in rules
+                if str(r.get("id", "")).startswith("r") and r["id"][1:].isdigit()
+            ]
+            rule = {
+                "id": f"r{max(taken, default=0) + 1}",
+                "type": matcher_type,
+                "value": value,
+                "target": target,
+            }
+            rules.append(rule)
+        self.data = _read_raw()
+        return dict(rule)
+
+    def remove_rules(self, ids: list[str]) -> list[dict]:
+        """Remove rules by id; returns the removed rules (missing ids ignored)."""
+        wanted = set(ids)
+        removed: list[dict] = []
+        with transaction() as data:
+            router = data.setdefault("router", _router_blank())
+            kept = []
+            for rule in router.get("rules") or []:
+                if rule.get("id") in wanted:
+                    removed.append(dict(rule))
+                else:
+                    kept.append(rule)
+            router["rules"] = kept
+        self.data = _read_raw()
+        return removed
+
+    def set_killswitch(self, enabled: bool) -> None:
+        """Toggle unmatched-traffic blocking on the router inbound only."""
+        with transaction() as data:
+            data.setdefault("router", _router_blank())["killswitch"] = bool(enabled)
+        self.data = _read_raw()
+
+    def rules_referencing(self, refs: set[tuple[str, str]]) -> dict[str, list[dict]]:
+        """``"provider/cid" -> [rule, …]`` from this snapshot (plan-time view;
+        the authoritative check re-runs inside the removal transaction)."""
+        return _rules_referencing(self.data, refs)
 
     def update_channel_wg(self, provider: str, cid: str, wg: dict) -> bool:
         """Replace a channel's WireGuard params (used by auto-reconnect to swap in a
@@ -422,16 +561,26 @@ class Store:
 
 def config_signature(data: dict) -> str:
     """Digest of only the sing-box-relevant parts of state (providers, channel
-    ports + WireGuard params) — deliberately excluding probe results, so the
-    daemon's probe writes don't trigger a needless reconcile."""
+    ports + WireGuard params, and the router section) — deliberately excluding
+    probe results, so the daemon's probe writes don't trigger a needless
+    reconcile. Router rules/kill-switch/port are included so a route edit
+    reconciles like a channel edit."""
     import hashlib
 
-    relevant = {}
+    relevant: dict = {}
     for provider, pdata in sorted((data.get("providers") or {}).items()):
         chans = {}
         for cid, ch in sorted((pdata.get("channels") or {}).items()):
             chans[cid] = {"port": ch.get("port"), "wg": ch.get("wg")}
         if chans:  # an empty provider produces no inbounds, so it can't move the config
             relevant[provider] = chans
+    router = data.get("router") or {}
+    if router.get("port") or router.get("rules") or router.get("killswitch"):
+        # "_router" cannot collide: provider keys are bare lowercase words
+        relevant["_router"] = {
+            "port": router.get("port"),
+            "killswitch": bool(router.get("killswitch")),
+            "rules": router.get("rules") or [],
+        }
     blob = json.dumps(relevant, sort_keys=True, ensure_ascii=False).encode()
     return hashlib.sha256(blob).hexdigest()

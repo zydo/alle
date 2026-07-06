@@ -161,6 +161,14 @@ def run_applier() -> None:
     instance_lock.write(str(os.getpid()))
     instance_lock.flush()
 
+    try:
+        # The always-on router entrypoint's contract port: allocated once, here,
+        # so a fresh install gets its router on the first daemon start. The
+        # resulting state change is picked up by the first reconcile below.
+        Store.load().ensure_router_port()
+    except Exception as e:  # noqa: BLE001 — a full state dir must not kill the daemon
+        applog.log(f"router port allocation failed: {e}")
+
     accumulator = metrics.Accumulator()
     stop_flag = {"stop": False}
 

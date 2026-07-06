@@ -18,6 +18,7 @@ from alle import (
     locations,
     metrics,
     paths,
+    routes,
     singbox,
     throughput,
     wgconf,
@@ -36,11 +37,24 @@ from alle.providers import (
     preview,
     provider_wg,
 )
-from alle.state import Store
+from alle.state import ReferencedError, Store
 
 
 class ServiceError(RuntimeError):
     """A user-correctable application error, ready to show in the CLI."""
+
+
+def _blockers_error(blockers: dict[str, list[dict]]) -> ServiceError:
+    """Restrict-only removal refusal: every blocker in one pass, with the fix."""
+    lines = ["cannot remove — routing rules still reference:"]
+    ids: list[str] = []
+    for ref in sorted(blockers):
+        rules_ = blockers[ref]
+        ids.extend(r["id"] for r in rules_)
+        detail = ", ".join(f"{r['id']} ({routes.describe(r)})" for r in rules_)
+        lines.append(f"  {ref} — {detail}")
+    lines.append(f"Remove the rules first:  alle routes rm {' '.join(ids)}")
+    return ServiceError("\n".join(lines))
 
 
 def resolve_provider(name: str) -> str:
@@ -128,9 +142,11 @@ def _provider_removal_plan(providers: list[str]) -> list[dict]:
     providers = list(dict.fromkeys(providers))
     store = Store.load()
     plan = []
+    refs: set[tuple[str, str]] = set()
     for provider in providers:
         if not store.has_provider(provider):
             raise ServiceError(f"{display_name(provider)} is not added.")
+        refs.update((provider, ch.id) for ch in store.provider_channels(provider))
         plan.append(
             {
                 "provider": provider,
@@ -138,6 +154,9 @@ def _provider_removal_plan(providers: list[str]) -> list[dict]:
                 "channels_removed": len(store.provider_channels(provider)),
             }
         )
+    blockers = store.rules_referencing(refs)
+    if blockers:
+        raise _blockers_error(blockers)
     return plan
 
 
@@ -156,7 +175,10 @@ def provider_remove_many(providers: list[str], dry_run: bool = False) -> dict:
         # Store first: if a later step fails, the leftover is a stray credential
         # on disk (which re-adding repairs), never a provider that is still
         # listed but has silently lost its credential.
-        store.remove_provider(provider)
+        try:
+            store.remove_provider(provider)
+        except ReferencedError as e:  # rule added between plan and removal
+            raise _blockers_error(e.blockers) from e
         credentials.remove(provider)
         metrics.remove_provider(provider)
         applog.log(
@@ -410,6 +432,11 @@ def _channel_removal_plan(
         if key not in seen:
             seen.add(key)
             plan.append(item)
+    blockers = store.rules_referencing(
+        {(item["provider"], item["channel"]) for item in plan}
+    )
+    if blockers:
+        raise _blockers_error(blockers)
     return plan
 
 
@@ -424,7 +451,10 @@ def channel_remove_many(
         return {"channels": planned, "dry_run": True}
 
     for item in planned:
-        Store.load().remove_channel(item["provider"], item["channel"])
+        try:
+            Store.load().remove_channel(item["provider"], item["channel"])
+        except ReferencedError as e:  # rule added between plan and removal
+            raise _blockers_error(e.blockers) from e
         metrics.remove_channel(item["provider"], item["channel"])
         applog.log(f"removed channel {item['provider']}/{item['channel']}")
     daemon.ensure_running()
@@ -486,6 +516,119 @@ def locations_list(
     }
 
 
+# ---- routing ----------------------------------------------------------------
+
+
+def _router_info(store: Store) -> dict:
+    """The router entrypoint's state for status/routes displays."""
+    router = store.router
+    port = int(router.get("port") or 0)
+    rules_ = router.get("rules") or []
+    killswitch = bool(router.get("killswitch"))
+    return {
+        "port": port or None,
+        "allocated": bool(port),
+        "rule_count": len(rules_),
+        "killswitch": killswitch,
+        "unmatched": "block" if killswitch else "direct",
+    }
+
+
+def _decorate_rule(rule: dict, shadows: dict[str, str]) -> dict:
+    return {
+        **rule,
+        "match": routes.describe(rule),
+        "shadowed_by": shadows.get(rule["id"]),
+    }
+
+
+def routes_add(matcher_type: str, value: str, target: str) -> dict:
+    """Append one routing rule; returns it plus any shadow warning."""
+    try:
+        normalized = routes.normalize_value(matcher_type, value)
+        _, ref = routes.parse_target(target)
+    except routes.RuleError as e:
+        raise ServiceError(str(e)) from e
+    if ref is not None:  # a channel target (ref is None for direct/block)
+        provider = match(ref[0])  # accept the brand name too, like channel refs
+        if provider is None:
+            names = ", ".join(known())
+            raise ServiceError(
+                f"unknown provider {ref[0]!r} in target (known: {names})."
+            )
+        target = f"{provider}/{ref[1]}"
+
+    store = Store.load()
+    try:
+        # channel-target existence is verified inside the transaction — the
+        # mirror of the removal guard, so rules and channels can't cross in flight
+        rule = store.add_rule(matcher_type, normalized, target)
+    except ValueError as e:
+        raise ServiceError(f"{e} (see: alle channels ls --refs).") from e
+    shadows = routes.shadowed_by(store.rules())
+    applog.log(f"added route {rule['id']}: {routes.describe(rule)} -> {rule['target']}")
+    daemon.ensure_running()
+    return {
+        "rule": _decorate_rule(rule, shadows),
+        "router_port": store.router.get("port") or None,
+        "shadowed_by": shadows.get(rule["id"]),
+    }
+
+
+def routes_list(channel: str | None = None) -> dict:
+    """Rules in evaluation order, shadow-annotated; ``channel`` filters by target
+    (bare channel id, or a qualified ``provider/id`` ref)."""
+    store = Store.load()
+    rules_ = store.rules()
+    shadows = routes.shadowed_by(rules_)
+    rows = []
+    for rule in rules_:
+        if channel is not None:
+            _, _, cid = rule["target"].partition("/")
+            if not cid:  # direct/block targets never reference a channel
+                continue
+            if rule["target"] != channel and cid != channel:
+                continue
+        rows.append(_decorate_rule(rule, shadows))
+    return {"rules": rows, "filter": channel, "router": _router_info(store)}
+
+
+def routes_remove(ids: list[str], dry_run: bool = False) -> dict:
+    if not ids:
+        raise ServiceError("at least one rule id is required (see: alle routes ls).")
+    ids = list(dict.fromkeys(ids))
+    store = Store.load()
+    existing = {rule["id"]: rule for rule in store.rules()}
+    missing = [i for i in ids if i not in existing]
+    if missing:  # all misses in one pass, like the removal blockers
+        raise ServiceError(f"no rule(s) {', '.join(missing)} (see: alle routes ls).")
+    planned = [_decorate_rule(existing[i], {}) for i in ids]
+    if dry_run:
+        return {"rules": planned, "dry_run": True}
+    store.remove_rules(ids)
+    for rule in planned:
+        applog.log(f"removed route {rule['id']}: {rule['match']} -> {rule['target']}")
+    daemon.ensure_running()
+    return {"rules": planned, "dry_run": False}
+
+
+def routes_killswitch(enable: bool | None = None) -> dict:
+    """Set (or with ``None`` just report) unmatched-traffic blocking."""
+    store = Store.load()
+    if enable is not None:
+        store.set_killswitch(enable)
+        applog.log(
+            "kill-switch "
+            + (
+                "enabled: router unmatched -> block"
+                if enable
+                else "disabled: router unmatched -> direct"
+            )
+        )
+        daemon.ensure_running()
+    return {"changed": enable is not None, "router": _router_info(store)}
+
+
 def status_snapshot() -> dict:
     store = Store.load()
     runner = singbox.Runner()
@@ -532,6 +675,7 @@ def status_snapshot() -> dict:
     return {
         "running": running,
         "state": "running" if running else "stopped",
+        "router": _router_info(store),
         "channels": channels,
         "provider_count": len({c["provider"] for c in channels}),
         "channel_count": len(channels),

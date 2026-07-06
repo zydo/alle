@@ -299,6 +299,60 @@ def cmd_channels_rm(args):
     _print_channel_removals(result)
 
 
+# ---- routes ------------------------------------------------------------------
+
+
+def cmd_routes_add(args):
+    if args.all:
+        matcher_type, value = "all", ""
+    elif args.domain:
+        matcher_type, value = "domain", args.domain
+    elif args.domain_suffix:
+        matcher_type, value = "domain_suffix", args.domain_suffix
+    else:
+        matcher_type, value = "ip_cidr", args.cidr
+
+    result = service.routes_add(matcher_type, value, args.target)
+    rule = result["rule"]
+    print(f"Added rule {rule['id']}: {rule['match']} → {rule['target']}.")
+    if result["router_port"]:
+        print(f"  Router entrypoint: 127.0.0.1:{result['router_port']}")
+    else:
+        print("  Router entrypoint port is assigned on the next daemon start.")
+    if result["shadowed_by"]:
+        print(
+            f"  WARNING: shadowed by earlier rule {result['shadowed_by']} — it will "
+            "never match. Rules are first-match-wins; remove or re-add the broader "
+            "rule after this one (see: alle routes ls)."
+        )
+
+
+def cmd_routes_ls(args):
+    _print_or_json(service.routes_list(args.channel), output.routes_list, args.json)
+
+
+def cmd_routes_rm(args):
+    result = service.routes_remove(args.ids, dry_run=args.dry_run)
+    verb = "Would remove" if result["dry_run"] else "Removed"
+    for rule in result["rules"]:
+        print(f"{verb} rule {rule['id']}: {rule['match']} → {rule['target']}.")
+
+
+def cmd_routes_killswitch(args):
+    enable = {"on": True, "off": False}.get(args.state)
+    result = service.routes_killswitch(enable)
+    router = result["router"]
+    state = (
+        "ON — unmatched router traffic is blocked"
+        if router["killswitch"]
+        else "off — unmatched router traffic goes direct (no VPN)"
+    )
+    print(
+        f"Kill-switch {state}.\n"
+        "  Applies to the router entrypoint only; per-channel ports are unaffected."
+    )
+
+
 # ---- locations -------------------------------------------------------------
 
 
@@ -537,6 +591,53 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cr.add_argument("--dry-run", action="store_true", help="show what would be removed")
     cr.set_defaults(func=cmd_channels_rm)
+
+    # routes
+    ro = sub.add_parser(
+        "routes", help="rule-based routing through the router entrypoint"
+    )
+    ro.set_defaults(func=_show_help(ro))
+    ro_sub = ro.add_subparsers(dest="routes_command")
+    ra = ro_sub.add_parser(
+        "add",
+        help="append a routing rule (rules are evaluated in order; first match wins)",
+    )
+    ra.add_argument(
+        "target",
+        help="exit for matched traffic: <provider>/<channel>, 'direct', or 'block'",
+    )
+    rm_group = ra.add_mutually_exclusive_group(required=True)
+    rm_group.add_argument("--domain", help="exact domain to match")
+    rm_group.add_argument(
+        "--domain-suffix", help="match the domain and all its subdomains"
+    )
+    rm_group.add_argument("--cidr", help="destination IP or CIDR block")
+    rm_group.add_argument(
+        "--all",
+        action="store_true",
+        help="match all traffic (catch-all — routes everything not matched earlier)",
+    )
+    ra.set_defaults(func=cmd_routes_add)
+    rls = ro_sub.add_parser("ls", help="list rules in evaluation order")
+    rls.add_argument(
+        "--channel", help="only rules targeting this channel (name or provider/name)"
+    )
+    rls.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    rls.set_defaults(func=cmd_routes_ls)
+    rrm = ro_sub.add_parser("rm", help="remove rules by id")
+    rrm.add_argument("ids", nargs="+", help="rule id(s) shown by: alle routes ls")
+    rrm.add_argument(
+        "--dry-run", action="store_true", help="show what would be removed"
+    )
+    rrm.set_defaults(func=cmd_routes_rm)
+    rks = ro_sub.add_parser(
+        "killswitch",
+        help="block router traffic that matches no rule (instead of going direct)",
+    )
+    rks.add_argument(
+        "state", nargs="?", choices=["on", "off"], help="omit to show the current state"
+    )
+    rks.set_defaults(func=cmd_routes_killswitch)
 
     # locations
     lo = sub.add_parser(

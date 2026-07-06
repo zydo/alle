@@ -4,8 +4,9 @@ Complete reference for the `alle` command-line interface — the primary, comple
 surface for managing providers, channels, and the local runtime.
 
 From a checkout, prefix everything with `uv run` (e.g. `uv run alle status`). An
-installed build (`uv tool install alle-proxy` / `uvx --from alle-proxy alle`)
-exposes `alle` directly. The examples below omit the prefix.
+installed build (`uv tool install alle-proxy` / `pipx install alle-proxy` —
+see the README's Install section) exposes `alle` directly. The examples below
+omit the prefix.
 
 ## Contents
 
@@ -21,6 +22,11 @@ exposes `alle` directly. The examples below omit the prefix.
     - [`alle channels add <provider> …`](#alle-channels-add-provider-)
     - [`alle channels ls [--json|--ids|--refs]`](#alle-channels-ls---json--ids--refs)
     - [`alle channels rm <channel>...`](#alle-channels-rm-channel)
+  - [`alle routes`](#alle-routes)
+    - [`alle routes add <target> --<matcher>`](#alle-routes-add-target---matcher)
+    - [`alle routes ls [--channel <ref>] [--json]`](#alle-routes-ls---channel-ref---json)
+    - [`alle routes rm <id>...`](#alle-routes-rm-id)
+    - [`alle routes killswitch [on|off]`](#alle-routes-killswitch-onoff)
   - [`alle locations`](#alle-locations)
   - [`alle status`](#alle-status)
   - [`alle start` / `stop` / `restart`](#alle-start--stop--restart)
@@ -36,13 +42,13 @@ exposes `alle` directly. The examples below omit the prefix.
 
 - **Help** — run `alle`, `alle <group>`, or any command with `-h/--help` to see usage.
   A group or command invoked with no action prints its help instead of erroring.
-- **`--json`** — read commands (`providers ls`, `channels ls`, `locations`, `status`,
-  `test`, `metrics`) accept `--json` for a stable, machine-readable projection of
-  the same data. This is the scripting/cross-language interface (pipe to `jq`, etc.).
+- **`--json`** — read commands (`providers ls`, `channels ls`, `routes ls`,
+  `locations`, `status`, `test`, `metrics`) accept `--json` for a stable,
+  machine-readable projection of the same data. This is the scripting/cross-language interface (pipe to `jq`, etc.).
   It is **not** the programmatic API for `alle`'s own components — those call the core
   (`alle.service`) directly rather than shelling out. Human table output is for
   terminals and may change; `--json` shape is stable.
-- **No separate apply step** — adding or removing channels writes
+- **No separate apply step** — adding or removing channels or routing rules writes
   `~/.alle/state.json`; `alle`'s background runtime reconciles sing-box and probes
   channels automatically. `start`/`stop`/`restart` are the user-facing controls.
 - **Provider names** — commands take the lowercase key (`nordvpn`, `protonvpn`); the
@@ -59,6 +65,11 @@ exposes `alle` directly. The examples below omit the prefix.
 - **Channel** — one VPN location/server under a provider, exposed locally as an
   HTTP+SOCKS proxy on `127.0.0.1:<port>`. Ports are auto-assigned by the OS and
   then stored in `state.json` so they stay stable across restarts and re-imports.
+- **Router entrypoint** — one additional, always-on HTTP+SOCKS proxy that
+  dispatches each connection by routing rule to a channel, `direct`, or `block`.
+  With no rules it is a transparent pass-through (everything goes direct, no
+  VPN). Its port is assigned once and treated as a contract — it never changes
+  across restarts. Channel ports remain fully usable alongside it.
 - **Runtime** — the background process managed by `alle start`/`stop`/`restart` that
   reconciles `state.json` into one sing-box process and heartbeat-probes each channel.
   It is auto-started on the first mutation or `alle start`; there is no separate
@@ -104,6 +115,11 @@ Proton VPN  config  2 .conf files
 
 Remove one or more providers **and all their channels and stored credentials**.
 Prompts for confirmation unless `-y` is given.
+
+**Refused while any of the provider's channels is targeted by a routing rule** —
+the error lists every referencing rule and the exact `alle routes rm …` to run
+first (see [`alle routes`](#alle-routes)). There is no force/cascade: routing
+config only changes when you change it.
 
 ```bash
 alle providers rm protonvpn -y
@@ -189,6 +205,100 @@ alle channels rm --provider nordvpn --all
 - `--provider <provider>` scopes names, globs, and `--all` to one provider.
 - `--dry-run` prints exactly what would be removed without changing state.
 - Compatibility form: `alle channels rm <provider> --channel <name>` still works.
+- **A channel targeted by a routing rule cannot be removed.** The refusal lists
+  *all* referencing rules in one pass with the exact fix
+  (`alle routes rm r1 r2 …`); `--dry-run` reports the same conflict. Check ahead
+  with `alle routes ls --channel <name>`. There is no `--force` — removing rules
+  is always its own explicit step, so a channel removal can never silently
+  reroute traffic.
+
+---
+
+## `alle routes`
+
+Rule-based routing through the router entrypoint. Rules are evaluated **in the
+order they were added — first match wins**; there is no reordering command yet
+(delete and re-add to change order). Traffic that matches no rule goes
+**direct (no VPN)** unless the [kill-switch](#alle-routes-killswitch-onoff) is on.
+
+The entrypoint's port is shown by `alle status` and by `routes add`/`routes ls`;
+it is allocated on the first daemon start and then never changes.
+
+### `alle routes add <target> --<matcher>`
+
+Append one rule. `<target>` is where matched traffic exits:
+
+- `<provider>/<channel>` — a channel (must exist; see `alle channels ls --refs`),
+- `direct` — straight to the network, no VPN,
+- `block` — refuse the connection.
+
+Exactly one matcher per rule:
+
+| Matcher               | Matches                                                    |
+| --------------------- | ---------------------------------------------------------- |
+| `--domain <d>`        | exactly `d`                                                |
+| `--domain-suffix <d>` | `d` and all its subdomains (dot-boundary)                  |
+| `--cidr <net>`        | destination IP in `net` (a bare IP means that one address) |
+| `--all`               | everything — the catch-all for "VPN by default"            |
+
+```bash
+alle routes add nordvpn/united_states_1 --domain-suffix netflix.com
+alle routes add direct --cidr 192.168.0.0/16
+alle routes add block --domain tracker.example.com
+alle routes add nordvpn/japan_1 --all
+```
+
+Notes:
+
+- Domain rules work for HTTPS on any port (destinations are sniffed via SNI when
+  the client sends an IP or uses SOCKS without a hostname).
+- `--cidr` matches IP-literal destinations; domain destinations are **not**
+  resolved for CIDR matching.
+- If an earlier rule already covers the new one (e.g. `--domain-suffix
+  google.com` before `--domain api.google.com`), `routes add` warns that the new
+  rule is **shadowed** and will never match.
+
+### `alle routes ls [--channel <ref>] [--json]`
+
+List rules in evaluation order: `ID`, `MATCH`, `TARGET`, and a `NOTE` marking
+shadowed rules. The header line shows the entrypoint address and its unmatched
+behavior. `--channel <name|provider/name>` filters to rules targeting one
+channel — useful before removing it.
+
+```text
+Router entrypoint 127.0.0.1:54585 — 3 rule(s), unmatched → direct
+ID  MATCH                        TARGET                   NOTE
+--  ---------------------------  -----------------------  ----------------------------
+r1  domain_suffix netflix.com    nordvpn/united_states_1
+r2  domain api.netflix.com       direct                   shadowed by r1 — never matches
+r3  ip_cidr 192.168.0.0/16       direct
+```
+
+### `alle routes rm <id>...`
+
+Remove rules by id (`--dry-run` to preview). Unknown ids are reported all at
+once and nothing is removed.
+
+```bash
+alle routes rm r2
+alle routes rm r1 r3 --dry-run
+```
+
+### `alle routes killswitch [on|off]`
+
+Block router traffic that matches no rule, instead of letting it go direct.
+Run without an argument to show the current state.
+
+```bash
+alle routes killswitch on
+alle routes killswitch
+```
+
+- Applies to the **router entrypoint only** — per-channel ports are unaffected.
+  (Commercial VPN apps use "kill switch" for a system-wide block; alle's becomes
+  system-wide only once your system points at the router.)
+- `alle status` and `routes ls` show `unmatched → block — kill-switch ON` while
+  active, so it's always visible why unmatched traffic fails.
 
 ---
 
@@ -211,17 +321,22 @@ alle locations nordvpn --country "United States"
 
 `alle status [--json]`
 
-Show whether `alle` is running plus a per-channel health table from the latest probes:
-`PROVIDER`, `NAME`, `PORT`, `COUNTRY`, `CITY`, `STATE`, `AGO` (probe age), `LATENCY`
-(latency), `IP` (exit IP).
+Show whether `alle` is running, the router entrypoint's address and mode, plus a
+per-channel health table from the latest probes: `PROVIDER`, `NAME`, `PORT`,
+`COUNTRY`, `CITY`, `STATE`, `AGO` (probe age), `LATENCY` (latency), `IP` (exit IP).
 
 ```text
 Alle - Active
+  Router  127.0.0.1:54585 — 2 rule(s), unmatched → direct
 PROVIDER    NAME                     PORT    COUNTRY        CITY        STATE   AGO      LATENCY  IP
 ----------  -----------------------  ------  -------------  ----------  ------  -------  -----  ---------------
 NordVPN     japan_1                  :53124  Japan          (Any City)  Active  19s ago  398ms  93.118.43.151
 Proton VPN  wg_us_ca_842             :53126  United States  California  Active  19s ago  87ms   185.98.169.31
 ```
+
+The router line always states the entrypoint's behavior — `pass-through (no
+rules)`, `N rule(s), unmatched → direct`, or `… → block — kill-switch ON` — so
+it is never ambiguous whether unmatched traffic is inside a VPN (it is not).
 
 `STATE` is `Active`, `Pending`, a probe error, or a reconnect state
 (`Reconnecting (N)` / `Reconnect failed`) when auto-reconnect is at work.
@@ -357,10 +472,12 @@ Everything lives under `~/.alle/` unless `$ALLE_HOME` is set (handy for hermetic
 testing: `ALLE_HOME=/tmp/alle-test alle status`):
 
 - `state.json` — providers, channels, WireGuard params, ports, probe + reconnect
-  state (`0600`).
+  state, and the router section (entrypoint port, kill-switch, routing rules)
+  (`0600`).
 - `credentials.yaml` — token-provider credentials (`0600`).
 - `metrics.db` — SQLite store of per-channel cumulative traffic counters.
 - `providers/*.json` — cached provider location lists.
 - `singbox.json` — generated sing-box config (`0400`, read-only).
+- `clash_api.json` — generated address + secret for the internal stats API (`0600`).
 - `bin/sing-box@<version>` — pinned, checksum-verified sing-box binary.
 - `alle.log`, plus `*.pid` / runtime files while running.
