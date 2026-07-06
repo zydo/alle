@@ -218,18 +218,30 @@ def cmd_providers_rm(args):
 
 def cmd_channels_add(args):
     provider = _resolve_provider(args.provider)
-    result = service.channel_add(provider, args.country, args.city, args.config)
+    result = service.channel_add(
+        provider, args.country, args.city, args.config, args.label or ""
+    )
     channel = result["channel"]
     if result.get("imported_from"):
         verb = "Updated" if result.get("updated") else "Imported"
         source = f" from {result['imported_from']}"
     else:
         verb, source = "Added", ""
+    labelled = f' labelled "{channel.label}"' if channel.label else ""
     print(
-        f"{verb} channel {channel.id} under {result['display_name']}{source} "
+        f"{verb} channel {channel.id}{labelled} under {result['display_name']}{source} "
         f"on 127.0.0.1:{channel.port}."
     )
     print("Applying… (see: alle status)")
+
+
+def cmd_channels_setlabel(args):
+    result = service.channel_set_label(args.channel, args.label)
+    ref = f"{result['provider']}/{result['channel']}"
+    if result["cleared"]:
+        print(f"Cleared the label on {ref} (shows as {result['channel']} again).")
+    else:
+        print(f'Labelled {ref} as "{result["label"]}".')
 
 
 def cmd_channels_ls(args):
@@ -561,6 +573,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="path to a WireGuard .conf — config providers only (e.g. protonvpn); "
         "mutually exclusive with --country/--city",
     )
+    ca.add_argument(
+        "--label",
+        help='optional display label, e.g. "Video Streaming - US" '
+        "(the channel id stays the handle commands use)",
+    )
     ca.set_defaults(func=cmd_channels_add)
     cls = ch_sub.add_parser(
         "ls", help="list configured channels by provider (no status)"
@@ -571,6 +588,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--refs", action="store_true", help="print provider-qualified channel refs"
     )
     cls.set_defaults(func=cmd_channels_ls)
+    csl = ch_sub.add_parser("setlabel", help="set or clear a channel's display label")
+    csl.add_argument("channel", help="channel id or provider/id ref (no globs)")
+    csl.add_argument(
+        "label", nargs="?", default="", help="the label; omit or pass '' to clear it"
+    )
+    csl.set_defaults(func=cmd_channels_setlabel)
     cr = ch_sub.add_parser("rm", help="remove one or more channels")
     cr.add_argument(
         "refs",

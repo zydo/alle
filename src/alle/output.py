@@ -10,8 +10,6 @@ import json
 import time
 from typing import Any
 
-from alle.providers import display_name
-
 
 def json_text(data: Any) -> str:
     return json.dumps(data, indent=2, ensure_ascii=False, default=_json_default)
@@ -53,6 +51,34 @@ def _ago(epoch: int) -> str:
     if hours < 24:
         return f"{hours}h ago"
     return f"{hours // 24}d ago"
+
+
+def _display(channel: dict) -> str:
+    """The channel's shown name: its label, or the id when no label is set."""
+    return channel.get("label") or channel["name"]
+
+
+# The base columns every channel table leads with, in one place so the layout
+# stays identical across `channels ls`, `status`, `test`, and `metrics`. Each of
+# those extends this with its own trailing columns (state, latency, traffic, …).
+# ID is the globally-unique, provider-qualified handle (``nordvpn/canada_1``) —
+# the same ref commands accept — so it needs no separate provider column.
+BASE_HEADERS = ["LABEL", "ID", "PORT", "COUNTRY", "CITY"]
+
+
+def _channel_ref(c: dict) -> str:
+    """A channel's globally-unique ref, ``<provider>/<id>`` (e.g. ``nordvpn/us_1``)."""
+    return f"{c['provider']}/{c['name']}"
+
+
+def _base_cells(c: dict) -> list[str]:
+    """The base-column cells for one channel row, matching ``BASE_HEADERS``.
+
+    Reads the fields every channel dict from ``alle.service`` carries: label,
+    id (``name``) + provider (combined into the ref), port (pre-formatted
+    ``:<n>``), and display country/city.
+    """
+    return [_display(c), _channel_ref(c), c["port"], c["country"], c["city"]]
 
 
 def _table(headers: list[str], rows: list[list[str]]) -> list[str]:
@@ -100,12 +126,7 @@ def channels_list(data: dict) -> str:
     channels = data["channels"]
     if not channels:
         return 'No channels yet. Add one:  alle channels add nordvpn --country "United States"'
-    headers = ["PROVIDER", "NAME", "PORT", "COUNTRY", "CITY"]
-    rows = [
-        [display_name(c["provider"]), c["name"], c["port"], c["country"], c["city"]]
-        for c in channels
-    ]
-    return "\n".join(_table(headers, rows))
+    return "\n".join(_table(BASE_HEADERS, [_base_cells(c) for c in channels]))
 
 
 def locations(data: dict) -> str:
@@ -192,24 +213,10 @@ def metrics(data: dict) -> str:
             return f"No channel named {data['filter']!r}. See: alle channels ls"
         return "No channels configured. Add one:  alle channels add nordvpn --country …"
 
-    headers = [
-        "PROVIDER",
-        "NAME",
-        "PORT",
-        "COUNTRY",
-        "CITY",
-        "SENT",
-        "RECV",
-        "TOTAL",
-        "SEEN",
-    ]
+    headers = [*BASE_HEADERS, "SENT", "RECV", "TOTAL", "SEEN"]
     rows = [
         [
-            display_name(c["provider"]),
-            c["name"],
-            c["port"],
-            c["country"],
-            c["city"],
+            *_base_cells(c),
             _bytes(c["sent"]),
             _bytes(c["received"]),
             _bytes(c["total"]),
@@ -244,28 +251,13 @@ def test_result(data: dict) -> str:
         return "No channels configured. Add one:  alle channels add nordvpn --country …"
 
     if data.get("speed"):
-        headers = [
-            "PROVIDER",
-            "NAME",
-            "PORT",
-            "COUNTRY",
-            "CITY",
-            "STATE",
-            "LATENCY",
-            "EXIT IP",
-            "DOWNLOAD",
-            "UPLOAD",
-        ]
+        headers = [*BASE_HEADERS, "STATE", "LATENCY", "IP", "DOWNLOAD", "UPLOAD"]
         rows = []
         for c in channels:
             speed = c.get("speed_result") or {}
             rows.append(
                 [
-                    display_name(c["provider"]),
-                    c["name"],
-                    c["port"],
-                    c["country"],
-                    c["city"],
+                    *_base_cells(c),
                     _state_cell(c),
                     _latency(c.get("latency_ms")),
                     c.get("ip") or "-",
@@ -275,23 +267,10 @@ def test_result(data: dict) -> str:
             )
         return "\n".join(_table(headers, rows))
 
-    headers = [
-        "PROVIDER",
-        "NAME",
-        "PORT",
-        "COUNTRY",
-        "CITY",
-        "STATE",
-        "LATENCY",
-        "EXIT IP",
-    ]
+    headers = [*BASE_HEADERS, "STATE", "LATENCY", "IP"]
     rows = [
         [
-            display_name(c["provider"]),
-            c["name"],
-            c["port"],
-            c["country"],
-            c["city"],
+            *_base_cells(c),
             _state_cell(c),
             _latency(c.get("latency_ms")),
             c.get("ip") or "-",
@@ -322,17 +301,7 @@ def status(snapshot: dict) -> str:
         )
         return "\n".join(lines)
 
-    headers = [
-        "PROVIDER",
-        "NAME",
-        "PORT",
-        "COUNTRY",
-        "CITY",
-        "STATE",
-        "AGO",
-        "LATENCY",
-        "IP",
-    ]
+    headers = [*BASE_HEADERS, "STATE", "AGO", "LATENCY", "IP"]
     rows = []
     for channel in channels:
         latency = (
@@ -341,11 +310,7 @@ def status(snapshot: dict) -> str:
         probe = channel.get("probe") or {}
         rows.append(
             [
-                display_name(channel["provider"]),
-                channel["name"],
-                channel["port"],
-                channel["country"],
-                channel["city"],
+                *_base_cells(channel),
                 channel["state"],
                 _ago(probe.get("at", 0)) if probe else "-",
                 latency,

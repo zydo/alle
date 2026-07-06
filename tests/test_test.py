@@ -171,9 +171,10 @@ def test_cli_streams_a_row_per_channel(
     cli.main(["test", "--speed"])
     out = capsys.readouterr().out
     lines = out.splitlines()
-    assert lines[0].split()[0] == "PROVIDER"  # header first
+    assert lines[0].split()[:2] == ["LABEL", "ID"]  # shared channel-table lead
     assert set(lines[1]) <= {"-", " "} and "-" in lines[1]  # dash separator second
-    assert "japan_1" in out and "united_states_1" in out  # a row per channel
+    # rows carry the provider-qualified id (globally unique)
+    assert "nordvpn/japan_1" in out and "nordvpn/united_states_1" in out
     assert out.count("150.0 Mbps") == 2
 
 
@@ -182,7 +183,7 @@ def test_cli_test_default_is_connectivity_only(
 ):
     cli.main(["test"])
     out = capsys.readouterr().out
-    assert "EXIT IP" in out and "1.2.3.4" in out and "12.3ms" in out
+    assert "IP" in out and "1.2.3.4" in out and "12.3ms" in out
     assert "PORT" in out.splitlines()[0]  # PORT column present
     assert re.search(r":\d{2,5}\b", out)  # a :<port> value is rendered
     assert "DOWNLOAD" not in out

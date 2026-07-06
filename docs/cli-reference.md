@@ -21,6 +21,7 @@ omit the prefix.
   - [`alle channels`](#alle-channels)
     - [`alle channels add <provider> …`](#alle-channels-add-provider-)
     - [`alle channels ls [--json|--ids|--refs]`](#alle-channels-ls---json--ids--refs)
+    - [`alle channels setlabel <channel> [label]`](#alle-channels-setlabel-channel-label)
     - [`alle channels rm <channel>...`](#alle-channels-rm-channel)
   - [`alle routes`](#alle-routes)
     - [`alle routes add <target> --<matcher>`](#alle-routes-add-target---matcher)
@@ -65,6 +66,11 @@ omit the prefix.
 - **Channel** — one VPN location/server under a provider, exposed locally as an
   HTTP+SOCKS proxy on `127.0.0.1:<port>`. Ports are auto-assigned by the OS and
   then stored in `state.json` so they stay stable across restarts and re-imports.
+  A channel is identified by its auto-generated **id**, globally unique when
+  provider-qualified (e.g. `nordvpn/united_states_1`) — the permanent handle
+  every command, routing rule, and metric uses, and what the `ID` column shows.
+  A channel may also carry an optional **label**, a friendly display name
+  (`alle channels setlabel`) that is presentation only and never a handle.
 - **Router entrypoint** — one additional, always-on HTTP+SOCKS proxy that
   dispatches each connection by routing rule to a channel, `direct`, or `block`.
   With no rules it is a transparent pass-through (everything goes direct, no
@@ -166,25 +172,55 @@ alle channels add protonvpn --config ~/Downloads/wg-US-CA-842.conf
   the country code is reliable; a missing/unknown subdivision shows as `(Unknown)`.
   `alle` never geo-locates the endpoint to guess.
 
-### `alle channels ls [--json|--ids|--refs]`
+Both forms accept `--label "<text>"` to give the channel a friendly display name
+(see [`alle channels setlabel`](#alle-channels-setlabel-channel-label)):
 
-List configured channels (static config only — no live status). Columns: `PROVIDER`,
-`NAME`, `PORT`, `COUNTRY`, `CITY`.
-
-```text
-PROVIDER    NAME                     PORT    COUNTRY        CITY
-----------  -----------------------  ------  -------------  ----------
-NordVPN     japan_1                  :53124  Japan          (Any City)
-NordVPN     united_states_seattle_1  :53125  United States  Seattle
-Proton VPN  wg_us_ca_842             :53126  United States  California
+```bash
+alle channels add nordvpn --country "United States" --label "Streaming - US"
 ```
 
-For scripting, print just channel names or provider-qualified refs:
+### `alle channels ls [--json|--ids|--refs]`
+
+List configured channels (static config only — no live status). Columns: `LABEL`,
+`ID`, `PORT`, `COUNTRY`, `CITY`. `LABEL` is the friendly display name (falls back
+to the id when unset); `ID` is the globally-unique, provider-qualified handle
+(`nordvpn/japan_1`) — the same ref every command accepts, which is why no separate
+provider column is needed.
+
+```text
+LABEL           ID                        PORT    COUNTRY        CITY
+--------------  ------------------------  ------  -------------  ----------
+Streaming - US  nordvpn/japan_1           :53124  Japan          (Any City)
+seattle_1       nordvpn/seattle_1         :53125  United States  Seattle
+wg_us_ca_842    protonvpn/wg_us_ca_842    :53126  United States  California
+```
+
+For scripting, print just channel ids or provider-qualified refs (labels are
+never used as identifiers):
 
 ```bash
 alle channels ls --ids
 alle channels ls --refs
 ```
+
+### `alle channels setlabel <channel> [label]`
+
+Set (or, with no `label`, clear) a channel's display label. The label is
+presentation only — commands, routing rules, and metrics always use the id, so
+relabelling is safe and cascades nowhere. Labels may duplicate and are never
+accepted as a channel ref.
+
+```bash
+alle channels setlabel united_states_seattle_1 "Streaming - US West"
+alle channels setlabel nordvpn/japan_1 "Test runner"   # qualified ref works too
+alle channels setlabel japan_1                          # omit to clear → shows the id again
+```
+
+`<channel>` is a channel id or `provider/id` ref (no globs — a label targets one
+channel). Every channel table (`channels ls`, `status`, `test`, `metrics`) shows
+the same `LABEL` + `ID` columns — `LABEL` is the label or the id when unset, `ID`
+is the provider-qualified ref (`nordvpn/japan_1`); `--json` on those carries the
+bare `name` (id), `provider`, and `label` separately.
 
 ### `alle channels rm <channel>...`
 
@@ -322,16 +358,19 @@ alle locations nordvpn --country "United States"
 `alle status [--json]`
 
 Show whether `alle` is running, the router entrypoint's address and mode, plus a
-per-channel health table from the latest probes: `PROVIDER`, `NAME`, `PORT`,
-`COUNTRY`, `CITY`, `STATE`, `AGO` (probe age), `LATENCY` (latency), `IP` (exit IP).
+per-channel health table from the latest probes: `LABEL`, `ID`, `PORT`,
+`COUNTRY`, `CITY`, `STATE`, `AGO` (probe age), `LATENCY` (latency), `IP` (exit
+IP). Every channel table shares the same `LABEL` + `ID` lead — `LABEL` is the
+display name (the id when no label is set), `ID` is the provider-qualified ref
+commands take.
 
 ```text
 Alle - Active
   Router  127.0.0.1:54585 — 2 rule(s), unmatched → direct
-PROVIDER    NAME                     PORT    COUNTRY        CITY        STATE   AGO      LATENCY  IP
-----------  -----------------------  ------  -------------  ----------  ------  -------  -----  ---------------
-NordVPN     japan_1                  :53124  Japan          (Any City)  Active  19s ago  398ms  93.118.43.151
-Proton VPN  wg_us_ca_842             :53126  United States  California  Active  19s ago  87ms   185.98.169.31
+LABEL           ID                      PORT    COUNTRY        CITY        STATE   AGO      LATENCY  IP
+--------------  ----------------------  ------  -------------  ----------  ------  -------  -------  ---------------
+Test runner     nordvpn/japan_1         :53124  Japan          (Any City)  Active  19s ago  398ms    93.118.43.151
+wg_us_ca_842    protonvpn/wg_us_ca_842  :53126  United States  California  Active  19s ago  87ms     185.98.169.31
 ```
 
 The router line always states the entrypoint's behavior — `pass-through (no
@@ -361,19 +400,19 @@ alle stop
 
 ## `alle test`
 
-`alle test [--channel <name>] [--speed] [--json]`
+`alle test [--channel <id>] [--speed] [--json]`
 
 Probe channels **now** (rather than waiting for the next background cycle) and print a
-quick connectivity table: `PROVIDER`, `NAME`, `PORT`, `COUNTRY`, `CITY`, `STATE`,
-`LATENCY` (probe latency), and `EXIT IP`. With `--channel`, test just one channel by name.
+quick connectivity table: `LABEL`, `ID`, `PORT`, `COUNTRY`, `CITY`, `STATE`,
+`LATENCY` (probe latency), and `IP` (exit IP). With `--channel`, test just one channel by id.
 `STATE` is `Healthy`, or the failure reason (`Stopped` while the runtime is down, otherwise
 the probe error) — the same convention as [`alle status`](#alle-status).
 
 ```text
-PROVIDER    NAME                     PORT    COUNTRY        CITY        STATE     LATENCY  EXIT IP
-----------  -----------------------  ------  -------------  ----------  --------  -------  ---------------
-NordVPN     japan_1                  :53124  Japan          (Any City)  Healthy   398.0ms  93.118.43.151
-Proton VPN  wg_us_ca_842             :53126  United States  California  Timeout   -        -
+LABEL           ID                      PORT    COUNTRY        CITY        STATE     LATENCY  IP
+--------------  ----------------------  ------  -------------  ----------  --------  -------  ---------------
+Test runner     nordvpn/japan_1         :53124  Japan          (Any City)  Healthy   398.0ms  93.118.43.151
+wg_us_ca_842    protonvpn/wg_us_ca_842  :53126  United States  California  Timeout   -        -
 ```
 
 Add `--speed` to run the slower download/upload test after the fresh connectivity
@@ -399,13 +438,14 @@ tend to converge there.
 `alle metrics [<channel>] [--json]`
 
 Per-channel **cumulative** traffic totals (sent/received/total) since counters began,
-plus when traffic was last seen. Optionally filter to one channel by name.
+plus when traffic was last seen. Columns: `LABEL`, `ID`, `PORT`, `COUNTRY`,
+`CITY`, `SENT`, `RECV`, `TOTAL`, `SEEN`. Optionally filter to one channel by id.
 
 ```text
-PROVIDER    NAME                     PORT    COUNTRY        CITY        SENT      RECV      TOTAL     SEEN
-----------  -----------------------  ------  -------------  ----------  --------  --------  --------  -------
-NordVPN     japan_1                  :53124  Japan          (Any City)  104.0 MB  396.7 MB  500.7 MB  3s ago
-Proton VPN  wg_us_ca_842             :53126  United States  California  28.1 MB   141.8 MB  169.9 MB  1m ago
+LABEL           ID                      PORT    COUNTRY        CITY        SENT      RECV      TOTAL     SEEN
+--------------  ----------------------  ------  -------------  ----------  --------  --------  --------  -------
+Test runner     nordvpn/japan_1         :53124  Japan          (Any City)  104.0 MB  396.7 MB  500.7 MB  3s ago
+wg_us_ca_842    protonvpn/wg_us_ca_842  :53126  United States  California  28.1 MB   141.8 MB  169.9 MB  1m ago
 ```
 
 ```bash
@@ -448,8 +488,8 @@ alle version
 ## Output conventions
 
 - **Tables** share one style: a header row, a dashed separator, then rows — columns
-  left-aligned and joined by two spaces, with a `PROVIDER` column carrying the brand
-  name.
+  left-aligned and joined by two spaces. Channel tables all lead with the same
+  `LABEL` and `ID` columns; `ID` is the globally-unique `provider/id` ref.
 - **Location placeholders** (always under a column titled `CITY`, even when the value
   is a state/region):
   - `(Any City)` — a token-provider channel pinned to a country but no specific city.

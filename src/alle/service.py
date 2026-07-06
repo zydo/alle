@@ -189,9 +189,14 @@ def provider_remove_many(providers: list[str], dry_run: bool = False) -> dict:
 
 
 def channel_add(
-    provider: str, country: str | None, city: str | None, config: str | None = None
+    provider: str,
+    country: str | None,
+    city: str | None,
+    config: str | None = None,
+    label: str = "",
 ) -> dict:
     store = Store.load()
+    label = label.strip()
     if not store.has_provider(provider):
         raise ServiceError(
             f"{display_name(provider)} is not added — run `alle providers add {provider}` first."
@@ -208,7 +213,7 @@ def channel_add(
         )
 
     if config:
-        return _channel_add_config(store, provider, config)
+        return _channel_add_config(store, provider, config, label)
 
     if kind(provider) == "config":
         raise ServiceError(
@@ -233,7 +238,7 @@ def channel_add(
             msg += f"\nSee available locations: alle locations {provider}"
         raise ServiceError(msg) from e
 
-    channel = store.add_channel(provider, country, city or "", wg)
+    channel = store.add_channel(provider, country, city or "", wg, label)
     applog.log(
         f"added channel {provider}/{channel.id} ({channel.location}) on :{channel.port}"
     )
@@ -245,7 +250,9 @@ def channel_add(
     }
 
 
-def _channel_add_config(store: Store, provider: str, config: str) -> dict:
+def _channel_add_config(
+    store: Store, provider: str, config: str, label: str = ""
+) -> dict:
     """Import a channel from a WireGuard ``.conf`` (the config-provider archetype).
 
     Each ``.conf`` is a single server/peer, so one file becomes one channel. The
@@ -276,7 +283,9 @@ def _channel_add_config(store: Store, provider: str, config: str) -> dict:
     )  # best-effort ISO codes in the file name
     # Identity is the file name: re-importing the same .conf updates it in place
     # (keys may have rotated) rather than creating wg_..._2.
-    channel, created = store.upsert_channel(provider, path.stem, country, city, wg)
+    channel, created = store.upsert_channel(
+        provider, path.stem, country, city, wg, label
+    )
     action = "imported" if created else "updated"
     applog.log(
         f"{action} channel {provider}/{channel.id} from {path.name} on :{channel.port}"
@@ -299,6 +308,7 @@ def channel_list() -> dict:
             {
                 "provider": channel.provider,
                 "name": channel.id,
+                "label": channel.label,
                 "port": f":{channel.port}",
                 "port_number": channel.port,
                 "country": _country_display(channel),
@@ -328,6 +338,7 @@ def metrics_snapshot(channel: str | None = None) -> dict:
             {
                 "provider": ch.provider,
                 "name": ch.id,
+                "label": ch.label,
                 "port": f":{ch.port}",
                 "port_number": ch.port,
                 "country": _country_display(ch),
@@ -468,6 +479,34 @@ def channel_remove(provider: str, channel_id: str) -> dict:
         "provider": removed["provider"],
         "display_name": removed["display_name"],
         "channel": removed["channel"],
+    }
+
+
+def channel_set_label(ref: str, label: str, provider: str | None = None) -> dict:
+    """Set or clear one channel's display label. ``ref`` is a channel id or a
+    ``provider/id`` ref (never a glob — a label targets exactly one channel).
+
+    An empty ``label`` clears it, so the display falls back to the id.
+    """
+    if _is_pattern(ref):
+        raise ServiceError("a glob cannot be used to label a single channel.")
+    label = label.strip()
+    store = Store.load()
+    matched = _resolve_channel_ref(
+        store, ref, provider
+    )  # 1 row (non-glob, unambiguous)
+    item = matched[0]
+    store.set_label(item["provider"], item["channel"], label)
+    applog.log(
+        f"labelled {item['provider']}/{item['channel']} "
+        + (f"as {label!r}" if label else "(cleared)")
+    )
+    return {
+        "provider": item["provider"],
+        "display_name": item["display_name"],
+        "channel": item["channel"],
+        "label": label,
+        "cleared": not label,
     }
 
 
@@ -661,6 +700,7 @@ def status_snapshot() -> dict:
             {
                 "provider": channel.provider,
                 "name": channel.id,
+                "label": channel.label,
                 "port": f":{channel.port}",
                 "port_number": channel.port,
                 "country": _country_display(channel),
@@ -698,6 +738,7 @@ def _test_row(channel, probe: dict) -> dict:
         "provider": channel.provider,
         "display_provider": display_name(channel.provider),
         "name": channel.id,
+        "label": channel.label,
         "port": f":{channel.port}",
         "port_number": channel.port,
         "country": _country_display(channel),

@@ -100,7 +100,7 @@ uv tool install alle-proxy
 alle daemon install
 ```
 
-**With [`pipx`](https://pipx.pypa.io/stable/installation/):**
+**With [`pipx`](https://pipx.pypa.io/stable/):**
 
 ```bash
 # 1. install pipx (e.g. `brew install pipx` or your distro's package)
@@ -142,9 +142,9 @@ alle channels ls
 `alle channels ls` prints the local proxy port for each channel:
 
 ```text
-PROVIDER  NAME             PORT    COUNTRY        CITY
---------  ---------------  ------  -------------  ----------
-NordVPN   united_states_1  :53124  United States  (Any City)
+LABEL            ID                       PORT    COUNTRY        CITY
+---------------  -----------------------  ------  -------------  ----------
+united_states_1  nordvpn/united_states_1  :53124  United States  (Any City)
 ```
 
 Use that port from any tool or app that supports an HTTP or SOCKS proxy:
@@ -183,6 +183,20 @@ alle channels add protonvpn --config ~/Downloads/wg-US-CA-842.conf
 
 Re-importing the same `.conf` file updates that channel in place, keeping the
 same channel id and local port.
+
+**Friendly names**
+
+Channels are identified by a globally-unique, provider-qualified id
+(`nordvpn/united_states_1`) — the handle every command takes, shown in the `ID`
+column. You can also give one a display label for readability (the `LABEL`
+column in `channels ls`, `status`, `test`, and `metrics`). The id never changes,
+so relabelling is always safe:
+
+```bash
+alle channels add nordvpn --country "United States" --label "Streaming - US"
+alle channels setlabel united_states_1 "Streaming - US"   # or set it later
+alle channels setlabel united_states_1                    # omit text to clear
+```
 
 **Common commands**
 

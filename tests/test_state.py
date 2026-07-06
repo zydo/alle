@@ -112,6 +112,60 @@ def test_upsert_reimport_clears_reconnect_giveup():
     )  # re-import is human intervention: give-up state dropped
 
 
+def test_label_defaults_to_id_and_round_trips():
+    store = Store.load()
+    store.add_provider("nordvpn")
+    ch = store.add_channel("nordvpn", "US", "", dict(WG))
+    assert ch.label == "" and ch.display == ch.id  # absent → falls back to id
+
+    labelled = store.add_channel("nordvpn", "US", "", dict(WG), label="  Streaming  ")
+    assert labelled.label == "  Streaming  "  # stored verbatim (service strips)
+    got = Store.load().get_channel("nordvpn", labelled.id)
+    assert got is not None and got.display == "  Streaming  "
+
+
+def test_set_label_sets_and_clears():
+    store = Store.load()
+    store.add_provider("nordvpn")
+    ch = store.add_channel("nordvpn", "US", "", dict(WG))
+    assert store.set_label("nordvpn", ch.id, "Video US") is True
+    assert Store.load().get_channel("nordvpn", ch.id).label == "Video US"
+    store.set_label("nordvpn", ch.id, "")  # empty clears → back to id
+    got = Store.load().get_channel("nordvpn", ch.id)
+    assert got.label == "" and got.display == ch.id
+    assert store.set_label("nordvpn", "nope_1", "x") is False  # missing channel
+
+
+def test_label_is_not_part_of_the_id_or_signature():
+    from alle.state import _read_raw, config_signature
+
+    store = Store.load()
+    store.add_provider("nordvpn")
+    ch = store.add_channel("nordvpn", "US", "", dict(WG))
+    before = config_signature(_read_raw())
+    store.set_label("nordvpn", ch.id, "Renamed")
+    assert config_signature(_read_raw()) == before  # relabel never reconciles
+    # id (the handle) is untouched by the label
+    assert Store.load().get_channel("nordvpn", ch.id).id == ch.id
+
+
+def test_reimport_preserves_label_unless_overridden():
+    store = Store.load()
+    store.add_provider("protonvpn")
+    ch, _ = store.upsert_channel(
+        "protonvpn", "wg-US-CA-842", "US", "CA", dict(WG), label="My Server"
+    )
+    assert ch.label == "My Server"
+    # re-import with no label keeps the user's name
+    again, _ = store.upsert_channel("protonvpn", "wg-US-CA-842", "US", "CA", dict(WG))
+    assert again.label == "My Server"
+    # an explicit label on re-import overrides
+    relabelled, _ = store.upsert_channel(
+        "protonvpn", "wg-US-CA-842", "US", "CA", dict(WG), label="New Name"
+    )
+    assert relabelled.label == "New Name"
+
+
 def test_set_probe_round_trips():
     store = Store.load()
     store.add_provider("nordvpn")

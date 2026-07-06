@@ -250,3 +250,37 @@ def test_start_stop_restart_and_logs_tail(monkeypatch):
         "singbox-stop",
         "ensure",
     ]
+
+
+def test_channel_set_label_sets_clears_and_resolves():
+    store = service.Store.load()
+    store.add_provider("nordvpn")
+    ch = store.add_channel("nordvpn", "US", "", dict(WG))  # id: us_1
+
+    result = service.channel_set_label(ch.id, "  Streaming US  ")
+    assert result["label"] == "Streaming US"  # stripped
+    assert result["cleared"] is False
+    assert service.Store.load().get_channel("nordvpn", ch.id).label == "Streaming US"
+
+    # qualified ref also works, and empty clears back to the id
+    cleared = service.channel_set_label(f"nordvpn/{ch.id}", "")
+    assert cleared["cleared"] is True
+    assert service.Store.load().get_channel("nordvpn", ch.id).label == ""
+
+
+def test_channel_set_label_rejects_glob_and_unknown():
+    store = service.Store.load()
+    store.add_provider("nordvpn")
+    store.add_channel("nordvpn", "US", "", dict(WG))
+    with pytest.raises(service.ServiceError, match="glob cannot be used"):
+        service.channel_set_label("us_*", "x")
+    with pytest.raises(service.ServiceError, match="no channel"):
+        service.channel_set_label("nope_1", "x")
+
+
+def test_channel_add_stores_label(monkeypatch):
+    store = service.Store.load()
+    store.add_provider("nordvpn")
+    monkeypatch.setattr(service, "provider_wg", lambda p, c, city: dict(WG))
+    result = service.channel_add("nordvpn", "US", None, label="  My US  ")
+    assert result["channel"].label == "My US"  # stripped and stored

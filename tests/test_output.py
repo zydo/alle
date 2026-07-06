@@ -144,7 +144,8 @@ def test_status_active_with_channel_rows(monkeypatch):
 
     assert "10s ago" in text
     assert "42ms" in text
-    assert "Proton VPN" in text
+    # ID column carries the provider-qualified ref (no separate provider column)
+    assert "nordvpn/japan_1" in text and "protonvpn/wg_us_ca_842" in text
 
 
 def test_metrics_filter_empty_and_age_units(monkeypatch):

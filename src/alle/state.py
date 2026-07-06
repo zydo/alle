@@ -65,15 +65,17 @@ def _next_free_port(data: dict) -> int:
     raise RuntimeError("could not allocate an unused local proxy port")
 
 
-def _next_id(taken: set, country: str, city: str, label: str | None = None) -> str:
+def _next_id(taken: set, country: str, city: str, id_hint: str | None = None) -> str:
     """Auto-name like ``united_states_1`` / ``united_states_san_francisco_2``.
 
     API channels name themselves from country/city; imported config channels
-    pass an explicit ``label`` (the .conf file name) since they have no location.
-    ``taken`` is the set of ids already used within the provider.
+    pass an explicit ``id_hint`` (the .conf file name) since they have no
+    location. ``taken`` is the set of ids already used within the provider.
+    This id is the channel's permanent handle — distinct from the optional
+    display ``label`` (see :class:`Channel`), which is presentation-only.
     """
-    if label:
-        base = _slug(label)
+    if id_hint:
+        base = _slug(id_hint)
     elif country or city:
         base = _slug(f"{country} {city}".strip())
     else:
@@ -100,9 +102,20 @@ class Channel:
     port: int
     country: str = ""
     city: str = ""
+    label: str = ""  # optional display label; the id stays the only handle
     wg: dict = field(default_factory=dict)
     probe: dict = field(default_factory=dict)
     reconnect: dict = field(default_factory=dict)
+
+    @property
+    def display(self) -> str:
+        """What to show as the channel's name — the label, or the id when unset.
+
+        Presentation only: commands, routing rules, sing-box tags, and metrics
+        keys all use ``id``, never this. So relabelling touches nothing but the
+        display and cannot cascade.
+        """
+        return self.label or self.id
 
     @property
     def inbound_tag(self) -> str:
@@ -303,6 +316,7 @@ class Store:
                         port=int(ch.get("port", 0)),
                         country=ch.get("country", ""),
                         city=ch.get("city", ""),
+                        label=ch.get("label", ""),
                         wg=ch.get("wg", {}),
                         probe=ch.get("probe", {}),
                         reconnect=ch.get("reconnect", {}),
@@ -319,14 +333,15 @@ class Store:
         )
 
     def add_channel(
-        self, provider: str, country: str, city: str, wg: dict, label: str | None = None
+        self, provider: str, country: str, city: str, wg: dict, label: str = ""
     ) -> Channel:
         # id and port are allocated inside the transaction, against the locked
         # on-disk state — two concurrent adds can never pick the same slot.
+        # ``label`` is the optional display label, not part of the id.
         with transaction() as data:
             prov = data["providers"].setdefault(provider, {"channels": {}})
             chans = prov.setdefault("channels", {})
-            cid = _next_id(set(chans), country, city, label)
+            cid = _next_id(set(chans), country, city)
             port = _next_free_port(data)
             chans[cid] = {
                 "country": country,
@@ -335,23 +350,35 @@ class Store:
                 "wg": wg,
                 "probe": {},
             }
+            if label:
+                chans[cid]["label"] = label
         self.data = _read_raw()
         return self.get_channel(provider, cid)  # type: ignore[return-value]
 
     def upsert_channel(
-        self, provider: str, label: str, country: str, city: str, wg: dict
+        self,
+        provider: str,
+        filename: str,
+        country: str,
+        city: str,
+        wg: dict,
+        label: str = "",
     ) -> tuple[Channel, bool]:
-        """Create or update a channel with a *fixed* id derived from ``label``.
+        """Create or update a channel with a *fixed* id derived from ``filename``.
 
         Returns ``(channel, created)``. Unlike :meth:`add_channel` (which appends
         ``_1``/``_2`` so one location can hold several servers), this keys the
-        channel on ``label`` — the config file name — so re-importing the same
+        channel on ``filename`` — the config file name — so re-importing the same
         ``.conf`` updates the WireGuard params and re-parsed location *in place*,
         keeping the id and local port stable. A config's keys rotate on every
         regeneration while the server (the channel) stays the same, so the file
         name, not the key, is the identity.
+
+        ``label`` is the optional display label. On re-import an existing label
+        is **preserved** (a re-import replaces keys, not the user's naming);
+        passing a new ``label`` explicitly overrides it.
         """
-        cid = _slug(label)
+        cid = _slug(filename)
         with transaction() as data:
             prov = data["providers"].setdefault(provider, {"channels": {}})
             chans = prov.setdefault("channels", {})
@@ -365,12 +392,16 @@ class Store:
                     "wg": wg,
                     "probe": {},
                 }
+                if label:
+                    chans[cid]["label"] = label
             else:
                 ch["country"] = country
                 ch["city"] = city
                 ch["wg"] = (
                     wg  # keep port + probe; the daemon re-probes on the wg change
                 )
+                if label:  # explicit override; otherwise the existing label stays
+                    ch["label"] = label
                 # A re-import is human intervention: forget any reconnect give-up
                 # state so the daemon tries the fresh config from scratch.
                 ch.pop("reconnect", None)
@@ -389,6 +420,25 @@ class Store:
             removed = (prov.get("channels") or {}).pop(cid, None) is not None
         self.data = _read_raw()
         return removed
+
+    def set_label(self, provider: str, cid: str, label: str) -> bool:
+        """Set (or, with an empty ``label``, clear) a channel's display label.
+
+        Pure metadata: not part of the id, tags, or ``config_signature``, so it
+        never triggers a reconcile. Returns True if the channel exists.
+        """
+        found = False
+        with transaction() as data:
+            prov = data["providers"].get(provider) or {}
+            ch = (prov.get("channels") or {}).get(cid)
+            if ch is not None:
+                found = True
+                if label:
+                    ch["label"] = label
+                else:
+                    ch.pop("label", None)  # cleared → falls back to the id
+        self.data = _read_raw()
+        return found
 
     def set_probe(self, provider: str, cid: str, probe: dict) -> None:
         with transaction() as data:
