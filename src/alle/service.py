@@ -11,9 +11,11 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 
 from alle import (
+    __version__,
     applog,
     credentials,
     daemon,
+    daemonctl,
     geo,
     locations,
     metrics,
@@ -716,9 +718,23 @@ def status_snapshot() -> dict:
         "running": running,
         "state": "running" if running else "stopped",
         "router": _router_info(store),
+        "daemon": _daemon_info(),
         "channels": channels,
         "provider_count": len({c["provider"] for c in channels}),
         "channel_count": len(channels),
+    }
+
+
+def _daemon_info() -> dict:
+    """The applier daemon's status + CLI↔daemon version skew for ``alle status``."""
+    info = daemon.daemon_info()
+    dv = info.get("version") if info else None
+    return {
+        "running": info is not None,
+        "version": dv,
+        "cli_version": __version__,
+        "skew": bool(dv and dv != __version__),
+        "service_installed": daemonctl.is_installed(),
     }
 
 
@@ -863,3 +879,34 @@ def restart() -> dict:
 
 def logs_tail(lines: int = 200) -> str:
     return applog.tail(lines)
+
+
+# ---- daemon service (login-service install) ----------------------------------
+
+
+def daemon_install(linger: bool = False) -> dict:
+    """Register the daemon as a user-level login service (see alle.daemonctl).
+
+    Stops any manually-spawned daemon first so the freshly-installed supervisor
+    is the sole owner, then hands off to it.
+    """
+    try:
+        daemon.stop()  # a hand-spawned daemon would double up with the service
+        result = daemonctl.install(linger=linger)
+    except daemonctl.DaemonCtlError as e:
+        raise ServiceError(str(e)) from e
+    daemon.ensure_running()  # now routes through the supervisor
+    return result
+
+
+def daemon_uninstall() -> dict:
+    """Remove the login service (state under ~/.alle is left intact)."""
+    try:
+        return daemonctl.uninstall()
+    except daemonctl.DaemonCtlError as e:
+        raise ServiceError(str(e)) from e
+
+
+def daemon_status() -> dict:
+    """Login-service + running-daemon status for ``alle daemon status``."""
+    return {"service": daemonctl.status(), "daemon": _daemon_info()}

@@ -491,6 +491,32 @@ def cmd_version(args):
     print(__version__)
 
 
+# ---- daemon (login service) ------------------------------------------------
+
+
+def cmd_daemon_install(args):
+    result = service.daemon_install(linger=args.linger)
+    verb = "Reinstalled" if result.get("reinstalled") else "Installed"
+    print(f"{verb} the alle login service ({result['manager']}).")
+    print(f"  Unit: {result['unit_path']}")
+    print("  It auto-starts at login and is running now.")
+    if result.get("linger"):
+        print("  Lingering enabled: the daemon keeps running after you log out.")
+
+
+def cmd_daemon_uninstall(args):
+    result = service.daemon_uninstall()
+    if result.get("removed"):
+        print(f"Removed the alle login service ({result['manager']}).")
+        print("  Your ~/.alle state (providers, channels, keys) is untouched.")
+    else:
+        print("No alle login service is installed.")
+
+
+def cmd_daemon_status(args):
+    _print_or_json(service.daemon_status(), output.daemon_status, args.json)
+
+
 # ---- applier (hidden) ------------------------------------------------------
 
 
@@ -708,6 +734,30 @@ def build_parser() -> argparse.ArgumentParser:
         "-n", "--lines", type=int, default=200, help="lines to show (default 200)"
     )
     lg.set_defaults(func=cmd_logs)
+
+    # daemon (login-service install) — advanced; most users never need it (the
+    # runtime auto-starts on first use).
+    dm = sub.add_parser(
+        "daemon", help="install/remove alle as a login service (advanced)"
+    )
+    dm.set_defaults(func=_show_help(dm))
+    dm_sub = dm.add_subparsers(dest="daemon_command")
+    di = dm_sub.add_parser(
+        "install", help="run the daemon at login (launchd/systemd --user)"
+    )
+    di.add_argument(
+        "--linger",
+        action="store_true",
+        help="Linux only: keep running after logout (loginctl enable-linger)",
+    )
+    di.set_defaults(func=cmd_daemon_install)
+    dm_sub.add_parser("uninstall", help="remove the login service").set_defaults(
+        func=cmd_daemon_uninstall
+    )
+    ds = dm_sub.add_parser("status", help="show login-service + daemon status")
+    ds.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    ds.set_defaults(func=cmd_daemon_status)
+
     sub.add_parser("version", help="print alle's version").set_defaults(
         func=cmd_version
     )

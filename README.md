@@ -95,8 +95,7 @@ uninstalls it.
 curl -LsSf https://astral.sh/uv/install.sh | sh
 # 2. install the alle CLI
 uv tool install alle-proxy
-# 3. register the background daemon as a login service
-#    (planned — today the runtime auto-starts on first use / `alle start`)
+# 3. (optional) run the background daemon at login, so channels survive a reboot
 alle daemon install
 ```
 
@@ -106,10 +105,15 @@ alle daemon install
 # 1. install pipx (e.g. `brew install pipx` or your distro's package)
 # 2. install the alle CLI
 pipx install alle-proxy
-# 3. register the background daemon as a login service
-#    (planned — today the runtime auto-starts on first use / `alle start`)
+# 3. (optional) run the background daemon at login
 alle daemon install
 ```
+
+Step 3 is optional: without it the runtime auto-starts on first use (`alle start`
+or the first channel you add) and runs for the session. `alle daemon install`
+registers it as a user-level login service (macOS LaunchAgent / `systemd --user`)
+so it starts at login and is supervised — see the
+[CLI reference](docs/cli-reference.md#alle-daemon).
 
 Also works: `python -m pip install alle-proxy` into an environment you manage,
 or one-off runs with `uvx --from alle-proxy alle --help`.

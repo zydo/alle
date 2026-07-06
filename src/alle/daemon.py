@@ -21,6 +21,7 @@ its lifetime. The legacy hidden ``alle applier`` entrypoint remains as an alias.
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -28,21 +29,72 @@ import sys
 import time
 from pathlib import Path
 
-from alle import applog, paths, proc
+from alle import __version__, applog, paths, proc
 
 POLL_SECONDS = 1.0  # how often we check for a config change
 PROBE_INTERVAL = 30.0  # how often each channel is probed
 METRICS_INTERVAL = 2.0  # how often traffic counters are sampled from the Clash API
 RECONCILE_RETRY = 60.0  # retry a *failed* reconcile this often, sans state change
+VERSION_CHECK = 30.0  # how often a supervised daemon checks for an upgraded package
 
 # What the applier's command line looks like: ensure_running() spawns
-# ``<python> -m alle applier``; a hand-run ``alle applier`` (console script)
-# shows as ``.../bin/alle applier``. Used to reject recycled PIDs.
+# ``<python> -m alle applier``; a supervised or hand-run ``alle applier`` shows
+# as ``.../bin/alle applier``. Used to reject recycled PIDs.
 _MARKERS = ("-m alle", "alle applier")
 
 
 def _pid_path() -> Path:
     return paths.state_dir() / "applier.pid"
+
+
+def _info_path() -> Path:
+    return paths.state_dir() / "applier.info.json"
+
+
+def _write_info() -> None:
+    """Record the running daemon's pid + version alongside the pidfile.
+
+    Additive to the pidfile (old/new CLI↔daemon combos still parse each other):
+    ``alle status`` reads the version here to warn about CLI↔daemon skew after
+    an upgrade.
+    """
+    try:
+        _info_path().write_text(
+            json.dumps(
+                {"pid": os.getpid(), "version": __version__, "at": int(time.time())}
+            )
+        )
+    except OSError:
+        pass
+
+
+def daemon_info() -> dict | None:
+    """The running daemon's ``{pid, version, at}`` info, or None if not running.
+
+    Only trusts the file when its pid is the live daemon, so a stale info file
+    from a crashed daemon never reports a phantom version.
+    """
+    pid = running_pid()
+    if pid is None:
+        return None
+    try:
+        info = json.loads(_info_path().read_text())
+    except (OSError, ValueError):
+        return {"pid": pid, "version": None}
+    if info.get("pid") != pid:
+        return {"pid": pid, "version": None}
+    return info
+
+
+def _installed_version() -> str:
+    """The alle version currently on disk (re-read fresh, unlike the import-time
+    ``__version__``) — differs from ``__version__`` after an in-place upgrade."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("alle-proxy")
+    except PackageNotFoundError:
+        return __version__
 
 
 def _state_stamp() -> tuple[int, int]:
@@ -82,10 +134,19 @@ def ensure_running() -> None:
 
     Called by every CLI mutation so configuring a channel is enough to get it
     applied and probed — there is never a separate "apply" step.
+
+    When a login service owns the daemon (launchd/systemd), self-spawning would
+    fight the supervisor, so we ask the supervisor to (re)start it instead — it,
+    not us, keeps it alive.
     """
     if is_running():
         return
-    if os.environ.get("ALLE_APPLIER"):  # don't recurse from inside the daemon
+    if os.environ.get("ALLE_APPLIER") or os.environ.get("ALLE_SERVICE"):
+        return  # don't recurse from inside the daemon / supervised process
+    from alle import daemonctl
+
+    if daemonctl.is_installed():
+        daemonctl.start_service()
         return
     env = dict(os.environ, ALLE_APPLIER="1")
     log = paths.state_dir() / "applier.log"
@@ -104,7 +165,21 @@ def ensure_running() -> None:
 
 
 def stop() -> bool:
-    """Stop the applier (SIGTERM, then SIGKILL). True if one was running."""
+    """Stop the applier (SIGTERM, then SIGKILL). True if one was running.
+
+    When a supervisor owns the daemon, signalling it directly is futile —
+    KeepAlive/Restart would resurrect it — so route through the service manager,
+    which stops it for the session.
+    """
+    from alle import daemonctl
+
+    if daemonctl.is_installed():
+        was = is_running()
+        daemonctl.stop_service()
+        _info_path().unlink(missing_ok=True)
+        _pid_path().unlink(missing_ok=True)
+        applog.log("applier stopped (via service manager)")
+        return was
     pid = running_pid()
     if pid is None:
         _pid_path().unlink(missing_ok=True)
@@ -123,6 +198,7 @@ def stop() -> bool:
         except OSError:
             pass
     _pid_path().unlink(missing_ok=True)
+    _info_path().unlink(missing_ok=True)
     applog.log("applier stopped")
     return True
 
@@ -179,16 +255,30 @@ def run_applier() -> None:
     signal.signal(signal.SIGINT, _handle)
 
     _pid_path().write_text(str(os.getpid()))
+    _write_info()
+    supervised = bool(os.environ.get("ALLE_SERVICE"))
     last_stamp: tuple[int, int] | None = None
     sig = None
     last_sig = None
     last_probe = 0.0
     last_metrics = 0.0
+    last_version_check = 0.0
     reconcile_ok = True
     reconcile_retry_at = 0.0
     try:
         while not stop_flag["stop"]:
             now = time.monotonic()
+            # Self-restart on in-place upgrade: only when a supervisor will
+            # respawn us on the new code — otherwise exiting would just leave
+            # the daemon down until the next CLI call.
+            if supervised and now - last_version_check >= VERSION_CHECK:
+                last_version_check = now
+                if _installed_version() != __version__:
+                    applog.log(
+                        f"applier: package upgraded {__version__} -> "
+                        f"{_installed_version()}; exiting for supervisor respawn"
+                    )
+                    break
             stamp = _state_stamp()
             if stamp != last_stamp:
                 last_stamp = stamp
@@ -236,3 +326,4 @@ def run_applier() -> None:
     finally:
         if running_pid() == os.getpid():
             _pid_path().unlink(missing_ok=True)
+            _info_path().unlink(missing_ok=True)

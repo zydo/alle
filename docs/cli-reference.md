@@ -34,6 +34,7 @@ omit the prefix.
   - [`alle test`](#alle-test)
   - [`alle metrics`](#alle-metrics)
   - [`alle logs`](#alle-logs)
+  - [`alle daemon`](#alle-daemon)
   - [`alle version`](#alle-version)
   - [Output conventions](#output-conventions)
   - [Exit codes](#exit-codes)
@@ -78,8 +79,9 @@ omit the prefix.
   across restarts. Channel ports remain fully usable alongside it.
 - **Runtime** — the background process managed by `alle start`/`stop`/`restart` that
   reconciles `state.json` into one sing-box process and heartbeat-probes each channel.
-  It is auto-started on the first mutation or `alle start`; there is no separate
-  user-facing daemon command in the current CLI.
+  It auto-starts on the first mutation or `alle start` and runs for the session;
+  [`alle daemon install`](#alle-daemon) optionally promotes it to a supervised
+  login service.
 
 WireGuard is connectionless, so there is no connect/disconnect. A channel exists in
 config; its health is whatever the most recent background probe found.
@@ -475,6 +477,62 @@ alle logs -f
 
 ---
 
+## `alle daemon`
+
+Manage whether alle's background daemon runs as a **user-level login service**.
+Advanced and optional — without it the runtime auto-starts on first use and runs
+for the session. Installing the service makes it start at login and be
+supervised (auto-restarted on crash, and on an in-place upgrade). No `sudo`: it
+is a per-user service, never system-wide.
+
+- **macOS** — a LaunchAgent (`~/Library/LaunchAgents/com.github.zydo.alle.plist`),
+  managed with `launchctl`.
+- **Linux** — a `systemd --user` unit (`~/.config/systemd/user/alle.service`),
+  managed with `systemctl --user`.
+
+Both auto-start at login and run for the login session. (A macOS LaunchAgent
+cannot survive logout — that needs a root service, out of scope. On Linux,
+`--linger` keeps it running after logout.)
+
+### `alle daemon install [--linger]`
+
+Register and start the login service. Pre-fetches the pinned sing-box binary so
+the service starts ready. Idempotent — re-running refreshes the unit (e.g. after
+a format change). `--linger` (Linux only) enables `loginctl enable-linger` so the
+daemon keeps running after you log out.
+
+```bash
+alle daemon install
+alle daemon install --linger      # Linux: survive logout
+```
+
+Homebrew users don't need this — `brew services start alle` owns registration
+there.
+
+### `alle daemon uninstall`
+
+Remove the login service. Your `~/.alle` state (providers, channels, keys) is
+left untouched.
+
+### `alle daemon status [--json]`
+
+Show whether the login service is installed/active and whether the daemon is
+running, with its version.
+
+```text
+Login service: active (launchd).
+  Unit: /Users/you/Library/LaunchAgents/com.github.zydo.alle.plist
+Daemon: running, version 0.1.0.
+```
+
+**Upgrades:** the service unit execs a stable shim, so `uv tool upgrade
+alle-proxy` (or `pipx upgrade`) never needs to touch it, and a supervised daemon
+notices the new version and restarts itself onto it within ~30s. For an
+unsupervised daemon, `alle status` prints a one-line warning when the running
+daemon is older than the CLI (`run alle restart to pick up the upgrade`).
+
+---
+
 ## `alle version`
 
 Print the installed package version.
@@ -520,4 +578,5 @@ testing: `ALLE_HOME=/tmp/alle-test alle status`):
 - `singbox.json` — generated sing-box config (`0400`, read-only).
 - `clash_api.json` — generated address + secret for the internal stats API (`0600`).
 - `bin/sing-box@<version>` — pinned, checksum-verified sing-box binary.
-- `alle.log`, plus `*.pid` / runtime files while running.
+- `alle.log`, plus `*.pid` and `applier.info.json` (daemon pid + version, read by
+  `alle status` for the skew warning) / runtime files while running.

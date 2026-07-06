@@ -106,3 +106,116 @@ def test_failed_reconcile_is_retried_without_a_state_change(monkeypatch):
         signal.signal(signal.SIGINT, old_int)
 
     assert len(calls) >= 2  # retried though the config signature never moved
+
+
+# ---- version info file + skew --------------------------------------------------
+
+
+def test_daemon_info_trusts_only_the_live_pid(monkeypatch):
+    monkeypatch.setattr(daemon, "running_pid", lambda: None)
+    assert daemon.daemon_info() is None  # not running → no info
+
+    monkeypatch.setattr(daemon, "running_pid", lambda: 4242)
+    daemon._info_path().write_text('{"pid": 4242, "version": "0.9.9", "at": 1}')
+    info = daemon.daemon_info()
+    assert info is not None and info["version"] == "0.9.9"
+
+    # a stale info file from a different pid is not trusted
+    daemon._info_path().write_text('{"pid": 1, "version": "0.0.1", "at": 1}')
+    info = daemon.daemon_info()
+    assert info is not None and info["version"] is None
+
+
+def test_installed_version_is_readable():
+    v = daemon._installed_version()
+    assert isinstance(v, str) and v  # resolves to the installed package version
+
+
+# ---- self-restart on upgrade (supervised only) ---------------------------------
+
+
+class _NoopEngine:
+    def __init__(self, store):
+        self.store = store
+
+    def reconcile(self):
+        return {}
+
+
+def _drive_once(monkeypatch, now=daemon.VERSION_CHECK + 1):
+    """Run run_applier with a clock parked past the version-check window so the
+    first loop iteration performs the version check, then stop it."""
+
+    class _Clock:
+        t = float(now)
+
+        def monotonic(self):
+            return self.t
+
+        def time(self):
+            return 1000.0
+
+        def sleep(self, _s):
+            raise KeyboardInterrupt  # end after one iteration
+
+    monkeypatch.setattr("alle.engine.Engine", _NoopEngine)
+    monkeypatch.setattr(daemon, "time", _Clock())
+    old = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT)
+    try:
+        daemon.run_applier()
+    finally:
+        signal.signal(signal.SIGTERM, old[0])
+        signal.signal(signal.SIGINT, old[1])
+
+
+def test_supervised_daemon_exits_on_version_change(monkeypatch):
+    monkeypatch.setenv("ALLE_SERVICE", "1")
+    monkeypatch.setattr(daemon, "_installed_version", lambda: "99.0.0")
+    # version mismatch under a supervisor: run_applier breaks cleanly (no sleep,
+    # so no KeyboardInterrupt) for the supervisor to respawn on new code
+    _drive_once(monkeypatch)
+    assert "package upgraded" in _read_log()
+
+
+def test_unsupervised_daemon_ignores_version_change(monkeypatch):
+    monkeypatch.delenv("ALLE_SERVICE", raising=False)
+    monkeypatch.setattr(daemon, "_installed_version", lambda: "99.0.0")
+    # no supervisor → must NOT self-exit (would stay down); the loop runs and we
+    # end it via the sleep-raised KeyboardInterrupt instead
+    with pytest.raises(KeyboardInterrupt):
+        _drive_once(monkeypatch)
+
+
+def _read_log() -> str:
+    from alle import applog
+
+    return applog.tail(200)
+
+
+# ---- ownership handoff to a service manager ------------------------------------
+
+
+def test_ensure_running_defers_to_service_manager(monkeypatch):
+    from alle import daemonctl
+
+    monkeypatch.setattr(daemon, "is_running", lambda: False)
+    monkeypatch.setattr(daemonctl, "is_installed", lambda: True)
+    started = []
+    monkeypatch.setattr(daemonctl, "start_service", lambda: started.append(1) or True)
+    spawned = []
+    monkeypatch.setattr(daemon.subprocess, "Popen", lambda *a, **k: spawned.append(1))
+    daemon.ensure_running()
+    assert started == [1] and spawned == []  # supervisor asked, no self-spawn
+
+
+def test_stop_routes_through_service_manager(monkeypatch):
+    from alle import daemonctl
+
+    monkeypatch.setattr(daemonctl, "is_installed", lambda: True)
+    monkeypatch.setattr(daemon, "is_running", lambda: True)
+    stopped = []
+    monkeypatch.setattr(daemonctl, "stop_service", lambda: stopped.append(1) or True)
+    killed = []
+    monkeypatch.setattr(daemon.os, "kill", lambda *a: killed.append(a))
+    assert daemon.stop() is True  # was running
+    assert stopped == [1] and killed == []  # supervisor stopped it, no raw signals

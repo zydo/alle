@@ -280,10 +280,50 @@ def test_result(data: dict) -> str:
     return "\n".join(_table(headers, rows))
 
 
+def daemon_status(data: dict) -> str:
+    svc = data["service"]
+    d = data["daemon"]
+    lines = []
+    if not svc.get("supported"):
+        lines.append(
+            f"Login service: not supported on {svc.get('platform', 'this platform')}."
+        )
+    elif svc["installed"]:
+        state = "active" if svc["active"] else "installed (not active)"
+        lines.append(f"Login service: {state} ({svc['manager']}).")
+        lines.append(f"  Unit: {svc['unit_path']}")
+    else:
+        lines.append(f"Login service: not installed ({svc['manager']}).")
+        lines.append("  Install with: alle daemon install")
+
+    if d["running"]:
+        ver = d["version"] or "unknown"
+        lines.append(f"Daemon: running, version {ver}.")
+        if d["skew"]:
+            lines.append(
+                f"  ⚠ CLI is {d['cli_version']} — run `alle restart` to match."
+            )
+    else:
+        lines.append("Daemon: not running.")
+    return "\n".join(lines)
+
+
+def _skew_lines(snapshot: dict) -> list[str]:
+    """A one-line skew warning when the running daemon is on older code than the
+    CLI — an upgrade landed but the old daemon is still serving until restarted."""
+    d = snapshot.get("daemon") or {}
+    if d.get("skew"):
+        return [
+            f"  ⚠ daemon running {d['version']}, CLI is {d['cli_version']} — "
+            "run `alle restart` to pick up the upgrade"
+        ]
+    return []
+
+
 def status(snapshot: dict) -> str:
     channels = snapshot["channels"]
     if not snapshot["running"]:
-        lines = ["Alle - Inactive"]
+        lines = ["Alle - Inactive", *_skew_lines(snapshot)]
         if channels:
             lines.append(
                 f"  ({snapshot['channel_count']} channel(s) across "
@@ -291,7 +331,7 @@ def status(snapshot: dict) -> str:
             )
         return "\n".join(lines)
 
-    lines = ["Alle - Active"]
+    lines = ["Alle - Active", *_skew_lines(snapshot)]
     router = snapshot.get("router")
     if router:
         lines.append(f"  Router  {_router_where(router)} — {_router_mode(router)}")
