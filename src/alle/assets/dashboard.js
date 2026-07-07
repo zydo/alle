@@ -37,10 +37,10 @@ let measured = new Map();
 let busy = new Set();
 let dragRuleId = null;
 let paused = false;
-let refreshStatus = () => {};
+let refreshStatus = () => { };
 
 export function mount(view, ctx) {
-  refreshStatus = (ctx && ctx.refresh) || (() => {});
+  refreshStatus = (ctx && ctx.refresh) || (() => { });
   view.innerHTML = SHELL;
   el = {
     entry: view.querySelector("#entry"), entryAddr: view.querySelector("#entry-addr"),
@@ -334,7 +334,7 @@ function providerGuide(p) {
 }
 
 function providerCard(p) {
-  const logo = providerIcon(p.provider) ? `<img src="${providerIcon(p.provider)}" alt="">` : esc(p.display_name[0]);
+  const logo = providerIcon(p.provider) ? `<img src="${providerIcon(p.provider)}" alt="">` : `<span class="prov-fallback">${esc(p.display_name[0])}</span>`;
   return `<button class="prov-tile" data-provider="${esc(p.provider)}" title="${esc(p.display_name)}" aria-label="${esc(p.display_name)}">${logo}</button>`;
 }
 
@@ -522,11 +522,11 @@ function routeTargetOptions() {
 function openAddRule() {
   const m = modal("Add route", `<form id="rf">
     <label class="field"><span>Match type</span>${customSelectHTML("type", [
-      { value: "domain_suffix", label: "Domain suffix" },
-      { value: "domain", label: "Exact domain" },
-      { value: "ip_cidr", label: "IP / CIDR" },
-      { value: "all", label: "All traffic" },
-    ], "domain_suffix")}</label>
+    { value: "domain_suffix", label: "Domain suffix" },
+    { value: "domain", label: "Exact domain" },
+    { value: "ip_cidr", label: "IP / CIDR" },
+    { value: "all", label: "All traffic" },
+  ], "domain_suffix")}</label>
     <label class="field" id="value-field"><span>Value</span><input id="value" placeholder="example.com" spellcheck="false"></label>
     <label class="field"><span>Via channel</span>${customSelectHTML("target", routeTargetOptions(), "direct")}</label>
     <p class="form-err" id="err"></p><button class="btn primary" type="submit">Add rule</button>

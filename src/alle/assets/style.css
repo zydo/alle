@@ -846,21 +846,21 @@ input.relabel {
 }
 
 .provider-row {
-  display: flex;
-  flex-wrap: nowrap;
-  align-items: center;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: 1fr;
+  justify-items: center;
+  gap: 10px;
 }
 
 .prov-tile {
-  flex: none;
-  width: 88px;
-  height: 88px;
+  width: 100%;
+  max-width: 360px;
+  min-height: 112px;
   display: grid;
   place-items: center;
-  padding: 0;
+  padding: 14px;
   border: 1px solid var(--line);
-  border-radius: 16px;
+  border-radius: 8px;
   background: var(--panel);
   color: var(--text);
   cursor: pointer;
@@ -874,9 +874,19 @@ input.relabel {
 }
 
 .prov-tile img {
-  width: 62px;
-  height: 62px;
+  width: min(220px, 76%);
+  height: 84px;
   object-fit: contain;
+}
+
+.prov-fallback {
+  width: 84px;
+  height: 84px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--panel-2);
+  font-weight: 800;
 }
 
 .prov-tile.add {
@@ -886,7 +896,7 @@ input.relabel {
 .prov-add {
   color: var(--muted);
   font-family: var(--mono);
-  font-size: 34px;
+  font-size: 46px;
   line-height: 1;
 }
 
