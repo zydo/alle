@@ -22,14 +22,14 @@ function route() {
   const key = location.hash.replace(/^#\/?/, "");
   const page = pages[key] || dashboard;
   const activeKey = pages[key] ? key : "";
-  if (current && current.unmount) current.unmount();
+  current?.unmount?.();
   document.querySelectorAll(".nav a").forEach((a) =>
     a.classList.toggle("active", (a.dataset.route || "") === activeKey));
   const view = $("view");
   view.innerHTML = "";
   current = page;
   page.mount(view, { refresh: tick });
-  if (lastStatus && current.onStatus) current.onStatus(lastStatus);
+  if (lastStatus) current?.onStatus?.(lastStatus);
 }
 
 async function tick() {
@@ -38,15 +38,18 @@ async function tick() {
     lastStatus = data;
     updateMasthead(data);
     el.banner.classList.remove("show");
-    if (current && current.onStatus) current.onStatus(data);
+    current?.onStatus?.(data);
   } else {
     el.banner.classList.add("show");
     setPill(false, "offline");
   }
 }
 
-async function loop() { await tick(); setTimeout(loop, 3000); }
+async function scheduleNextTick() {
+  await tick();
+  setTimeout(scheduleNextTick, 3000);
+}
 
-window.addEventListener("hashchange", route);
+globalThis.addEventListener("hashchange", route);
 route();
-loop();
+await scheduleNextTick();

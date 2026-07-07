@@ -11,6 +11,10 @@
 
 A universal VPN client that manages multiple VPN connections with rule-based routing.
 
+<p align="center">
+  <img src="src/alle/assets/webui.png" alt="alle Web UI dashboard" width="900">
+</p>
+
 # Why alle
 
 Most VPN clients are built around one global idea: connect this device to a single

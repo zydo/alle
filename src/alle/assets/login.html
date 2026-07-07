@@ -45,7 +45,11 @@
           body: JSON.stringify({ token }),
         });
         if (res.ok) { location.href = "/"; return; }
-      } catch (_) { /* fall through to the error */ }
+        err.textContent = "That token wasn't accepted. Check it and try again.";
+      } catch (error_) {
+        const detail = error_ instanceof Error ? error_.message : String(error_);
+        err.textContent = `Couldn't reach the dashboard: ${detail}`;
+      }
       err.classList.add("show");
     });
   </script>

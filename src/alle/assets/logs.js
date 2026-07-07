@@ -1,6 +1,6 @@
 // Logs page: polling tail view. Streaming is intentionally deferred.
 
-import { api, esc, toast, customSelectHTML, wireCustomSelects } from "./core.js";
+import { api, toast, customSelectHTML, wireCustomSelects } from "./core.js";
 
 let view = null;
 let timer = null;

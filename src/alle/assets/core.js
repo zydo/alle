@@ -8,7 +8,7 @@ export function esc(s) {
 }
 
 // Build a DOM node from an HTML string (single root).
-export function node(html) {
+function node(html) {
   const t = document.createElement("template");
   t.innerHTML = html.trim();
   return t.content.firstElementChild;
@@ -24,13 +24,22 @@ async function req(method, path, body) {
   let res;
   try {
     res = await fetch(path, opt);
-  } catch (_) {
-    return { ok: false, error: "Can't reach the daemon." };
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `Can't reach the daemon: ${detail}` };
   }
   if (res.status === 401) { location.href = "/"; return { ok: false, error: "unauthorized" }; }
+  const text = await res.text();
   let data = null;
-  try { data = await res.json(); } catch (_) { /* no body */ }
-  if (!res.ok) return { ok: false, error: (data && data.error) || `Request failed (${res.status})` };
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: `Invalid response from daemon: ${detail}` };
+    }
+  }
+  if (!res.ok) return { ok: false, error: data?.error || `Request failed (${res.status})` };
   return { ok: true, data };
 }
 
@@ -51,17 +60,6 @@ export function bytes(n) {
 export function mbps(bps) {
   if (!bps) return "—";
   return `${(Number(bps) / 1_000_000).toFixed(1)} Mbps`;
-}
-
-export function ago(epoch) {
-  if (!epoch) return "never";
-  const s = Math.max(0, Math.round(Date.now() / 1000 - Number(epoch)));
-  if (s < 60) return `${s}s ago`;
-  const m = Math.round(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.round(m / 60);
-  if (h < 48) return `${h}h ago`;
-  return `${Math.round(h / 24)}d ago`;
 }
 
 // --- transient notifications ---
@@ -114,8 +112,22 @@ export function confirmDialog(title, message, { confirmText = "Confirm", cancelT
       </div>`);
     document.body.appendChild(root);
     let done = false;
-    const finish = (val) => { if (done) return; done = true; root.remove(); document.removeEventListener("keydown", onKey); resolve(val); };
-    const onKey = (e) => { if (e.key === "Escape") finish(false); else if (e.key === "Enter") finish(true); };
+    const finish = (val) => {
+      if (done) {
+        return;
+      }
+      done = true;
+      root.remove();
+      document.removeEventListener("keydown", onKey);
+      resolve(val);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        finish(false);
+      } else if (e.key === "Enter") {
+        finish(true);
+      }
+    };
     root.querySelector("[data-cancel]").onclick = () => finish(false);
     root.querySelector("[data-confirm]").onclick = () => finish(true);
     root.addEventListener("click", (e) => { if (e.target === root) finish(false); });
