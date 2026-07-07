@@ -56,7 +56,8 @@ def test_launchd_plist_execs_the_stable_shim(fake_home):
     assert plist["RunAtLoad"] is True
 
 
-def test_launchd_install_writes_plist_and_loads(fake_home, recorded_run):
+def test_launchd_install_writes_plist_and_loads(fake_home, recorded_run, monkeypatch):
+    monkeypatch.setattr(daemonctl.platform, "system", lambda: "Darwin")
     m = daemonctl.LaunchdManager()
     assert not m.is_installed()
     daemonctl.install()
@@ -67,7 +68,8 @@ def test_launchd_install_writes_plist_and_loads(fake_home, recorded_run):
     assert str(m.unit_path()) in recorded_run[-1]
 
 
-def test_launchd_uninstall_unloads_and_removes(fake_home, recorded_run):
+def test_launchd_uninstall_unloads_and_removes(fake_home, recorded_run, monkeypatch):
+    monkeypatch.setattr(daemonctl.platform, "system", lambda: "Darwin")
     daemonctl.install()
     m = daemonctl.LaunchdManager()
     assert m.is_installed()
