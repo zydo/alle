@@ -68,6 +68,7 @@ def test_providers_rm_all_empty_is_a_noop(capsys):
 def test_start_stop_restart_and_logs_are_thin_adapters(monkeypatch, capsys):
     monkeypatch.setattr(cli.service, "start", lambda: {"has_channels": True})
     monkeypatch.setattr(cli.service, "stop", lambda: {"was_running": True})
+    monkeypatch.setattr(cli.service, "web_ui_url", lambda: "http://127.0.0.1:9999")
     restarted = []
     monkeypatch.setattr(cli.service, "restart", lambda: restarted.append(True))
     monkeypatch.setattr(cli.service, "logs_tail", lambda lines: f"tail {lines}")
@@ -79,6 +80,7 @@ def test_start_stop_restart_and_logs_are_thin_adapters(monkeypatch, capsys):
 
     assert capsys.readouterr().out.splitlines() == [
         "Alle started; channels are being applied and probed. See: alle status",
+        "Web UI: http://127.0.0.1:9999  (open it: alle ui)",
         "Alle stopped (channels kept in config).",
         "Alle restarted. See: alle status",
         "tail 7",

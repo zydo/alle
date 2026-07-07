@@ -34,6 +34,7 @@ omit the prefix.
   - [`alle test`](#alle-test)
   - [`alle metrics`](#alle-metrics)
   - [`alle logs`](#alle-logs)
+  - [`alle ui`](#alle-ui)
   - [`alle daemon`](#alle-daemon)
   - [`alle version`](#alle-version)
   - [Output conventions](#output-conventions)
@@ -254,9 +255,9 @@ alle channels rm --provider nordvpn --all
 
 ## `alle routes`
 
-Rule-based routing through the router entrypoint. Rules are evaluated **in the
-order they were added — first match wins**; there is no reordering command yet
-(delete and re-add to change order). Traffic that matches no rule goes
+Rule-based routing through the router entrypoint. Rules are evaluated **top to
+bottom — first match wins**; use `alle routes reorder` or the Web UI Routes page
+to change evaluation order. Traffic that matches no rule goes
 **direct (no VPN)** unless the [kill-switch](#alle-routes-killswitch-onoff) is on.
 
 The entrypoint's port is shown by `alle status` and by `routes add`/`routes ls`;
@@ -320,6 +321,15 @@ once and nothing is removed.
 ```bash
 alle routes rm r2
 alle routes rm r1 r3 --dry-run
+```
+
+### `alle routes reorder <id>... [--json]`
+
+Replace the evaluation order with a full list of rule ids. Pass every existing
+rule id exactly once; ids stay stable and only their order changes.
+
+```bash
+alle routes reorder r3 r1 r2
 ```
 
 ### `alle routes killswitch [on|off]`
@@ -477,6 +487,42 @@ alle logs -f
 
 ---
 
+## `alle ui`
+
+Open the Web UI dashboard in your browser. Ensures the daemon (which serves the
+UI) is running, then opens a one-time sign-in link.
+
+```bash
+alle ui
+alle ui --no-open    # print the sign-in URL instead of opening a browser
+```
+
+The UI is a single **Dashboard** page (plus a **Logs** page). The Dashboard shows
+the router entrypoint address, a channels table (Location, Port, Latency, IP, and
+Sent / Received / Down Speed / Up Speed), and the router rules. Measured columns
+stay blank until you run a per-row or all-channel **Probe** or **Speed Test**
+(spinner while running). Adding a channel opens a provider-guided wizard: an
+icon-only provider row plus an always-present "+" to add NordVPN or Proton VPN;
+token providers (NordVPN) pick a country and city from a searchable list, Proton
+VPN uploads a WireGuard `.conf`. Router rules can be added, deleted, and
+drag-reordered (first match wins), with shadow warnings and a kill-switch toggle
+(Unmatched Traffic). Channels a routing rule still targets can't be removed — the
+UI shows the exact rules to clear first, same as `alle channels rm`. A **Logs**
+page polls the local log tail. Lifecycle (start/stop/restart) is via the CLI;
+the masthead links to the project on GitHub.
+
+- The server binds to `127.0.0.1` only and is never exposed to the network (there
+  is no `--bind` option, by design). Reach it remotely over an SSH tunnel:
+  `ssh -L 8080:127.0.0.1:<port> user@host`, then browse `http://127.0.0.1:8080`
+  (the `<port>` is shown by `alle status` / `alle start`). SSH provides
+  encryption and access control; do not expose or reverse-proxy the alle Web UI
+  port directly.
+- Auth: `alle ui` mints a single-use login token (exchanged for an `HttpOnly`
+  session cookie); the persistent secret never appears in a URL. Manual sign-in:
+  paste the `secret` from `~/.alle/control_api.json`.
+
+---
+
 ## `alle daemon`
 
 Manage whether alle's background daemon runs as a **user-level login service**.
@@ -577,6 +623,8 @@ testing: `ALLE_HOME=/tmp/alle-test alle status`):
 - `providers/*.json` — cached provider location lists.
 - `singbox.json` — generated sing-box config (`0400`, read-only).
 - `clash_api.json` — generated address + secret for the internal stats API (`0600`).
+- `control_api.json` — generated address + secret for the Web UI control server
+  (`0600`); the contract port the dashboard is served on.
 - `bin/sing-box@<version>` — pinned, checksum-verified sing-box binary.
 - `alle.log`, plus `*.pid` and `applier.info.json` (daemon pid + version, read by
   `alle status` for the skew warning) / runtime files while running.

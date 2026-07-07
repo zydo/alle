@@ -30,6 +30,7 @@ from alle.providers import (
     PROVIDERS,
     ProviderError,
     auth_fields,
+    auth_help,
     config_help,
     display_name,
     is_functional,
@@ -113,6 +114,34 @@ def provider_add_token(provider: str, creds: dict) -> dict:
         "credential_preview": preview(provider, creds),
         "functional": is_functional(provider),
     }
+
+
+def provider_catalog() -> dict:
+    """Every provider alle recognises + how to add it — drives the UI add form.
+
+    For each: its kind (``token``/``config``), whether it's functional, the
+    credential fields to prompt for (token providers), and the portal help
+    (config providers).
+    """
+    out = []
+    for p in known():
+        instructions, url = auth_help(p)
+        out.append(
+            {
+                "provider": p,
+                "display_name": display_name(p),
+                "kind": kind(p),
+                "functional": is_functional(p),
+                "fields": [
+                    {"key": f.key, "label": f.label, "secret": f.secret}
+                    for f in auth_fields(p)
+                ],
+                "config_help": config_help(p),
+                "help": instructions,
+                "url": url,
+            }
+        )
+    return {"providers": out}
 
 
 def provider_list() -> dict:
@@ -265,39 +294,65 @@ def _channel_add_config(
     channel id is taken from the file name (a factual, user-chosen label), and
     country/city are left empty rather than guessed.
     """
-    if kind(provider) != "config":
-        raise ServiceError(
-            f"{display_name(provider)} uses an API — add channels with --country, "
-            f"not --config (see: alle locations {provider})."
-        )
     path = Path(config).expanduser()
     if not path.is_file():
         raise ServiceError(f"config file not found: {config}")
     try:
-        wg = wgconf.parse(path.read_text())
+        text = path.read_text()
     except OSError as e:
         raise ServiceError(f"could not read {config}: {e}") from e
-    except wgconf.ConfError as e:
-        raise ServiceError(f"{path.name} is not a usable WireGuard .conf: {e}") from e
+    return _import_conf(store, provider, path.name, text, label)
 
-    country, city = geo.from_filename(
-        path.stem
-    )  # best-effort ISO codes in the file name
+
+def channel_add_conf_text(
+    provider: str, filename: str, text: str, label: str = ""
+) -> dict:
+    """Import a channel from ``.conf`` *content* (the Web UI upload path).
+
+    Same as ``channels add --config <file>`` but the caller supplies the bytes
+    directly, since a browser can't hand the daemon a server-side file path.
+    """
+    store = Store.load()
+    if not store.has_provider(provider):
+        raise ServiceError(
+            f"{display_name(provider)} is not added — add the provider first."
+        )
+    return _import_conf(store, provider, filename, text, label.strip())
+
+
+def _import_conf(
+    store: Store, provider: str, filename: str, text: str, label: str
+) -> dict:
+    """Parse a ``.conf`` (from a file or an upload) and upsert it as a channel.
+
+    A ``.conf`` carries no country/city, and alle does not geolocate — so the
+    channel id is the file name (a factual, user-chosen label), and country/city
+    are parsed best-effort from the name's ISO codes rather than guessed.
+    """
+    if kind(provider) != "config":
+        raise ServiceError(
+            f"{display_name(provider)} uses an API — add channels by country, "
+            f"not a .conf (see: alle locations {provider})."
+        )
+    try:
+        wg = wgconf.parse(text)
+    except wgconf.ConfError as e:
+        raise ServiceError(f"{filename} is not a usable WireGuard .conf: {e}") from e
+    stem = Path(filename).stem
+    country, city = geo.from_filename(stem)
     # Identity is the file name: re-importing the same .conf updates it in place
     # (keys may have rotated) rather than creating wg_..._2.
-    channel, created = store.upsert_channel(
-        provider, path.stem, country, city, wg, label
-    )
+    channel, created = store.upsert_channel(provider, stem, country, city, wg, label)
     action = "imported" if created else "updated"
     applog.log(
-        f"{action} channel {provider}/{channel.id} from {path.name} on :{channel.port}"
+        f"{action} channel {provider}/{channel.id} from {filename} on :{channel.port}"
     )
     daemon.ensure_running()
     return {
         "provider": provider,
         "display_name": display_name(provider),
         "channel": channel,
-        "imported_from": path.name,
+        "imported_from": filename,
         "updated": not created,
     }
 
@@ -653,6 +708,26 @@ def routes_remove(ids: list[str], dry_run: bool = False) -> dict:
     return {"rules": planned, "dry_run": False}
 
 
+def routes_reorder(ids: list[str]) -> dict:
+    """Replace evaluation order with a full permutation of existing rule ids."""
+    if not ids:
+        raise ServiceError("at least one rule id is required (see: alle routes ls).")
+    store = Store.load()
+    try:
+        ordered, changed = store.reorder_rules(ids)
+    except ValueError as e:
+        raise ServiceError(f"{e} (pass every rule id exactly once).") from e
+    shadows = routes.shadowed_by(ordered)
+    if changed:
+        applog.log("reordered routes: " + " ".join(rule["id"] for rule in ordered))
+        daemon.ensure_running()
+    return {
+        "rules": [_decorate_rule(rule, shadows) for rule in ordered],
+        "changed": changed,
+        "router": _router_info(store),
+    }
+
+
 def routes_killswitch(enable: bool | None = None) -> dict:
     """Set (or with ``None`` just report) unmatched-traffic blocking."""
     store = Store.load()
@@ -719,10 +794,38 @@ def status_snapshot() -> dict:
         "state": "running" if running else "stopped",
         "router": _router_info(store),
         "daemon": _daemon_info(),
+        "web_ui": web_ui_url(),
         "channels": channels,
         "provider_count": len({c["provider"] for c in channels}),
         "channel_count": len(channels),
     }
+
+
+def web_ui_url() -> str:
+    """The plain, token-free Web UI URL (the daemon serves it when running)."""
+    from alle.webui import server as webui_server
+
+    return webui_server.ui_url()
+
+
+def ensure_web_ui(timeout: float = 6.0) -> bool:
+    """Ensure the daemon is running and serving the Web UI. True if reachable.
+
+    Starts the daemon if needed, then waits for its control server to accept
+    connections (it starts asynchronously) so the browser never opens on a dead
+    port.
+    """
+    from alle.webui import server as webui_server
+
+    daemon.ensure_running()
+    return webui_server.wait_until_serving(timeout)
+
+
+def web_ui_login_url() -> str:
+    """A one-time login URL for opening the Web UI (used by ``alle ui``)."""
+    from alle.webui import server as webui_server
+
+    return webui_server.mint_login_url()
 
 
 def _daemon_info() -> dict:
@@ -862,12 +965,23 @@ def start() -> dict:
 
 
 def stop() -> dict:
+    if daemon.in_daemon_process():
+        daemon.schedule_lifecycle("stop")
+        applog.log("stop requested from web ui")
+        return {"was_running": True, "stopping": True}
     was_running = _stop_all()
     applog.log("stop")
     return {"was_running": was_running}
 
 
 def restart() -> dict:
+    if daemon.in_daemon_process():
+        cleared = Store.load().clear_reconnect_all()
+        daemon.schedule_lifecycle("restart")
+        applog.log(
+            f"restart requested from web ui (cleared reconnect state for {cleared} channel(s))"
+        )
+        return {"reconnect_cleared": cleared, "restarting": True}
     _stop_all()
     # A manual restart is the user's cue that they've dealt with whatever broke,
     # so clear any give-up flags and let dead channels be retried from scratch.

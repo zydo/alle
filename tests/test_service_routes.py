@@ -109,6 +109,42 @@ def test_routes_remove_dry_run_then_real(channel):
     assert Store.load().rules() == []
 
 
+def test_routes_reorder_persists_and_recomputes_shadow_lint(channel):
+    service.routes_add("domain", "api.google.com", "nordvpn/us_1")
+    service.routes_add("domain_suffix", "google.com", "direct")
+    service.routes_add("ip_cidr", "10.0.0.0/8", "block")
+
+    result = service.routes_reorder(["r2", "r1", "r3"])
+
+    assert result["changed"] is True
+    assert [r["id"] for r in result["rules"]] == ["r2", "r1", "r3"]
+    assert result["rules"][1]["shadowed_by"] == "r2"
+    assert [r["id"] for r in service.routes_list()["rules"]] == ["r2", "r1", "r3"]
+
+
+def test_routes_reorder_rejects_invalid_permutations_without_mutating(channel):
+    service.routes_add("domain", "a.com", "direct")
+    service.routes_add("domain", "b.com", "direct")
+    service.routes_add("domain", "c.com", "direct")
+
+    cases = [
+        (["r1", "r1", "r3"], "duplicate rule"),
+        (["r1", "r2", "r9"], "unknown rule"),
+        (["r1", "r2"], "missing rule"),
+    ]
+    for ids, msg in cases:
+        with pytest.raises(service.ServiceError, match=msg):
+            service.routes_reorder(ids)
+        assert [r["id"] for r in Store.load().rules()] == ["r1", "r2", "r3"]
+
+
+def test_routes_reorder_noop_is_reported(channel):
+    service.routes_add("domain", "a.com", "direct")
+    result = service.routes_reorder(["r1"])
+    assert result["changed"] is False
+    assert [r["id"] for r in result["rules"]] == ["r1"]
+
+
 def test_killswitch_toggles_unmatched_behavior():
     assert service.routes_killswitch()["router"]["unmatched"] == "direct"
     on = service.routes_killswitch(True)
@@ -180,9 +216,9 @@ def test_cli_routes_round_trip(channel, capsys):
     out = run_cli(["routes", "add", "direct", "--domain", "api.netflix.com"], capsys)
     assert "WARNING: shadowed by earlier rule r1" in out
 
-    out = run_cli(["routes", "ls"], capsys)
-    assert "Router entrypoint" in out
-    assert "shadowed by r1" in out
+    out = run_cli(["routes", "reorder", "r2", "r1"], capsys)
+    assert "Reordered 2 rules" in out
+    assert "WARNING:" not in out
 
     out = run_cli(["routes", "killswitch", "on"], capsys)
     assert "unmatched router traffic is blocked" in out

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>alle — sign in</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+
+<body>
+  <div class="login-wrap">
+    <form class="login" id="form">
+      <div class="wordmark">
+        <img class="mark" src="/icon.svg" alt="" width="30" height="30">
+        <b>alle</b>
+      </div>
+      <p class="lead">Control panel</p>
+      <label class="eyebrow" for="token">Access token</label>
+      <input id="token" name="token" type="password" autocomplete="off" spellcheck="false"
+        placeholder="paste your token" autofocus>
+      <button type="submit">Open dashboard</button>
+      <p class="err" id="err">That token wasn't accepted. Check it and try again.</p>
+      <p class="hint">
+        Easiest: run <code>alle ui</code> in a terminal to open the dashboard
+        automatically. To sign in by hand, paste the <code>secret</code> from
+        <code>~/.alle/control_api.json</code>.
+      </p>
+    </form>
+  </div>
+
+  <script type="module">
+    const form = document.getElementById("form");
+    const err = document.getElementById("err");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.classList.remove("show");
+      const token = document.getElementById("token").value.trim();
+      try {
+        const res = await fetch("/api/v1/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token }),
+        });
+        if (res.ok) { location.href = "/"; return; }
+      } catch (_) { /* fall through to the error */ }
+      err.classList.add("show");
+    });
+  </script>
+</body>
+
+</html>

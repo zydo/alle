@@ -335,6 +335,8 @@ def status(snapshot: dict) -> str:
     router = snapshot.get("router")
     if router:
         lines.append(f"  Router  {_router_where(router)} — {_router_mode(router)}")
+    if snapshot.get("web_ui"):
+        lines.append(f"  Web UI  {snapshot['web_ui']}  (open it: alle ui)")
     if not channels:
         lines.append(
             '  (no channels yet — add one: alle channels add nordvpn --country "United States")'

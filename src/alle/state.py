@@ -571,6 +571,36 @@ class Store:
         self.data = _read_raw()
         return removed
 
+    def reorder_rules(self, ids: list[str]) -> tuple[list[dict], bool]:
+        """Replace rule evaluation order with a full id permutation."""
+        with transaction() as data:
+            router = data.setdefault("router", _router_blank())
+            rules = router.get("rules") or []
+            current = [str(rule.get("id")) for rule in rules]
+            proposed = [str(i) for i in ids]
+            seen: set[str] = set()
+            dupes: list[str] = []
+            for rid in proposed:
+                if rid in seen and rid not in dupes:
+                    dupes.append(rid)
+                seen.add(rid)
+            if dupes:
+                raise ValueError(f"duplicate rule id(s): {', '.join(dupes)}")
+            current_set = set(current)
+            proposed_set = set(proposed)
+            unknown = [rid for rid in proposed if rid not in current_set]
+            if unknown:
+                raise ValueError(f"unknown rule id(s): {', '.join(unknown)}")
+            missing = [rid for rid in current if rid not in proposed_set]
+            if missing:
+                raise ValueError(f"missing rule id(s): {', '.join(missing)}")
+            changed = proposed != current
+            by_id = {str(rule.get("id")): rule for rule in rules}
+            router["rules"] = [by_id[rid] for rid in proposed]
+            ordered = [dict(rule) for rule in router["rules"]]
+        self.data = _read_raw()
+        return ordered, changed
+
     def set_killswitch(self, enabled: bool) -> None:
         """Toggle unmatched-traffic blocking on the router inbound only."""
         with transaction() as data:

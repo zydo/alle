@@ -252,6 +252,36 @@ def test_start_stop_restart_and_logs_tail(monkeypatch):
     ]
 
 
+def test_web_ui_restart_schedules_external_lifecycle(monkeypatch):
+    events = []
+    store = service.Store.load()
+    store.add_provider("nordvpn")
+    channel = store.add_channel("nordvpn", "Japan", "", dict(WG))
+    store.set_reconnect("nordvpn", channel.id, {"attempts": 1})
+    monkeypatch.setattr(service.daemon, "in_daemon_process", lambda: True)
+    monkeypatch.setattr(
+        service.daemon, "schedule_lifecycle", lambda action: events.append(action)
+    )
+    monkeypatch.setattr(
+        service.daemon, "ensure_running", lambda: events.append("ensure")
+    )
+
+    assert service.restart() == {"reconnect_cleared": 1, "restarting": True}
+    assert events == ["restart"]
+
+
+def test_web_ui_stop_schedules_external_lifecycle(monkeypatch):
+    events = []
+    monkeypatch.setattr(service.daemon, "in_daemon_process", lambda: True)
+    monkeypatch.setattr(
+        service.daemon, "schedule_lifecycle", lambda action: events.append(action)
+    )
+    monkeypatch.setattr(service, "_stop_all", lambda: events.append("stop-now") or True)
+
+    assert service.stop() == {"was_running": True, "stopping": True}
+    assert events == ["stop"]
+
+
 def test_channel_set_label_sets_clears_and_resolves():
     store = service.Store.load()
     store.add_provider("nordvpn")

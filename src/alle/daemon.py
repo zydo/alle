@@ -129,6 +129,39 @@ def is_running() -> bool:
     return running_pid() is not None
 
 
+def in_daemon_process() -> bool:
+    """True when code is running in the daemon that owns the Web UI."""
+    if not (os.environ.get("ALLE_APPLIER") or os.environ.get("ALLE_SERVICE")):
+        return False
+    return running_pid() == os.getpid()
+
+
+def schedule_lifecycle(action: str, delay: float = 0.35) -> None:
+    """Run stop/restart shortly after the Web UI response has been flushed."""
+    if action not in {"stop", "restart"}:
+        raise ValueError(f"unsupported lifecycle action {action!r}")
+    env = dict(os.environ)
+    env.pop("ALLE_APPLIER", None)
+    env.pop("ALLE_SERVICE", None)
+    log = paths.state_dir() / "applier.log"
+    applog.rotate_if_needed(log, applog.MAX_LOG_BYTES)
+    code = (
+        "import time\n"
+        f"time.sleep({delay!r})\n"
+        "from alle import service\n"
+        f"service.{action}()\n"
+    )
+    with open(log, "ab") as lf:
+        subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdout=lf,
+            stderr=lf,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            env=env,
+        )
+
+
 def ensure_running() -> None:
     """Start the applier detached if it isn't already running.
 
@@ -244,6 +277,15 @@ def run_applier() -> None:
         Store.load().ensure_router_port()
     except Exception as e:  # noqa: BLE001 — a full state dir must not kill the daemon
         applog.log(f"router port allocation failed: {e}")
+
+    try:
+        # The Web UI control server runs as a thread in this process, so the UI
+        # ships and runs with the daemon (nothing extra to deploy).
+        from alle.webui import server as webui_server
+
+        webui_server.start_in_thread()
+    except Exception as e:  # noqa: BLE001 — the UI is optional; never kill the daemon
+        applog.log(f"web ui failed to start: {e}")
 
     accumulator = metrics.Accumulator()
     stop_flag = {"stop": False}

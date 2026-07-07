@@ -350,6 +350,26 @@ def cmd_routes_rm(args):
         print(f"{verb} rule {rule['id']}: {rule['match']} → {rule['target']}.")
 
 
+def cmd_routes_reorder(args):
+    result = service.routes_reorder(args.ids)
+    if args.json:
+        print(output.json_text(result))
+        return
+    n = len(result["rules"])
+    if result["changed"]:
+        print(
+            f"Reordered {n} rule{'s' if n != 1 else ''}. Rules are evaluated top to bottom."
+        )
+    else:
+        print(f"Routes already in that order ({n} rule{'s' if n != 1 else ''}).")
+    for rule in result["rules"]:
+        if rule.get("shadowed_by"):
+            print(
+                f"  WARNING: {rule['id']} is shadowed by earlier rule "
+                f"{rule['shadowed_by']} — it will never match."
+            )
+
+
 def cmd_routes_killswitch(args):
     enable = {"on": True, "off": False}.get(args.state)
     result = service.routes_killswitch(enable)
@@ -459,6 +479,7 @@ def cmd_start(args):
             "Alle started (sing-box running idle — no channels yet). "
             "Add one: alle channels add <provider> --country …"
         )
+    print(f"Web UI: {service.web_ui_url()}  (open it: alle ui)")
 
 
 def cmd_stop(args):
@@ -467,6 +488,34 @@ def cmd_stop(args):
         print("Alle stopped (channels kept in config).")
     else:
         print("Alle is already stopped.")
+
+
+def cmd_ui(args):
+    """Open the Web UI in the browser (or print the URL when headless)."""
+    if not service.ensure_web_ui():  # start the daemon + wait for it to serve
+        sys.exit(
+            "The Web UI isn't responding yet. If the daemon is running an older "
+            "build, restart it: alle restart"
+        )
+    login_url = service.web_ui_login_url()
+    opened = False
+    if not args.no_open and sys.stdout.isatty():
+        import webbrowser
+
+        try:
+            opened = webbrowser.open(login_url)
+        except Exception:  # noqa: BLE001 — headless / no browser: fall back to print
+            opened = False
+    if opened:
+        print(f"Opening the alle dashboard: {service.web_ui_url()}")
+    else:
+        print("Open the alle dashboard in your browser (one-time sign-in link):")
+        print(f"  {login_url}")
+        print(
+            "Remote/headless host? Tunnel it first:\n"
+            f"  ssh -L 8080:{service.web_ui_url().split('//')[1]} <user@host>\n"
+            "  then browse http://127.0.0.1:8080"
+        )
 
 
 def cmd_restart(args):
@@ -679,6 +728,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="show what would be removed"
     )
     rrm.set_defaults(func=cmd_routes_rm)
+    rre = ro_sub.add_parser(
+        "reorder", help="replace rule evaluation order with the given id sequence"
+    )
+    rre.add_argument("ids", nargs="+", help="every rule id, in the new order")
+    rre.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    rre.set_defaults(func=cmd_routes_reorder)
     rks = ro_sub.add_parser(
         "killswitch",
         help="block router traffic that matches no rule (instead of going direct)",
@@ -713,6 +768,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "restart", help="stop then start (reload after upgrades/config)"
     ).set_defaults(func=cmd_restart)
+    ui = sub.add_parser("ui", help="open the Web UI dashboard in your browser")
+    ui.add_argument(
+        "--no-open",
+        action="store_true",
+        help="print the sign-in URL instead of opening",
+    )
+    ui.set_defaults(func=cmd_ui)
     te = sub.add_parser(
         "test", help="probe channels now; optionally speed-test healthy ones"
     )

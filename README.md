@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/wordmark.svg" alt="alle" width="320">
+  <img src="src/alle/assets/wordmark.svg" alt="alle" width="320">
 </p>
 
 <p align="center">
@@ -77,7 +77,7 @@ run at the same time.
 | ----------------- | ---------------------------------------------------------------------- |
 | Core CLI          | Providers, channels, per-channel proxies, status, tests, logs, metrics |
 | Routing           | Router entrypoint with domain/CIDR rules, kill-switch, shadow lint     |
-| Web UI            | Planned                                                                |
+| Web UI            | Dashboard (channels, probe/speed, routes, kill-switch) + Logs page     |
 | Desktop companion | Planned                                                                |
 | Distribution      | PyPI CLI package; native installers planned                            |
 
@@ -257,9 +257,10 @@ alle routes ls
 - **Matchers** (one per rule): `--domain` (exact), `--domain-suffix` (the domain
   and its subdomains), `--cidr` (destination IP/CIDR — matches IP-literal
   destinations; domain destinations are not resolved for matching), and `--all`.
-- **First match wins**, in the order rules were added (`alle routes ls` shows
-  evaluation order). A rule that can never match because an earlier rule covers
-  it is flagged as *shadowed* when you add it and in `routes ls`.
+- **First match wins**, in evaluation order (`alle routes ls` shows it). Reorder
+  with `alle routes reorder r3 r1 r2` (a full id permutation). A rule that can
+  never match because an earlier rule covers it is flagged as *shadowed* when you
+  add it and in `routes ls`.
 - **Unmatched traffic goes direct** — without a VPN — like other modern VPN
   clients. To block unmatched traffic instead (a kill-switch for the router
   entrypoint), turn it on explicitly: `alle routes killswitch on`. Per-channel
@@ -271,6 +272,50 @@ alle routes ls
   as a side effect of something else.
 - Per-channel ports keep working exactly as before, with or without rules — the
   router is an addition, never a replacement.
+
+## Web UI
+
+`alle` serves a local dashboard from the background daemon — nothing extra to
+install. Open it with:
+
+```bash
+alle ui
+```
+
+This opens your browser to a single **Dashboard** (plus a **Logs** page):
+
+- **Router entrypoint** — `http://127.0.0.1:<port>` at the top (click to copy).
+- **Channels table** — every channel with Location, Port, Latency, IP, and
+  Sent / Received / Down Speed / Up Speed columns. The measured columns stay
+  blank until you run a **Probe** (latency + IP + traffic totals) or **Speed
+  Test** (adds download/upload) from the row or the column header, with a
+  spinner while it runs. Rename a channel inline, remove one, and add channels
+  through a provider-guided wizard.
+- **Add channel wizard** — pick a provider (an icon-only row of providers plus
+  an always-present "+" to add NordVPN or Proton VPN). For token providers like
+  NordVPN, choose a **country and city from a searchable list** (no typing); for
+  Proton VPN, upload a WireGuard `.conf` (with a link to the portal).
+- **Router rules** — add/delete rules, **drag to reorder** (first match wins),
+  see shadow-lint, and toggle the **kill-switch** (Unmatched Traffic card:
+  checked blocks unmatched destinations, unchecked lets them go direct).
+- Start / stop / restart are host/CLI controls (`alle start|stop|restart`); the
+  masthead links to the project on GitHub.
+
+The server binds to `127.0.0.1` only and is never exposed to the network. To
+reach it from another machine, forward the port over SSH rather than exposing it:
+
+```bash
+alle status                              # on the remote host: note the Web UI port
+ssh -L 8080:127.0.0.1:<port> user@host
+# then browse http://127.0.0.1:8080 locally
+```
+
+SSH provides the encryption and access control; the browser still reaches alle
+on loopback. Do not open or reverse-proxy the alle Web UI port directly to a
+network.
+
+`alle ui` signs you in automatically. To sign in by hand, paste the `secret`
+from `~/.alle/control_api.json` into the login page.
 
 ## How it works
 
