@@ -15,7 +15,11 @@ function setPill(up, text) { el.pill.classList.toggle("up", up); el.pillText.tex
 function updateMasthead(s) {
   setPill(!!s.running, s.running ? "running" : "stopped");
   const d = s.daemon || {};
-  el.ver.textContent = d.version ? `v${d.version}` : "";
+  // Prefer the on-disk package version (single source of truth, read fresh from
+  // pyproject via importlib.metadata) over the daemon's startup snapshot, which
+  // goes stale until the daemon restarts after an upgrade.
+  const ver = d.installed_version || d.version;
+  el.ver.textContent = ver ? `v${ver}` : "";
 }
 
 function route() {

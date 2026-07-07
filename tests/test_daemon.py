@@ -127,7 +127,7 @@ def test_daemon_info_trusts_only_the_live_pid(monkeypatch):
 
 
 def test_installed_version_is_readable():
-    v = daemon._installed_version()
+    v = daemon.installed_version()
     assert isinstance(v, str) and v  # resolves to the installed package version
 
 
@@ -170,7 +170,7 @@ def _drive_once(monkeypatch, now=daemon.VERSION_CHECK + 1):
 
 def test_supervised_daemon_exits_on_version_change(monkeypatch):
     monkeypatch.setenv("ALLE_SERVICE", "1")
-    monkeypatch.setattr(daemon, "_installed_version", lambda: "99.0.0")
+    monkeypatch.setattr(daemon, "installed_version", lambda: "99.0.0")
     # version mismatch under a supervisor: run_applier breaks cleanly (no sleep,
     # so no KeyboardInterrupt) for the supervisor to respawn on new code
     _drive_once(monkeypatch)
@@ -179,7 +179,7 @@ def test_supervised_daemon_exits_on_version_change(monkeypatch):
 
 def test_unsupervised_daemon_ignores_version_change(monkeypatch):
     monkeypatch.delenv("ALLE_SERVICE", raising=False)
-    monkeypatch.setattr(daemon, "_installed_version", lambda: "99.0.0")
+    monkeypatch.setattr(daemon, "installed_version", lambda: "99.0.0")
     # no supervisor → must NOT self-exit (would stay down); the loop runs and we
     # end it via the sleep-raised KeyboardInterrupt instead
     with pytest.raises(KeyboardInterrupt):

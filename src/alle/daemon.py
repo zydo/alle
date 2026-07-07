@@ -86,9 +86,15 @@ def daemon_info() -> dict | None:
     return info
 
 
-def _installed_version() -> str:
+def installed_version() -> str:
     """The alle version currently on disk (re-read fresh, unlike the import-time
-    ``__version__``) — differs from ``__version__`` after an in-place upgrade."""
+    ``__version__``) — differs from ``__version__`` after an in-place upgrade.
+
+    The canonical version accessor: the single source of truth is
+    ``pyproject.toml``, surfaced at runtime via ``importlib.metadata``. The
+    Web UI masthead reads this so the badge tracks the installed package
+    rather than the daemon's startup snapshot.
+    """
     from importlib.metadata import PackageNotFoundError, version
 
     try:
@@ -315,10 +321,10 @@ def run_applier() -> None:
             # the daemon down until the next CLI call.
             if supervised and now - last_version_check >= VERSION_CHECK:
                 last_version_check = now
-                if _installed_version() != __version__:
+                if installed_version() != __version__:
                     applog.log(
                         f"applier: package upgraded {__version__} -> "
-                        f"{_installed_version()}; exiting for supervisor respawn"
+                        f"{installed_version()}; exiting for supervisor respawn"
                     )
                     break
             stamp = _state_stamp()

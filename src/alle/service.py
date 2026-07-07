@@ -835,6 +835,7 @@ def _daemon_info() -> dict:
     return {
         "running": info is not None,
         "version": dv,
+        "installed_version": daemon.installed_version(),
         "cli_version": __version__,
         "skew": bool(dv and dv != __version__),
         "service_installed": daemonctl.is_installed(),
