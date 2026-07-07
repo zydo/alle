@@ -568,7 +568,7 @@ running, with its version.
 ```text
 Login service: active (launchd).
   Unit: /Users/you/Library/LaunchAgents/com.github.zydo.alle.plist
-Daemon: running, version 0.1.0.
+Daemon: running, version 0.1.1.
 ```
 
 **Upgrades:** the service unit execs a stable shim, so `uv tool upgrade
