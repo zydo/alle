@@ -626,6 +626,7 @@ def _router_info(store: Store) -> dict:
         "allocated": bool(port),
         "rule_count": len(rules_),
         "killswitch": killswitch,
+        "lan_direct": bool(router.get("lan_direct", True)),
         "unmatched": "block" if killswitch else "direct",
     }
 
@@ -725,6 +726,31 @@ def routes_reorder(ids: list[str]) -> dict:
         "rules": [_decorate_rule(rule, shadows) for rule in ordered],
         "changed": changed,
         "router": _router_info(store),
+    }
+
+
+def routes_lan_direct(enable: bool | None = None) -> dict:
+    """Set (or with ``None`` just report) the built-in LAN/local direct rules.
+
+    The rules themselves (:data:`alle.routes.LAN_DIRECT_CIDRS`) are fixed and
+    compiled ahead of every user rule; this toggle is the only control.
+    """
+    store = Store.load()
+    if enable is not None:
+        store.set_lan_direct(enable)
+        applog.log(
+            "lan-direct "
+            + (
+                "enabled: built-in LAN/local rules go direct ahead of user rules"
+                if enable
+                else "disabled: LAN/local traffic follows user rules"
+            )
+        )
+        daemon.ensure_running()
+    return {
+        "changed": enable is not None,
+        "router": _router_info(store),
+        "cidrs": list(routes.LAN_DIRECT_CIDRS),
     }
 
 

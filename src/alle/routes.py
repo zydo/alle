@@ -21,6 +21,28 @@ import re
 
 MATCHER_TYPES = ("domain", "domain_suffix", "ip_cidr", "all")
 
+# Built-in default-direct destinations: private, link-local, loopback, and
+# multicast/broadcast ranges. Compiled ahead of all user rules (when the
+# ``lan_direct`` toggle is on) so LAN access — printers, NAS, router admin
+# pages, mDNS/SSDP discovery — keeps working under a "route everything through
+# VPN" catch-all. DNS is deliberately *not* here: sending plain DNS direct by
+# default would leak browsing activity outside the tunnel, so it stays subject
+# to user rules. mDNS is covered only because its multicast destinations
+# (224.0.0.251 / ff02::fb) fall inside the multicast CIDRs.
+LAN_DIRECT_CIDRS = (
+    "10.0.0.0/8",  # IPv4 private # noqa: S1313
+    "172.16.0.0/12",  # noqa: S1313
+    "192.168.0.0/16",  # noqa: S1313
+    "169.254.0.0/16",  # IPv4 link-local # noqa: S1313
+    "127.0.0.0/8",  # IPv4 loopback
+    "224.0.0.0/4",  # IPv4 multicast (mDNS/SSDP/LAN discovery) # noqa: S1313
+    "255.255.255.255/32",  # IPv4 broadcast
+    "::1/128",  # IPv6 loopback
+    "fe80::/10",  # IPv6 link-local
+    "fc00::/7",  # IPv6 unique local (ULA)
+    "ff00::/8",  # IPv6 multicast
+)
+
 # One DNS label: alnum (plus inner hyphens/underscores), max 63 chars.
 _LABEL = r"(?!-)[a-z0-9_-]{1,63}(?<!-)"
 _DOMAIN_RE = re.compile(rf"^{_LABEL}(\.{_LABEL})*$")

@@ -376,9 +376,30 @@ def test_routes_api_create_reorder_killswitch_delete(live):
     )
     assert st == 200 and json.loads(body)["router"]["unmatched"] == "block"
 
+    st, body, _ = _req(
+        base + "/api/v1/routes/lan",
+        method="POST",
+        headers=origin,
+        data={"enabled": False},
+    )
+    assert st == 200 and json.loads(body)["router"]["lan_direct"] is False
+    st, body, _ = _req(base + "/api/v1/routes", headers=_bearer(secret))
+    assert json.loads(body)["router"]["lan_direct"] is False
+
     st, _, _ = _req(base + "/api/v1/routes/r1", method="DELETE", headers=origin)
     assert st == 200
     assert [r["id"] for r in Store.load().rules()] == ["r2"]
+
+
+def test_locations_endpoint_requires_a_provider(live):
+    base, secret = live
+    st, body, _ = _req(base + "/api/v1/locations", headers=_bearer(secret))
+    assert st == 400 and "provider" in json.loads(body)["error"]
+
+    st, body, _ = _req(
+        base + "/api/v1/locations?provider=protonvpn", headers=_bearer(secret)
+    )  # config provider: no locations API, guidance payload instead
+    assert st == 200 and json.loads(body)["available"] is False
 
 
 # ---- /api/v1 metrics, test, logs (Phase 4.4) ----

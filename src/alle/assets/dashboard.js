@@ -259,6 +259,16 @@ function routeRow(r) {
 function renderRoutes() {
   const head = `<div class="row route head"><span aria-hidden="true"></span><span>Match</span><span>Via Channel</span><span></span></div>`;
   const body = rules.length ? rules.map(routeRow).join("") : `<div class="empty inset"><div class="big">No rules</div>Unmatched traffic currently goes ${router?.unmatched || "direct"}.</div>`;
+  const lanOn = router?.lan_direct !== false;
+  const lan = `<div class="lan-banner${lanOn ? "" : " off"}">
+    <span class="lan-copy">${lanOn
+      ? `LAN traffic (printers, NAS, router admin, local discovery, etc.) always bypass VPN`
+      : `<b>Warning:</b> LAN traffic may go through VPN according to the rules below, some devices (printers, NAS, router admin, local discovery, etc.) may not be accessible`}</span>
+    <span class="kill-toggle-wrap">
+      <span class="kill-toggle-state">${lanOn ? "ON" : "OFF"}</span>
+      <button class="toggle ${lanOn ? "on" : ""}" id="dash-lan" role="switch" aria-checked="${lanOn}" aria-label="LAN direct" title="Send LAN/local destinations direct, ahead of all rules"><span class="toggle-knob"></span></button>
+    </span>
+  </div>`;
   const on = !!router?.killswitch;
   const kill = `<div class="kill-card">
     <div class="kill-card-head">
@@ -277,8 +287,9 @@ function renderRoutes() {
       <div class="kill-state"><span class="kill-state-label">Kill-switch on</span><span class="kill-state-desc">Unmatched traffic is blocked — only matched traffic reaches the Internet. Per-channel ports keep working.</span></div>
     </div>
   </div>`;
-  el.routes.innerHTML = `<div class="grid route-grid">${rules.length ? head : ""}${body}</div>${kill}`;
+  el.routes.innerHTML = `${lan}<div class="grid route-grid">${rules.length ? head : ""}${body}</div>${kill}`;
   el.routes.querySelector("#dash-kill").onclick = () => toggleKillswitch({ target: { checked: !on } });
+  el.routes.querySelector("#dash-lan").onclick = () => toggleLanDirect(!lanOn);
 }
 
 async function onRouteClick(e) {
@@ -323,6 +334,15 @@ async function onRouteDrop(e) {
   refreshStatus();
 }
 
+async function toggleLanDirect(enabled) {
+  const res = await api.post("/api/v1/routes/lan", { enabled });
+  if (!res.ok) { toast(res.error, "err"); renderRoutes(); return; }
+  router = res.data.router || router;
+  renderRoutes();
+  refreshStatus();
+  toast(enabled ? "LAN direct on — local traffic bypasses the rules." : "LAN direct off — local traffic follows your rules.");
+}
+
 async function toggleKillswitch(e) {
   const enabled = e.target.checked;
   const res = await api.post("/api/v1/routes/killswitch", { enabled });
@@ -344,10 +364,17 @@ function providerIcon(provider) {
   return PROVIDER_ICONS[provider] || "";
 }
 
+function trimTrailingPunctuation(text) {
+  let out = text.trimEnd();
+  while (out && ".,;:".includes(out[out.length - 1])) out = out.slice(0, -1).trimEnd();
+  return out;
+}
+
 function providerGuide(p) {
   if (p.kind === "config") {
-    const base = (p.config_help || "Generate a WireGuard configuration in the provider's portal.")
-      .split("then add it as a channel")[0].replace(/[.,;:\s]+$/, "");
+    const base = trimTrailingPunctuation(
+      (p.config_help || "Generate a WireGuard configuration in the provider's portal.")
+        .split("then add it as a channel")[0]);
     return { text: `${base}. You'll add the .conf as a channel next.`, url: p.url };
   }
   return {

@@ -370,6 +370,26 @@ def cmd_routes_reorder(args):
             )
 
 
+def cmd_routes_lan(args):
+    enable = {"on": True, "off": False}.get(args.state)
+    result = service.routes_lan_direct(enable)
+    router = result["router"]
+    if router["lan_direct"]:
+        print(
+            "LAN direct ON — built-in rules send private/link-local/multicast\n"
+            "destinations (printers, NAS, router admin, LAN discovery) direct,\n"
+            "ahead of all user rules — no catch-all can capture them."
+        )
+    else:
+        print(
+            "LAN direct off — LAN/local destinations follow your rules\n"
+            "(a catch-all VPN rule will capture them; most VPN clients keep\n"
+            "this protection on). Re-enable:  alle routes lan on"
+        )
+    if args.verbose:
+        print("  Built-in ranges: " + ", ".join(result["cidrs"]))
+
+
 def cmd_routes_killswitch(args):
     enable = {"on": True, "off": False}.get(args.state)
     result = service.routes_killswitch(enable)
@@ -742,6 +762,21 @@ def build_parser() -> argparse.ArgumentParser:
         "state", nargs="?", choices=["on", "off"], help="omit to show the current state"
     )
     rks.set_defaults(func=cmd_routes_killswitch)
+    rla = ro_sub.add_parser(
+        "lan",
+        help="built-in rules that send LAN/local destinations direct, ahead of "
+        "all user rules (default: on)",
+    )
+    rla.add_argument(
+        "state", nargs="?", choices=["on", "off"], help="omit to show the current state"
+    )
+    rla.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="also list the built-in CIDR ranges",
+    )
+    rla.set_defaults(func=cmd_routes_lan)
 
     # locations
     lo = sub.add_parser(

@@ -7,7 +7,7 @@ from typing import cast
 
 import pytest
 
-from alle import applog, singbox
+from alle import applog, routes, singbox
 from alle.engine import Engine
 from alle.state import Store
 
@@ -42,12 +42,17 @@ def _store(*specs, router=None):
     return Store(data=data)
 
 
-def _router(*rules, port=40000, killswitch=False):
+def _router(*rules, port=40000, killswitch=False, lan_direct=True):
     numbered = [
         {"id": f"r{i + 1}", "type": t, "value": v, "target": target}
         for i, (t, v, target) in enumerate(rules)
     ]
-    return {"port": port, "killswitch": killswitch, "rules": numbered}
+    return {
+        "port": port,
+        "killswitch": killswitch,
+        "lan_direct": lan_direct,
+        "rules": numbered,
+    }
 
 
 def test_each_channel_becomes_an_inbound_and_endpoint():
@@ -131,20 +136,25 @@ def test_router_entrypoint_compiles_rules_in_order():
     assert rules[1] == {"inbound": ["in-router"], "action": "sniff"}
     assert rules[2] == {
         "inbound": ["in-router"],
+        "ip_cidr": list(routes.LAN_DIRECT_CIDRS),
+        "outbound": "direct",
+    }  # the built-in LAN block precedes every user rule
+    assert rules[3] == {
+        "inbound": ["in-router"],
         "domain": ["api.google.com"],
         "outbound": "out-nordvpn-us_1",
     }
-    assert rules[3] == {
+    assert rules[4] == {
         "inbound": ["in-router"],
         "domain_suffix": ["netflix.com"],
         "outbound": "direct",
     }
-    assert rules[4] == {
+    assert rules[5] == {
         "inbound": ["in-router"],
         "ip_cidr": ["10.0.0.0/8"],
         "action": "reject",
     }
-    assert rules[5] == {"inbound": ["in-router"], "outbound": "out-nordvpn-us_1"}
+    assert rules[6] == {"inbound": ["in-router"], "outbound": "out-nordvpn-us_1"}
     assert config["route"]["final"] == "direct"  # unmatched passes through
 
 
@@ -155,6 +165,27 @@ def test_killswitch_appends_a_trailing_reject():
         "inbound": ["in-router"],
         "action": "reject",
     }
+
+
+def test_lan_direct_off_omits_the_builtin_block():
+    store = _store(router=_router(("all", "", "direct"), lan_direct=False))
+    config, _ = Engine(store)._build_config()
+    assert all(
+        r.get("ip_cidr") != list(routes.LAN_DIRECT_CIDRS)
+        for r in config["route"]["rules"]
+    )
+
+
+def test_lan_direct_defaults_on_when_key_is_absent():
+    # a state.json written before the toggle existed has no lan_direct key
+    router = _router()
+    del router["lan_direct"]
+    config, _ = Engine(_store(router=router))._build_config()
+    assert {
+        "inbound": ["in-router"],
+        "ip_cidr": list(routes.LAN_DIRECT_CIDRS),
+        "outbound": "direct",
+    } in config["route"]["rules"]
 
 
 def test_unallocated_router_port_means_no_router_inbound():

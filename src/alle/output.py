@@ -169,10 +169,13 @@ def _router_mode(router: dict) -> str:
     they are behind a VPN when the router is passing traffic through."""
     n = router.get("rule_count", 0)
     if not n and not router.get("killswitch"):
-        return "pass-through (no rules)"
-    mode = f"{n} rule(s), unmatched → {router['unmatched']}"
-    if router.get("killswitch"):
-        mode += " — kill-switch ON"
+        mode = "pass-through (no rules)"
+    else:
+        mode = f"{n} rule(s), unmatched → {router['unmatched']}"
+        if router.get("killswitch"):
+            mode += " — kill-switch ON"
+    if not router.get("lan_direct", True):
+        mode += " — LAN direct off"
     return mode
 
 

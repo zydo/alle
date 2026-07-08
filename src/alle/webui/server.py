@@ -77,7 +77,7 @@ def control_api() -> dict:
 
 def ui_url() -> str:
     """The plain (token-free) Web UI URL — safe to print and log."""
-    return f"http://{control_api()['address']}"
+    return f"http://{control_api()['address']}"  # noqa:S5332
 
 
 def wait_until_serving(timeout: float = 6.0) -> bool:
@@ -104,7 +104,7 @@ def mint_login_url() -> str:
     """A one-time login URL for ``alle ui`` — carries a single-use token."""
     api = control_api()
     token = auth.mint_login_token(api["secret"])
-    return f"http://{api['address']}/?token={token}"
+    return f"http://{api['address']}/?token={token}"  # noqa:S5332
 
 
 # ---- request handler -----------------------------------------------------------
@@ -117,7 +117,7 @@ def _asset(name: str) -> bytes | None:
         return None  # no path traversal — flat asset dir only
     try:
         return (resources.files("alle") / "assets" / name).read_bytes()
-    except (FileNotFoundError, OSError, ModuleNotFoundError):
+    except (OSError, ModuleNotFoundError):
         return None
 
 
@@ -304,10 +304,7 @@ class _Handler(BaseHTTPRequestHandler):
             ("providers", "catalog"): service.provider_catalog,
             ("channels",): service.channel_list,
             ("routes",): service.routes_list,
-            ("locations",): lambda: service.locations_list(
-                (parse_qs(urlparse(self.path).query).get("provider") or [None])[0],
-                (parse_qs(urlparse(self.path).query).get("country") or [None])[0],
-            ),
+            ("locations",): lambda: _locations(self.path),
             ("metrics",): lambda: service.metrics_snapshot(
                 (parse_qs(urlparse(self.path).query).get("channel") or [None])[0]
             ),
@@ -316,7 +313,7 @@ class _Handler(BaseHTTPRequestHandler):
         fn = routes_.get(tuple(seg))
         if fn is None:
             return self._json(404, {"error": "not found"})
-        self._json(200, fn())
+        self._call(fn)  # same ServiceError -> 400 mapping as mutations
 
     def _api_mutate(self, method: str, path: str):
         from alle import service
@@ -354,6 +351,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._call(service.routes_reorder, body.get("ids") or [])
         if method == "POST" and seg == ["routes", "killswitch"]:
             return self._call(service.routes_killswitch, bool(body.get("enabled")))
+        if method == "POST" and seg == ["routes", "lan"]:
+            return self._call(service.routes_lan_direct, bool(body.get("enabled")))
         if method == "DELETE" and len(seg) == 2 and seg[0] == "routes":
             return self._call(service.routes_remove, [seg[1]])
         if method == "POST" and seg == ["test"]:
@@ -378,6 +377,16 @@ def _add_provider(body: dict) -> dict:
     if service.kind(provider) == "config":
         return service.provider_add_config(provider)
     return service.provider_add_token(provider, body.get("creds") or {})
+
+
+def _locations(path: str) -> dict:
+    from alle import service
+
+    query = parse_qs(urlparse(path).query)
+    provider = (query.get("provider") or [""])[0]
+    if not provider:
+        raise service.ServiceError("a provider query parameter is required.")
+    return service.locations_list(provider, (query.get("country") or [None])[0])
 
 
 def _add_channel(body: dict) -> dict:

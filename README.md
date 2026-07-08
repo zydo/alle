@@ -77,13 +77,13 @@ run at the same time.
 
 **Features**
 
-| Phase             | Status                                                                 |
-| ----------------- | ---------------------------------------------------------------------- |
-| Core CLI          | Providers, channels, per-channel proxies, status, tests, logs, metrics |
-| Routing           | Router entrypoint with domain/CIDR rules, kill-switch, shadow lint     |
-| Web UI            | Dashboard (channels, probe/speed, routes, kill-switch) + Logs page     |
-| Desktop companion | Planned                                                                |
-| Distribution      | PyPI CLI package; native installers planned                            |
+| Phase             | Status                                                                                  |
+| ----------------- | --------------------------------------------------------------------------------------- |
+| Core CLI          | Providers, channels, per-channel proxies, status, tests, logs, metrics                  |
+| Routing           | Router entrypoint with domain/CIDR rules, kill-switch, shadow lint, built-in LAN bypass |
+| Web UI            | Dashboard (channels, probe/speed, routes, kill-switch) + Logs page                      |
+| Desktop companion | Planned                                                                                 |
+| Distribution      | PyPI CLI package; native installers planned                                             |
 
 ## Install
 
@@ -269,6 +269,11 @@ alle routes ls
   clients. To block unmatched traffic instead (a kill-switch for the router
   entrypoint), turn it on explicitly: `alle routes killswitch on`. Per-channel
   ports are never affected by the kill-switch.
+- **LAN/local traffic stays direct by default.** Built-in rules for private,
+  link-local, and multicast ranges are compiled ahead of every user rule, so a
+  catch-all VPN rule never cuts off printers, NAS boxes, router admin pages, or
+  LAN discovery — the same protection mainstream VPN clients ship. Inspect or
+  disable with `alle routes lan [on|off]` (leaving it on is recommended).
 - **Channels referenced by rules cannot be removed.** `alle channels rm` (and
   `alle providers rm`, for any of its channels) refuses while a rule targets the
   channel, listing every referencing rule and the exact `alle routes rm …` to
@@ -301,7 +306,9 @@ This opens your browser to a single **Dashboard** (plus a **Logs** page):
   Proton VPN, upload a WireGuard `.conf` (with a link to the portal).
 - **Router rules** — add/delete rules, **drag to reorder** (first match wins),
   see shadow-lint, and toggle the **kill-switch** (Unmatched Traffic card:
-  checked blocks unmatched destinations, unchecked lets them go direct).
+  checked blocks unmatched destinations, unchecked lets them go direct). A
+  banner above the rules shows the **built-in LAN protection** (local traffic
+  goes direct ahead of every rule) with a toggle to turn it off.
 - Start / stop / restart are host/CLI controls (`alle start|stop|restart`); the
   masthead links to the project on GitHub.
 

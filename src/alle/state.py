@@ -157,8 +157,10 @@ def _blank() -> dict:
 
 def _router_blank() -> dict:
     """The router entrypoint's state: contract port (0 = not yet allocated),
-    the explicit kill-switch flag, and the ordered rule list."""
-    return {"port": 0, "killswitch": False, "rules": []}
+    the explicit kill-switch flag, the built-in LAN-direct toggle, and the
+    ordered rule list. ``lan_direct`` defaults **on** — readers must treat an
+    absent key as True so pre-existing state files inherit the default."""
+    return {"port": 0, "killswitch": False, "lan_direct": True, "rules": []}
 
 
 class ReferencedError(RuntimeError):
@@ -607,6 +609,14 @@ class Store:
             data.setdefault("router", _router_blank())["killswitch"] = bool(enabled)
         self.data = _read_raw()
 
+    def set_lan_direct(self, enabled: bool) -> None:
+        """Toggle the built-in LAN/local default-direct rule block (router
+        inbound only). The built-in rules themselves are not editable — this
+        flag is the whole surface."""
+        with transaction() as data:
+            data.setdefault("router", _router_blank())["lan_direct"] = bool(enabled)
+        self.data = _read_raw()
+
     def rules_referencing(self, refs: set[tuple[str, str]]) -> dict[str, list[dict]]:
         """``"provider/cid" -> [rule, …]`` from this snapshot (plan-time view;
         the authoritative check re-runs inside the removal transaction)."""
@@ -656,10 +666,14 @@ def config_signature(data: dict) -> str:
             relevant[provider] = chans
     router = data.get("router") or {}
     if router.get("port") or router.get("rules") or router.get("killswitch"):
-        # "_router" cannot collide: provider keys are bare lowercase words
+        # "_router" cannot collide: provider keys are bare lowercase words.
+        # lan_direct only matters once the router inbound exists (port set),
+        # which the condition above already guarantees whenever it could
+        # change the compiled config.
         relevant["_router"] = {
             "port": router.get("port"),
             "killswitch": bool(router.get("killswitch")),
+            "lan_direct": bool(router.get("lan_direct", True)),
             "rules": router.get("rules") or [],
         }
     blob = json.dumps(relevant, sort_keys=True, ensure_ascii=False).encode()

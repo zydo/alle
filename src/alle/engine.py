@@ -16,14 +16,24 @@ from __future__ import annotations
 import re
 import time
 
-from alle import applog, probe, singbox
+from alle import applog, probe, routes, singbox
 from alle.constants import OUTBOUND_PREFIX, ROUTER_INBOUND_TAG
 from alle.providers import ProviderError
 from alle.state import Channel, Store
 
 # What a sing-box startup failure over a stolen port looks like in its log:
 # "start inbound/mixed[in-…]: listen tcp 127.0.0.1:<port>: bind: address already in use"
-_ADDR_IN_USE = re.compile(r"127\.0\.0\.1:(\d+).*?address already in use")
+_LOOPBACK_PORT = re.compile(r"127\.0\.0\.1:(\d+)")
+
+
+def _ports_in_use(err_text: str) -> set[int]:
+    """Loopback ports named before an address-in-use message on the same line."""
+    return {
+        int(port)
+        for line in err_text.splitlines()
+        if "address already in use" in line
+        for port in _LOOPBACK_PORT.findall(line.split("address already in use", 1)[0])
+    }
 
 
 def _probe_detail(ref: str, result: dict) -> str:
@@ -132,7 +142,9 @@ class Engine:
 
         Layout (order is law): the per-channel exact rules already precede
         these; then a ``sniff`` action (the pinned sing-box dropped inbound
-        sniffing — IP-dialing apps need it for domain rules), the user rules in
+        sniffing — IP-dialing apps need it for domain rules), the built-in
+        LAN/local default-direct block (when ``lan_direct`` is on — ahead of
+        every user rule, so no catch-all can shadow it), the user rules in
         stored order, and unmatched handling — a trailing ``reject`` when the
         kill-switch is on, otherwise fall-through to ``route.final: direct``.
 
@@ -154,6 +166,14 @@ class Engine:
             }
         )
         rules.append({"inbound": [ROUTER_INBOUND_TAG], "action": "sniff"})
+        if router.get("lan_direct", True):
+            rules.append(
+                {
+                    "inbound": [ROUTER_INBOUND_TAG],
+                    "ip_cidr": list(routes.LAN_DIRECT_CIDRS),
+                    "outbound": "direct",
+                }
+            )
         matcher_fields = {
             "domain": "domain",
             "domain_suffix": "domain_suffix",
@@ -220,7 +240,7 @@ class Engine:
         Covers both channel proxy ports (moved in the store) and the Clash API
         port (its endpoint file is regenerated). True if anything was freed.
         """
-        stolen = {int(port) for port in _ADDR_IN_USE.findall(err_text)}
+        stolen = _ports_in_use(err_text)
         if not stolen:
             return False
         recovered = False

@@ -129,9 +129,12 @@ def test_set_label_sets_and_clears():
     store.add_provider("nordvpn")
     ch = store.add_channel("nordvpn", "US", "", dict(WG))
     assert store.set_label("nordvpn", ch.id, "Video US") is True
-    assert Store.load().get_channel("nordvpn", ch.id).label == "Video US"
+    ch = Store.load().get_channel("nordvpn", ch.id)
+    assert ch is not None
+    assert ch.label == "Video US"
     store.set_label("nordvpn", ch.id, "")  # empty clears → back to id
     got = Store.load().get_channel("nordvpn", ch.id)
+    assert got is not None
     assert got.label == "" and got.display == ch.id
     assert store.set_label("nordvpn", "nope_1", "x") is False  # missing channel
 
@@ -146,7 +149,9 @@ def test_label_is_not_part_of_the_id_or_signature():
     store.set_label("nordvpn", ch.id, "Renamed")
     assert config_signature(_read_raw()) == before  # relabel never reconciles
     # id (the handle) is untouched by the label
-    assert Store.load().get_channel("nordvpn", ch.id).id == ch.id
+    ch2 = Store.load().get_channel("nordvpn", ch.id)
+    assert ch2 is not None
+    assert ch2.id == ch.id
 
 
 def test_reimport_preserves_label_unless_overridden():
@@ -284,6 +289,15 @@ def test_killswitch_round_trips():
     assert Store.load().router["killswitch"] is True
 
 
+def test_lan_direct_defaults_on_and_round_trips():
+    store = Store.load()
+    assert store.router["lan_direct"] is True  # recommended default
+    store.set_lan_direct(False)
+    assert Store.load().router["lan_direct"] is False
+    store.set_lan_direct(True)
+    assert Store.load().router["lan_direct"] is True
+
+
 def test_reallocate_covers_the_router_port():
     store = Store.load()
     port = store.ensure_router_port()
@@ -309,7 +323,10 @@ def test_config_signature_tracks_router_changes():
     after_rule = config_signature(_read_raw())
     assert after_rule != before  # rule edits reconcile like channel edits
     store.set_killswitch(True)
-    assert config_signature(_read_raw()) != after_rule
+    after_kill = config_signature(_read_raw())
+    assert after_kill != after_rule
+    store.set_lan_direct(False)
+    assert config_signature(_read_raw()) != after_kill  # LAN toggle reconciles too
 
 
 def test_config_signature_ignores_probe_results():

@@ -27,7 +27,9 @@ omit the prefix.
     - [`alle routes add <target> --<matcher>`](#alle-routes-add-target---matcher)
     - [`alle routes ls [--channel <ref>] [--json]`](#alle-routes-ls---channel-ref---json)
     - [`alle routes rm <id>...`](#alle-routes-rm-id)
+    - [`alle routes reorder <id>... [--json]`](#alle-routes-reorder-id---json)
     - [`alle routes killswitch [on|off]`](#alle-routes-killswitch-onoff)
+    - [`alle routes lan [on|off]`](#alle-routes-lan-onoff)
   - [`alle locations`](#alle-locations)
   - [`alle status`](#alle-status)
   - [`alle start` / `stop` / `restart`](#alle-start--stop--restart)
@@ -36,6 +38,9 @@ omit the prefix.
   - [`alle logs`](#alle-logs)
   - [`alle ui`](#alle-ui)
   - [`alle daemon`](#alle-daemon)
+    - [`alle daemon install [--linger]`](#alle-daemon-install---linger)
+    - [`alle daemon uninstall`](#alle-daemon-uninstall)
+    - [`alle daemon status [--json]`](#alle-daemon-status---json)
   - [`alle version`](#alle-version)
   - [Output conventions](#output-conventions)
   - [Exit codes](#exit-codes)
@@ -260,6 +265,11 @@ bottom — first match wins**; use `alle routes reorder` or the Web UI Routes pa
 to change evaluation order. Traffic that matches no rule goes
 **direct (no VPN)** unless the [kill-switch](#alle-routes-killswitch-onoff) is on.
 
+Before any user rule, a **built-in LAN block** (on by default — see
+[`alle routes lan`](#alle-routes-lan-onoff)) sends private, link-local, and
+multicast destinations direct, so a catch-all VPN rule never cuts off printers,
+NAS boxes, router admin pages, or LAN discovery.
+
 The entrypoint's port is shown by `alle status` and by `routes add`/`routes ls`;
 it is allocated on the first daemon start and then never changes.
 
@@ -347,6 +357,39 @@ alle routes killswitch
   system-wide only once your system points at the router.)
 - `alle status` and `routes ls` show `unmatched → block — kill-switch ON` while
   active, so it's always visible why unmatched traffic fails.
+
+### `alle routes lan [on|off]`
+
+Toggle the built-in default-direct rules for LAN/local traffic (default: **on**,
+the recommended state). Run without an argument to show the current state;
+`-v`/`--verbose` also lists the covered ranges.
+
+```bash
+alle routes lan
+alle routes lan off
+alle routes lan on -v
+```
+
+While on, destinations in these ranges go direct **ahead of every user rule**,
+so even an `--all` catch-all cannot capture them:
+
+| Ranges                                          | What they are                             |
+| ----------------------------------------------- | ----------------------------------------- |
+| `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` | IPv4 private networks                     |
+| `169.254.0.0/16`, `127.0.0.0/8`                 | IPv4 link-local, loopback                 |
+| `224.0.0.0/4`, `255.255.255.255/32`             | IPv4 multicast (mDNS/SSDP), broadcast     |
+| `::1/128`, `fe80::/10`, `fc00::/7`, `ff00::/8`  | IPv6 loopback, link-local, ULA, multicast |
+
+Notes:
+
+- The built-in rules are fixed — they cannot be edited or removed individually;
+  this toggle is the whole surface. They never appear in `alle routes ls`.
+- Applies to the **router entrypoint only**; per-channel ports are unaffected.
+- DNS is deliberately **not** excluded from the tunnel: sending plain DNS direct
+  by default would leak browsing activity, so DNS traffic stays subject to your
+  rules.
+- `alle status` and `routes ls` append `— LAN direct off` to the router line
+  while the protection is disabled.
 
 ---
 

@@ -934,6 +934,35 @@ input.relabel {
   color: var(--text);
 }
 
+.lan-banner {
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--brand);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--brand) 4%, var(--panel));
+  padding: 11px 14px;
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.lan-banner b {
+  color: var(--text);
+}
+
+.lan-banner.off {
+  border-left-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 5%, var(--panel));
+}
+
+.lan-copy {
+  min-width: 0;
+}
+
 .toggle {
   position: relative;
   flex: none;

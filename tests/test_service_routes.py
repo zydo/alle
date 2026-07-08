@@ -153,10 +153,23 @@ def test_killswitch_toggles_unmatched_behavior():
     assert off["router"]["unmatched"] == "direct"
 
 
+def test_lan_direct_defaults_on_and_toggles():
+    from alle import routes as routes_mod
+
+    report = service.routes_lan_direct()
+    assert report["changed"] is False
+    assert report["router"]["lan_direct"] is True
+    assert report["cidrs"] == list(routes_mod.LAN_DIRECT_CIDRS)
+    off = service.routes_lan_direct(False)
+    assert off["changed"] is True and off["router"]["lan_direct"] is False
+    assert service.routes_lan_direct(True)["router"]["lan_direct"] is True
+
+
 def test_status_snapshot_carries_router_info():
     router = service.status_snapshot()["router"]
     assert router["rule_count"] == 0
     assert router["unmatched"] == "direct"
+    assert router["lan_direct"] is True
 
 
 # ---- restrict-only removal integrity ----------------------------------------------
@@ -222,6 +235,13 @@ def test_cli_routes_round_trip(channel, capsys):
 
     out = run_cli(["routes", "killswitch", "on"], capsys)
     assert "unmatched router traffic is blocked" in out
+
+    out = run_cli(["routes", "lan"], capsys)
+    assert "LAN direct ON" in out
+    out = run_cli(["routes", "lan", "off"], capsys)
+    assert "LAN direct off" in out
+    out = run_cli(["routes", "lan", "on", "-v"], capsys)
+    assert "LAN direct ON" in out and "10.0.0.0/8" in out
 
     out = run_cli(["routes", "rm", "r1", "r2"], capsys)
     assert "Removed rule r1" in out and "Removed rule r2" in out

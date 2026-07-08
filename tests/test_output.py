@@ -275,3 +275,20 @@ def test_test_result_speed_and_failure_state_cells():
     assert "Timeout" in text
     assert "150.0 Mbps" in text
     assert "20.0 Mbps" in text
+
+
+def test_router_mode_flags_lan_direct_only_when_off():
+    on = {"rule_count": 0, "killswitch": False, "lan_direct": True}
+    assert output._router_mode(on) == "pass-through (no rules)"
+    off = {
+        "rule_count": 2,
+        "killswitch": True,
+        "unmatched": "block",
+        "lan_direct": False,
+    }
+    assert (
+        output._router_mode(off)
+        == "2 rule(s), unmatched → block — kill-switch ON — LAN direct off"
+    )
+    legacy = {"rule_count": 0, "killswitch": False}  # pre-toggle JSON: default on
+    assert "LAN direct" not in output._router_mode(legacy)
