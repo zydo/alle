@@ -78,6 +78,21 @@ def set_(provider: str, creds: dict) -> None:
     _save_all(data)
 
 
+def replace_all(providers: dict[str, dict]) -> None:
+    """Replace the whole file with exactly these providers' credentials.
+
+    The bundle-restore path: a restore is declarative, so providers absent
+    from ``providers`` lose their stored credential.
+    """
+    cleaned = {
+        provider: {
+            k: (v.strip() if isinstance(v, str) else v) for k, v in creds.items()
+        }
+        for provider, creds in providers.items()
+    }
+    _save_all(cleaned)
+
+
 def remove(provider: str) -> bool:
     """Forget a provider's credentials. True if anything was removed."""
     data = _load_all()

@@ -285,6 +285,31 @@ alle routes ls
 - Per-channel ports keep working exactly as before, with or without rules — the
   router is an addition, never a replacement.
 
+## Backup and declarative setup
+
+The whole setup — providers (with credentials), channels, rulesets, and router
+toggles — round-trips through one declarative YAML **bundle** file. `import`
+applies it two ways: a **merge** by default, or `--replace` to overwrite the
+whole setup (it confirms first).
+
+```bash
+alle export                                               # write the bundle (0600)
+alle import  alle-backup-20260709-143022.yaml             # merge into the current setup
+alle import  alle-backup-20260709-143022.yaml --replace   # REPLACE the whole setup (confirms)
+```
+
+The bundle is a **secret** (it carries WireGuard private keys and provider
+tokens), so treat it like a password file. The same export and import
+(merge / replace) are on the Web UI's **Bundle** page.
+
+The full format, apply semantics, how to hand-write one provider by provider,
+and all caveats (ports don't travel, token-provider channels may re-resolve a
+fresh server, cloning a setup to two machines) live in the dedicated guides:
+**[docs/declarative-config.md](docs/declarative-config.md)** (how to author
+one) and **[docs/bundle.md](docs/bundle.md)** (format reference + caveats),
+plus [`alle validate`](docs/cli-reference.md#alle-validate-file) to check a
+file before applying it.
+
 ## Web UI
 
 `alle` serves a local dashboard from the background daemon — nothing extra to
@@ -294,7 +319,8 @@ install. Open it with:
 alle ui
 ```
 
-This opens your browser to a single **Dashboard** (plus a **Logs** page):
+This opens your browser to a **Dashboard**, a **Bundle** page, and a **Logs**
+page:
 
 - **Router entrypoint** — `http://127.0.0.1:<port>` at the top (click to copy).
 - **Channels table** — every channel with Location, Port, Latency, IP, and
@@ -312,6 +338,9 @@ This opens your browser to a single **Dashboard** (plus a **Logs** page):
   destinations reach the Internet, off blocks them). A fixed **Priority 0 / LAN**
   row at the top keeps local traffic direct ahead of every rule, with a toggle
   to turn that protection off.
+- **Bundle** — download the whole setup as a bundle file (it contains
+  credentials — the UI warns first), and upload one to **merge** it in or
+  **replace** the whole setup (with a confirmation dialog).
 - Start / stop / restart are host/CLI controls (`alle start|stop|restart`); the
   masthead links to the project on GitHub.
 

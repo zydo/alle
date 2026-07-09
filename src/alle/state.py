@@ -911,6 +911,73 @@ class Store:
         self.data = _read_raw()
         return updated
 
+    def restore_setup(
+        self,
+        providers: dict[str, dict],
+        rulesets: list[dict],
+        killswitch: bool,
+        lan_direct: bool,
+    ) -> None:
+        """Replace the entire setup in one transaction — the bundle-restore
+        commit point.
+
+        ``providers`` maps provider -> {channel id -> {country, city, label,
+        wg}}; ``rulesets`` is an ordered list of {name, target, matchers:
+        [(type, value), …]}. Runtime state is reset (fresh probe, no
+        reconnect) and rule/ruleset ids are minted fresh. Ports are local
+        allocations, never part of a bundle: a channel whose ``(provider,
+        id)`` already exists keeps its current port (a same-machine restore
+        preserves the local contract), anything else gets a fresh one, and
+        the router contract port is untouched.
+        """
+        with transaction() as data:
+            old_ports = {
+                (provider, cid): int(ch.get("port") or 0)
+                for provider, prov in (data.get("providers") or {}).items()
+                for cid, ch in (prov.get("channels") or {}).items()
+            }
+            new_providers: dict[str, dict] = {}
+            for provider, channels in providers.items():
+                chans: dict[str, dict] = {}
+                for cid, spec in channels.items():
+                    entry = {
+                        "country": spec.get("country", ""),
+                        "city": spec.get("city", ""),
+                        "port": old_ports.get((provider, cid), 0),
+                        "wg": spec["wg"],
+                        "probe": {},
+                    }
+                    if spec.get("label"):
+                        entry["label"] = spec["label"]
+                    chans[cid] = entry
+                new_providers[provider] = {"channels": chans}
+            data["providers"] = new_providers
+            # Ports for new identities are allocated only after the old
+            # channel set is gone, so ports freed by the replace are reusable
+            # while every kept port (and the router's) stays reserved.
+            for prov in new_providers.values():
+                for ch in prov["channels"].values():
+                    if not ch["port"]:
+                        ch["port"] = _next_free_port(data)
+            router = data.setdefault("router", _router_blank())
+            router["killswitch"] = bool(killswitch)
+            router["lan_direct"] = bool(lan_direct)
+            rules: list[dict] = []
+            for i, block in enumerate(rulesets, 1):
+                for matcher_type, value in block["matchers"]:
+                    rules.append(
+                        {
+                            "id": f"r{len(rules) + 1}",
+                            "type": matcher_type,
+                            "value": value,
+                            "target": block["target"],
+                            "ruleset": f"rs{i}",
+                            "ruleset_name": block["name"],
+                        }
+                    )
+            router["rules"] = rules
+        self.data = _read_raw()
+
     def clear_reconnect_all(self) -> int:
         """Drop reconnect bookkeeping from every channel (e.g. on ``alle restart``),
         clearing any ``reconnect_failed`` give-up flags. Returns channels touched."""

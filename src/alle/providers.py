@@ -23,6 +23,7 @@ import json
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from alle import credentials
@@ -30,6 +31,7 @@ from alle.credentials import mask
 
 NORD_API = "https://api.nordvpn.com/v1"
 WG_PORT = 51820  # NordLynx / standard WireGuard UDP port
+WireGuardResolver = Callable[[str, str], dict]
 
 
 class ProviderError(Exception):
@@ -292,8 +294,7 @@ def provider_wg(provider: str, country: str, city: str = "") -> dict:
     provider API to pick a server, producing the ``wgconf.parse`` shape so
     API-derived and (later) imported channels are identical at rest.
     """
-    spec = PROVIDERS.get(provider)
-    if spec is None:
+    if provider not in PROVIDERS:
         raise ProviderError(
             f"{display_name(provider)} cannot resolve locations from an API."
         )
@@ -302,17 +303,35 @@ def provider_wg(provider: str, country: str, city: str = "") -> dict:
         raise ProviderAuthError(
             f"{display_name(provider)} is not authenticated — run `alle providers add {provider}`."
         )
+    return provider_resolver(provider, creds)(country, city)
+
+
+def provider_resolver(provider: str, creds: dict) -> WireGuardResolver:
+    """A ``(country, city) -> WireGuard params`` resolver with the account key
+    derived once up front — a bundle apply resolves many channels under one
+    provider, and the key is per-account, not per-channel."""
+    spec = PROVIDERS.get(provider)
+    if spec is None:
+        raise ProviderError(
+            f"{display_name(provider)} cannot resolve locations from an API."
+        )
+    if not creds:
+        raise ProviderAuthError(f"{display_name(provider)} has no credential.")
     private_key = spec["derive_key"](creds)
-    peer = spec["resolve"](country, city)
-    return {
-        "private_key": private_key,
-        "address": list(spec["wg_address"]),
-        "peer": {
-            "public_key": peer["public_key"],
-            "endpoint_host": peer["host"],
-            "endpoint_port": peer["port"],
-            "preshared_key": None,
-            "allowed_ips": ["0.0.0.0/0", "::/0"],
-            "keepalive": 25,
-        },
-    }
+
+    def resolve(country: str, city: str = "") -> dict:
+        peer = spec["resolve"](country, city)
+        return {
+            "private_key": private_key,
+            "address": list(spec["wg_address"]),
+            "peer": {
+                "public_key": peer["public_key"],
+                "endpoint_host": peer["host"],
+                "endpoint_port": peer["port"],
+                "preshared_key": None,
+                "allowed_ips": ["0.0.0.0/0", "::/0"],
+                "keepalive": 25,
+            },
+        }
+
+    return resolve

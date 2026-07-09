@@ -976,6 +976,277 @@ input.relabel {
   color: var(--text);
 }
 
+/* ---- bundle page ---- */
+.bundle-page {
+  display: grid;
+  gap: 16px;
+}
+
+.bundle-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 22px 24px;
+}
+
+.bundle-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 15px;
+}
+
+.bundle-titles {
+  min-width: 0;
+}
+
+.bundle-title {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+
+.bundle-sub {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1.5;
+}
+
+.bundle-div {
+  height: 1px;
+  margin: 17px 0;
+  background: var(--line);
+}
+
+.bundle-secret {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--line));
+  border-left: 3px solid var(--warn);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warn) 8%, var(--panel));
+  color: var(--text);
+  font-size: 16.5px;
+  line-height: 1.5;
+}
+
+.bundle-secret svg {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  margin-top: 1px;
+  color: var(--warn);
+}
+
+.bundle-notes {
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 7px;
+}
+
+.bundle-notes li {
+  position: relative;
+  padding-left: 17px;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.bundle-notes li::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 9px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--line-2);
+}
+
+.bundle-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 18px;
+}
+
+/* larger, uniform action buttons on this page */
+.bundle-page .btn {
+  font-size: 12.5px;
+  padding: 10px 18px;
+}
+
+/* the three action buttons share one width regardless of label length */
+.bundle-actions .btn,
+.bundle-op .btn {
+  min-width: 250px;
+  justify-content: center;
+  text-align: center;
+}
+
+.btn.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.btn.btn-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+/* import: a click-or-drop upload zone, then two labeled operations */
+.bundle-drop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 17px 0 0;
+  padding: 22px 16px;
+  border: 1.5px dashed var(--line-2);
+  border-radius: 9px;
+  background: var(--panel-2);
+  cursor: pointer;
+  text-align: center;
+  transition: border-color .12s, background .12s;
+}
+
+.bundle-drop:hover {
+  border-color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 5%, var(--panel));
+}
+
+.bundle-drop:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.bundle-drop.drag {
+  border-style: solid;
+  border-color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 9%, var(--panel));
+}
+
+/* keep the drop highlight steady while dragging over inner elements */
+.bundle-drop.drag * {
+  pointer-events: none;
+}
+
+.bundle-drop-label {
+  font-size: 16px;
+  color: var(--muted);
+}
+
+.bundle-drop-label.has-file {
+  color: var(--text);
+  font-family: var(--mono);
+}
+
+/* shown only while a file is dragged over the zone */
+.bundle-drop-msg {
+  display: none;
+}
+
+.bundle-drop.drag .bundle-drop-label {
+  display: none;
+}
+
+.bundle-drop.drag .bundle-drop-msg {
+  display: inline;
+  color: var(--brand);
+  font-weight: 700;
+  font-size: 16px;
+}
+
+.bundle-ops {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.bundle-op {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 13px 15px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--brand);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--brand) 4%, var(--panel));
+}
+
+.bundle-op.danger {
+  border-left-color: var(--down);
+  background: color-mix(in srgb, var(--down) 4%, var(--panel));
+}
+
+.bundle-op-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.bundle-op-name {
+  display: block;
+  margin-bottom: 4px;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--brand);
+}
+
+.bundle-op.danger .bundle-op-name {
+  color: var(--down);
+}
+
+.bundle-op-desc {
+  color: var(--muted);
+  font-size: 16.5px;
+  line-height: 1.45;
+}
+
+.bundle-op .btn {
+  flex: none;
+}
+
+.bundle-validate {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  margin-top: 13px;
+}
+
+.bundle-validate-ok {
+  color: var(--live);
+  font-size: 14.5px;
+  font-weight: 600;
+}
+
+/* the "choose a file" / validation error sits just under the file row */
+.bundle-page .form-err {
+  margin: 8px 0 0;
+  font-size: 15px;
+}
+
+@media (max-width: 640px) {
+  .bundle-op {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .bundle-op .btn {
+    width: 100%;
+    min-width: 0;
+  }
+}
+
 .toggle {
   position: relative;
   flex: none;
@@ -1456,6 +1727,13 @@ select option {
   font-size: 12.5px;
   min-height: 1em;
   margin: 2px 0 12px;
+}
+
+/* multi-line errors (the bundle validator reports one line per problem) */
+.form-err.pre {
+  white-space: pre-wrap;
+  max-height: 180px;
+  overflow-y: auto;
 }
 
 .modal-body .btn.primary {

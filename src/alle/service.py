@@ -13,6 +13,7 @@ from pathlib import Path
 from alle import (
     __version__,
     applog,
+    bundle,
     credentials,
     daemon,
     daemonctl,
@@ -908,6 +909,116 @@ def routes_killswitch(enable: bool | None = None) -> dict:
         )
         daemon.ensure_running()
     return {"changed": enable is not None, "router": _router_info(store)}
+
+
+def setup_export() -> dict:
+    """The whole setup as a declarative bundle (text + counts for the summary).
+
+    The text contains WireGuard private keys and provider tokens — callers
+    must treat it as a secret.
+    """
+    data = bundle.export_bundle()
+    return {
+        "text": bundle.dumps(data),
+        "providers": len(data["providers"]),
+        "channels": sum(len(e["channels"]) for e in data["providers"].values()),
+        "rulesets": len(data["router"]["rulesets"]),
+    }
+
+
+def setup_import(text: str) -> dict:
+    """Merge a bundle into the current setup (validate-all, then apply)."""
+    try:
+        summary = bundle.apply_import(text)
+    except bundle.BundleError as e:
+        raise ServiceError(str(e)) from e
+    ch = summary["channels"]
+    applog.log(
+        f"imported bundle: +{len(ch['created'])} channel(s), "
+        f"{len(ch['updated'])} updated, {len(summary['rulesets_added'])} ruleset(s), "
+        f"{len(summary['wg_resolved'])} resolved fresh, "
+        f"{len(summary['wg_fallback'])} from snapshot"
+    )
+    daemon.ensure_running()
+    return summary
+
+
+def setup_restore_plan(text: str) -> dict:
+    """Validate a bundle for restore and report both sides' counts — the
+    caller's confirmation step. Changes nothing."""
+    try:
+        return bundle.plan_restore(text)
+    except bundle.BundleError as e:
+        raise ServiceError(str(e)) from e
+
+
+def setup_restore(text: str) -> dict:
+    """Replace the entire setup with a bundle. Destructive — callers confirm
+    (the CLI prompts / requires ``--yes``; the Web UI shows a dialog)."""
+    try:
+        summary = bundle.apply_restore(text)
+    except bundle.BundleError as e:
+        raise ServiceError(str(e)) from e
+    applog.log(
+        f"restored bundle: {len(summary['providers'])} provider(s), "
+        f"{len(summary['channels'])} channel(s), {len(summary['rulesets'])} "
+        f"ruleset(s); removed {len(summary['removed']['channels'])} channel(s); "
+        f"{len(summary['wg_resolved'])} resolved fresh, "
+        f"{len(summary['wg_fallback'])} from snapshot"
+    )
+    daemon.ensure_running()
+    return summary
+
+
+def _bundle_location_lookup():
+    """A ``(provider) -> {country_lower: {city_lower, …}} | None`` lookup for
+    bundle validation, plus a list of notes for locations we couldn't reach.
+
+    Cached per call; a provider whose location list can't be fetched (offline,
+    API down) returns None, so validation skips its country/city check rather
+    than failing on an environment problem."""
+    cache: dict[str, dict | None] = {}
+    notes: list[str] = []
+
+    def lookup(provider: str):
+        if provider not in cache:
+            spec = PROVIDERS.get(provider)
+            if not spec or "locations" not in spec:
+                cache[provider] = None
+            else:
+                try:
+                    locs = spec["locations"]()  # {Country: [cities]}
+                    cache[provider] = {
+                        c.lower(): {city.lower() for city in cities}
+                        for c, cities in locs.items()
+                    }
+                except ProviderError as e:
+                    notes.append(
+                        f"could not reach {display_name(provider)} to validate its "
+                        f"countries/cities ({e}); skipped that check"
+                    )
+                    cache[provider] = None
+        return cache[provider]
+
+    return lookup, notes
+
+
+def setup_validate(text: str) -> dict:
+    """Validate a bundle file against every rule without applying it. Raises
+    :class:`ServiceError` (line-annotated) if anything is wrong; otherwise
+    returns the counts and any location-check notes."""
+    lookup, notes = _bundle_location_lookup()
+    try:
+        parsed = bundle.validate_file(text, location_lookup=lookup)
+    except bundle.BundleError as e:
+        raise ServiceError(str(e)) from e
+    return {
+        "valid": True,
+        "providers": len(parsed["providers"]),
+        "channels": sum(len(e["channels"]) for e in parsed["providers"].values()),
+        "rulesets": len(parsed["router"]["rulesets"] or []),
+        "notes": notes,
+    }
 
 
 def status_snapshot() -> dict:

@@ -25,9 +25,11 @@ from __future__ import annotations
 import argparse
 import getpass
 import itertools
+import os
 import sys
 import threading
 import time
+from pathlib import Path
 
 from alle import __version__, applog, daemon, output, service
 from alle.providers import (
@@ -489,6 +491,138 @@ def cmd_metrics(args):
     _print_or_json(service.metrics_snapshot(args.channel), output.metrics, args.json)
 
 
+# ---- export / import / validate ---------------------------------------------
+
+
+def _read_bundle_file(path: str) -> str:
+    try:
+        return Path(path).expanduser().read_text()
+    except OSError as e:
+        raise service.ServiceError(f"could not read {path}: {e}") from e
+
+
+def _write_secret_file(path: Path, text: str) -> None:
+    """Write 0600 from the first byte; chmod too, since overwriting an
+    existing file would otherwise keep its old (possibly wider) mode."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.chmod(path, 0o600)
+
+
+def _print_bundle_summary(result: dict) -> None:
+    if result["mode"] == "import":
+        ch = result["channels"]
+        for ref in ch["created"]:
+            print(f"  + channel {ref}")
+        for ref in ch["updated"]:
+            print(f"  ~ channel {ref} updated")
+        for provider in result["credentials"]["added"]:
+            print(f"  + credential for {provider}")
+        for provider in result["credentials"]["replaced"]:
+            print(f"  ~ credential for {provider} REPLACED (was different)")
+        for name in result["rulesets_added"]:
+            print(f"  + ruleset {name!r} (appended at the lowest priority)")
+        unchanged = len(ch["unchanged"])
+        if unchanged:
+            print(f"  = {unchanged} channel(s) already up to date")
+        if not any(
+            (
+                ch["created"],
+                ch["updated"],
+                result["credentials"]["added"],
+                result["credentials"]["replaced"],
+                result["rulesets_added"],
+            )
+        ):
+            print("  Nothing to change — the setup already matches the bundle.")
+        created = bool(ch["created"])
+    else:
+        print(
+            f"  Setup replaced: {len(result['providers'])} provider(s), "
+            f"{len(result['channels'])} channel(s), "
+            f"{len(result['rulesets'])} ruleset(s)."
+        )
+        removed = result["removed"]
+        if removed["providers"] or removed["channels"]:
+            print(
+                f"  Removed: {len(removed['providers'])} provider(s), "
+                f"{len(removed['channels'])} channel(s)."
+            )
+        for provider in result["credentials"]:
+            print(f"  Credential for {provider} replaced from the bundle.")
+        created = bool(result["channels"])
+    for ref in result.get("wg_resolved", []):
+        print(f"  ~ {ref}: fresh server resolved via the provider token")
+    for ref in result.get("wg_fallback", []):
+        print(
+            f"  ! {ref}: could not resolve a fresh server — restored the "
+            "bundle's snapshot (auto-reconnect refreshes it when possible)"
+        )
+    if created:
+        print(
+            "Note: ports are allocated locally and never travel in a bundle — "
+            "point apps at the ports shown by: alle status"
+        )
+
+
+def cmd_export(args):
+    result = service.setup_export()
+    out = args.out or f"alle-backup-{time.strftime('%Y%m%d-%H%M%S')}.yaml"
+    what = (
+        f"{result['providers']} provider(s), {result['channels']} channel(s), "
+        f"{result['rulesets']} ruleset(s)"
+    )
+    if out == "-":
+        print(result["text"], end="")
+        return
+    _write_secret_file(Path(out).expanduser(), result["text"])
+    print(f"Exported {what} -> {out}")
+    print(
+        "This file contains WireGuard private keys and provider tokens — "
+        "keep it private."
+    )
+
+
+def cmd_import(args):
+    text = _read_bundle_file(args.file)
+    if args.replace:
+        plan = service.setup_restore_plan(text)
+        cur, new = plan["current"], plan["bundle"]
+        print(
+            "Import --replace REPLACES the entire setup:\n"
+            f"  current: {cur['providers']} provider(s), "
+            f"{cur['channels']} channel(s), {cur['rulesets']} ruleset(s)\n"
+            f"  bundle:  {new['providers']} provider(s), {new['channels']} channel(s), "
+            f"{new['rulesets']} ruleset(s)"
+        )
+        if not args.yes:
+            if not sys.stdin.isatty():
+                raise service.ServiceError(
+                    "--replace is destructive — pass --yes to confirm without a prompt."
+                )
+            answer = input("Type 'yes' to replace the current setup: ")
+            if answer.strip().lower() != "yes":
+                print("Aborted — nothing was changed.")
+                return
+        result = service.setup_restore(text)
+        print(f"Replaced the setup with {args.file}:")
+    else:
+        result = service.setup_import(text)
+        print(f"Imported {args.file} (merged into the current setup):")
+    _print_bundle_summary(result)
+
+
+def cmd_validate(args):
+    result = service.setup_validate(_read_bundle_file(args.file))
+    print(
+        f"{args.file} is a valid bundle: {result['providers']} provider(s), "
+        f"{result['channels']} channel(s), {result['rulesets']} ruleset(s)."
+    )
+    for note in result["notes"]:
+        print(f"  note: {note}")
+
+
 class _Spinner:
     """A tiny stderr spinner for long, one-at-a-time work (the speed test).
 
@@ -909,6 +1043,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     me.add_argument("--json", action="store_true", help="print machine-readable JSON")
     me.set_defaults(func=cmd_metrics)
+
+    # export / import / validate (the declarative setup bundle)
+    ex = sub.add_parser(
+        "export",
+        help="write the whole setup as a declarative bundle (contains secrets)",
+    )
+    ex.add_argument(
+        "--out",
+        help="output file (default: alle-backup-<date>-<time>.yaml, written 0600; "
+        "'-' for stdout)",
+    )
+    ex.set_defaults(func=cmd_export)
+    im = sub.add_parser(
+        "import",
+        help="apply a bundle: merge into the current setup (default), or "
+        "--replace to overwrite it entirely",
+    )
+    im.add_argument("file", help="bundle file from `alle export` (or hand-written)")
+    im.add_argument(
+        "--replace",
+        action="store_true",
+        help="REPLACE the entire setup with the bundle (destructive; confirms)",
+    )
+    im.add_argument(
+        "--yes",
+        action="store_true",
+        help="with --replace: skip the confirmation prompt (required when not a TTY)",
+    )
+    im.set_defaults(func=cmd_import)
+    va = sub.add_parser(
+        "validate",
+        help="check a bundle file against every rule without applying it "
+        "(reports all problems with line numbers)",
+    )
+    va.add_argument("file", help="bundle file to validate")
+    va.set_defaults(func=cmd_validate)
     lg = sub.add_parser("logs", help="show alle's operation log")
     lg.add_argument("-f", "--follow", action="store_true", help="stream new log lines")
     lg.add_argument(

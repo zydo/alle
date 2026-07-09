@@ -306,6 +306,8 @@ class _Handler(BaseHTTPRequestHandler):
         from alle import service
 
         seg = path.strip("/").split("/")[2:]  # drop "api/v1"
+        if seg == ["export"]:
+            return self._export_get()
         routes_ = {
             ("status",): service.status_snapshot,
             ("providers",): service.provider_list,
@@ -323,11 +325,46 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": "not found"})
         self._call(fn)  # same ServiceError -> 400 mapping as mutations
 
+    def _export_get(self):
+        """The setup bundle as a YAML download (not JSON — it's a file).
+
+        The response body carries WireGuard private keys and provider tokens,
+        same trust model as every other authed loopback response; the browser
+        saves it under the user's default download permissions, so the UI
+        warns before triggering it.
+        """
+        import time
+
+        from alle import service
+
+        try:
+            result = service.setup_export()
+        except service.ServiceError as e:
+            return self._json(400, {"error": str(e)})
+        name = f"alle-backup-{time.strftime('%Y%m%d-%H%M%S')}.yaml"
+        self._send(
+            200,
+            result["text"].encode(),
+            "application/yaml; charset=utf-8",
+            {
+                "Content-Disposition": f'attachment; filename="{name}"',
+                "Cache-Control": "no-store",
+            },
+        )
+
     def _api_mutate(self, method: str, path: str):
         from alle import service
 
         seg = path.strip("/").split("/")[2:]  # drop "api/v1"
         body = self._body()
+
+        if method == "POST" and seg == ["validate"]:
+            return self._call(service.setup_validate, str(body.get("text", "")))
+        if method == "POST" and seg == ["import"]:
+            # --replace (the UI's Replace button confirms before calling) routes
+            # to the destructive whole-setup replace instead of a merge
+            fn = service.setup_restore if body.get("replace") else service.setup_import
+            return self._call(fn, str(body.get("text", "")))
 
         if method == "POST" and seg == ["providers"]:
             return self._call(_add_provider, body)

@@ -3,9 +3,10 @@
 
 import { $, api } from "./core.js";
 import * as dashboard from "./dashboard.js";
+import * as bundle from "./bundle.js";
 import * as logs from "./logs.js";
 
-const pages = { "": dashboard, logs };
+const pages = { "": dashboard, bundle, logs };
 const el = { pill: $("pill"), pillText: $("pill-text"), ver: $("ver"), banner: $("banner") };
 let current = null;
 let lastStatus = null;

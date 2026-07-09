@@ -38,6 +38,9 @@ omit the prefix.
   - [`alle start` / `stop` / `restart`](#alle-start--stop--restart)
   - [`alle test`](#alle-test)
   - [`alle metrics`](#alle-metrics)
+  - [`alle export [--out <file>]`](#alle-export---out-file)
+  - [`alle import <file> [--replace] [--yes]`](#alle-import-file---replace---yes)
+  - [`alle validate <file>`](#alle-validate-file)
   - [`alle logs`](#alle-logs)
   - [`alle ui`](#alle-ui)
   - [`alle daemon`](#alle-daemon)
@@ -544,6 +547,124 @@ aggregates.)
 
 ---
 
+## `alle export [--out <file>]`
+
+Write the entire setup — providers (with their credentials), channels of both
+archetypes, rulesets, and the router toggles — as one declarative YAML
+**bundle**, for backup, moving to another machine, or replaying after a
+reinstall. Defaults to `alle-backup-<date>-<time>.yaml` in the current
+directory, written `0600`; `--out -` prints to stdout instead (for scripts).
+
+```bash
+alle export                          # -> alle-backup-20260709-143022.yaml (0600)
+alle export --out ~/setup.yaml
+alle export --out - | wc -l          # stdout for scripts
+```
+
+- **The file is a secret.** It contains WireGuard private keys and provider
+  tokens — everything needed to recreate the setup. Keep it private.
+- **Runtime state never travels in a bundle**: no probe results, speed/latency
+  history, traffic totals, reconnect bookkeeping, rule/ruleset ids — and **no
+  ports** (see `import --replace` below).
+
+The bundle is a **declarative startup config**, not a state dump — `export` is
+a convenience; the same file can be hand-written from scratch. Token-provider
+channels may omit the `wg` snapshot entirely (`{country: Sweden}` is enough):
+their WireGuard params are derived state, resolved via the provider token at
+apply time. Config-provider channels (Proton `.conf`) must include `wg` — it
+*is* their configuration. Matchers in hand-written rulesets can be bare
+strings (`netflix.com`, `10.8.0.0/16`, `all`), inferred exactly like
+`alle routes ruleset create --domain`.
+
+**Guides** — writing a setup from scratch, with per-provider how-to for
+filling the YAML: [declarative-config.md](declarative-config.md). Format
+reference, apply semantics, and caveats (including running one setup on two
+machines): [bundle.md](bundle.md).
+
+---
+
+## `alle import <file> [--replace] [--yes]`
+
+Apply a bundle. Two modes, one command:
+
+- **Default (merge)** — layer the bundle onto the current setup; nothing is
+  removed:
+  - Providers and credentials are added; a credential that differs from the
+    stored one is replaced (called out explicitly in the summary — an old
+    backup can overwrite a newer token).
+  - Channels upsert by `(provider, channel id)` — an existing channel is
+    updated in place (its local port kept), a new id is created (fresh port).
+  - **Token channels resolve a fresh server via the provider token** when they
+    are new to this machine (or their location changed); an existing channel
+    with the same location keeps its live params (no API call, no churn); the
+    bundle's `wg` snapshot is used only when fresh resolution fails (offline,
+    API down) — reported in the summary, refreshed later by auto-reconnect.
+    Config channels are applied exactly as written.
+  - **Rulesets always append at the bottom of the priority order.** Under
+    first-match-wins an appended block can never hijack existing routing; use
+    `alle routes ls` (shadow lint) and `alle routes reorder` afterwards.
+  - `killswitch` / `lan_direct`, when present in the bundle, are applied.
+
+```bash
+alle import alle-backup-20260709-143022.yaml                  # merge
+alle import alle-backup-20260709-143022.yaml --replace --yes  # replace, non-interactive
+```
+
+- **`--replace`** — **overwrite the whole setup** instead of merging.
+  Providers, channels, credentials, rulesets, and toggles not in the bundle are
+  removed. Destructive: it prompts for confirmation, and requires `--yes` when
+  not running on a TTY. The bundle must be self-contained (a ruleset target
+  must reference a channel defined in the bundle). Ports are local allocations,
+  so they don't survive a replace — a channel whose `(provider, id)` already
+  exists keeps its current port, but new identities get fresh ports and the
+  router entrypoint port is untouched; repoint apps at the ports from
+  `alle status` after a cross-machine replace. Runtime state resets (fresh
+  probes, no carried-over history).
+
+The whole file is validated first — every WireGuard field, matcher, and target
+reference — and rejected as a whole with a per-entry error list (path +
+reason) on any problem. An import never half-applies. Full semantics and
+caveats: [bundle.md](bundle.md).
+
+---
+
+## `alle validate <file>`
+
+Check a bundle **without applying it** — a pre-import dry run. Reports **every**
+problem in one pass (never stopping at the first), each with the **line number**
+and reason, and exits non-zero if any are found.
+
+```bash
+alle validate my-setup.yaml
+alle validate my-setup.yaml && alle import my-setup.yaml   # gate an import
+```
+
+It runs the self-contained (`--replace`-style) checks:
+
+- `kind: alle-bundle` and a `bundle_version` this alle understands.
+- Providers are among the supported set (`nordvpn`, `protonvpn`).
+- Token providers (NordVPN) carry a non-empty token; channel ids are unique
+  within a provider; **country is required and checked against the provider's
+  real country list, and city — if given — against that country's cities**
+  (fetched or cached; skipped with a note if the provider API is unreachable).
+- `wg` is optional for token providers (derived on apply) but **required for
+  config providers** (Proton `.conf`); when present, its WireGuard fields are
+  checked for presence and validity.
+- If a `router` block is present, `killswitch` and `lan_direct` must be set
+  explicitly; ruleset names are non-empty, each `target` is `direct`, `block`,
+  or a `<provider>/<channel>` defined in the bundle, and every matcher type is
+  one of the supported kinds (`domain`, `domain_suffix`, `ip_cidr`, `all`).
+
+```text
+$ alle validate broken.yaml
+bundle rejected (3 problems) — nothing was changed:
+  line 7   providers.nordvpn.credential — a non-empty token is required for NordVPN
+  line 10  providers.nordvpn.channels.us_1.country — 'Atlantis' is not a known NordVPN country
+  line 14  router.lan_direct — must be set explicitly to true or false
+```
+
+---
+
 ## `alle logs`
 
 `alle logs [-f|--follow] [-n|--lines N]`
@@ -567,19 +688,23 @@ alle ui
 alle ui --no-open    # print the sign-in URL instead of opening a browser
 ```
 
-The UI is a single **Dashboard** page (plus a **Logs** page). The Dashboard shows
-the router entrypoint address, a channels table (Location, Port, Latency, IP, and
-Sent / Received / Down Speed / Up Speed), and the router rules. Measured columns
-stay blank until you run a per-row or all-channel **Probe** or **Speed Test**
-(spinner while running). Adding a channel opens a provider-guided wizard: an
-icon-only provider row plus an always-present "+" to add NordVPN or Proton VPN;
+The UI has a **Dashboard**, a **Bundle** page, and a **Logs** page. The
+Dashboard shows the router entrypoint address, a channels table (Location,
+Port, Latency, IP, and Sent / Received / Down Speed / Up Speed), and the
+router rules. Measured columns stay blank until you run a per-row or
+all-channel **Probe** or **Speed Test** (spinner while running). Adding a
+channel opens a provider-guided wizard: an icon-only provider row plus an
+always-present "+" to add NordVPN or Proton VPN;
 token providers (NordVPN) pick a country and city from a searchable list, Proton
 VPN uploads a WireGuard `.conf`. Router rules can be added, deleted, and
 drag-reordered (first match wins), with an **Allow Non-VPN Traffic** toggle
 (Unmatched row) and a fixed **Priority 0 / LAN** row keeping local traffic
 direct. Channels a routing rule still targets can't be removed — the
-UI shows the exact rules to clear first, same as `alle channels rm`. A **Logs**
-page polls the local log tail. Lifecycle (start/stop/restart) is via the CLI;
+UI shows the exact rules to clear first, same as `alle channels rm`. A **Bundle**
+page downloads the setup as a bundle (`alle export`) and uploads one to **merge**
+or **replace** the whole setup (replace confirms) — same as `alle import` /
+`alle import --replace` — plus a **Validate** button to dry-run-check a file. A
+**Logs** page polls the local log tail. Lifecycle (start/stop/restart) is via the CLI;
 the masthead links to the project on GitHub.
 
 - The server binds to `127.0.0.1` only and is never exposed to the network (there
@@ -639,7 +764,7 @@ running, with its version.
 ```text
 Login service: active (launchd).
   Unit: /Users/you/Library/LaunchAgents/com.github.zydo.alle.plist
-Daemon: running, version 0.1.2.
+Daemon: running, version 0.1.3.
 ```
 
 **Upgrades:** the service unit execs a stable shim, so `uv tool upgrade
