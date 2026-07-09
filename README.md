@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="src/alle/assets/wordmark.svg" alt="alle" width="320">
+  <img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/wordmark.svg" alt="alle" width="320">
 </p>
 
 <p align="center">
@@ -12,7 +12,7 @@
 A universal VPN client that manages multiple VPN connections with rule-based routing.
 
 <p align="center">
-  <img src="src/alle/assets/webui.png" alt="alle Web UI dashboard" width="900">
+  <img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/webui.png" alt="alle Web UI dashboard" width="900">
 </p>
 
 # Why alle
