@@ -639,55 +639,180 @@ def _decorate_rule(rule: dict, shadows: dict[str, str]) -> dict:
     }
 
 
-def routes_add(matcher_type: str, value: str, target: str) -> dict:
-    """Append one routing rule; returns it plus any shadow warning."""
+def _normalize_target(target: str) -> str:
     try:
-        normalized = routes.normalize_value(matcher_type, value)
         _, ref = routes.parse_target(target)
     except routes.RuleError as e:
         raise ServiceError(str(e)) from e
-    if ref is not None:  # a channel target (ref is None for direct/block)
-        provider = match(ref[0])  # accept the brand name too, like channel refs
-        if provider is None:
-            names = ", ".join(known())
-            raise ServiceError(
-                f"unknown provider {ref[0]!r} in target (known: {names})."
-            )
-        target = f"{provider}/{ref[1]}"
+    if ref is None:
+        return target.strip()
+    provider = match(ref[0])
+    if provider is None:
+        names = ", ".join(known())
+        raise ServiceError(f"unknown provider {ref[0]!r} in target (known: {names}).")
+    return f"{provider}/{ref[1]}"
 
-    store = Store.load()
-    try:
-        # channel-target existence is verified inside the transaction — the
-        # mirror of the removal guard, so rules and channels can't cross in flight
-        rule = store.add_rule(matcher_type, normalized, target)
-    except ValueError as e:
-        raise ServiceError(f"{e} (see: alle channels ls --refs).") from e
-    shadows = routes.shadowed_by(store.rules())
-    applog.log(f"added route {rule['id']}: {routes.describe(rule)} -> {rule['target']}")
-    daemon.ensure_running()
+
+def _normalize_matchers(entries: list) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            value = str(entry.get("value", ""))
+            explicit = entry.get("type") or entry.get("matcher_type")
+            matcher_type = str(explicit) if explicit else None
+        else:
+            value = str(entry)
+            matcher_type = None
+        try:
+            out.append(routes.infer_matcher(value, matcher_type))
+        except routes.RuleError as e:
+            raise ServiceError(str(e)) from e
+    if not out:
+        raise ServiceError("at least one matcher is required.")
+    return out
+
+
+def _decorate_ruleset(block: dict, shadows: dict[str, str]) -> dict:
+    rules_ = [_decorate_rule(rule, shadows) for rule in block["rules"]]
     return {
-        "rule": _decorate_rule(rule, shadows),
-        "router_port": store.router.get("port") or None,
-        "shadowed_by": shadows.get(rule["id"]),
+        "id": block["id"],
+        "name": block["name"],
+        "target": block["target"],
+        "rules": rules_,
+        "matcher_count": len(rules_),
+        "shadowed_count": sum(1 for rule in rules_ if rule.get("shadowed_by")),
     }
 
 
-def routes_list(channel: str | None = None) -> dict:
-    """Rules in evaluation order, shadow-annotated; ``channel`` filters by target
-    (bare channel id, or a qualified ``provider/id`` ref)."""
-    store = Store.load()
+def _routes_payload(
+    store: Store, channel: str | None = None, flat: bool = False
+) -> dict:
     rules_ = store.rules()
     shadows = routes.shadowed_by(rules_)
     rows = []
     for rule in rules_:
         if channel is not None:
             _, _, cid = rule["target"].partition("/")
-            if not cid:  # direct/block targets never reference a channel
+            if not cid:
                 continue
             if rule["target"] != channel and cid != channel:
                 continue
         rows.append(_decorate_rule(rule, shadows))
-    return {"rules": rows, "filter": channel, "router": _router_info(store)}
+    rulesets = []
+    if channel is None:
+        rulesets = [_decorate_ruleset(block, shadows) for block in store.rulesets()]
+    return {
+        "rules": rows,
+        "rulesets": rulesets,
+        "filter": channel,
+        "flat": flat,
+        "router": _router_info(store),
+    }
+
+
+def routes_ruleset_create(name: str, target: str, matchers: list) -> dict:
+    """Create one ruleset atomically with one or more matchers."""
+    name = (name or "").strip()
+    if not name:
+        raise ServiceError("ruleset name cannot be empty.")
+    target = _normalize_target(target)
+    normalized = _normalize_matchers(matchers)
+    store = Store.load()
+    try:
+        block = store.create_ruleset(name, target, normalized)
+    except ValueError as e:
+        raise ServiceError(f"{e} (see: alle channels ls --refs).") from e
+    shadows = routes.shadowed_by(store.rules())
+    decorated = _decorate_ruleset(block, shadows)
+    applog.log(
+        f"created ruleset {decorated['id']} {decorated['name']!r}: "
+        f"{decorated['matcher_count']} matcher(s) -> {target}"
+    )
+    daemon.ensure_running()
+    return {"ruleset": decorated, "router": _router_info(store)}
+
+
+def routes_ruleset_add(ruleset_id: str, matchers: list) -> dict:
+    normalized = _normalize_matchers(matchers)
+    store = Store.load()
+    try:
+        block = store.add_ruleset_matchers(ruleset_id, normalized)
+    except ValueError as e:
+        raise ServiceError(str(e)) from e
+    shadows = routes.shadowed_by(store.rules())
+    decorated = _decorate_ruleset(block, shadows)
+    applog.log(
+        f"added {len(normalized)} matcher(s) to ruleset {decorated['id']} "
+        f"{decorated['name']!r}"
+    )
+    daemon.ensure_running()
+    return {"ruleset": decorated, "router": _router_info(store)}
+
+
+def routes_ruleset_remove(ruleset_id: str, dry_run: bool = False) -> dict:
+    store = Store.load()
+    block = next((b for b in store.rulesets() if b["id"] == ruleset_id), None)
+    if block is None:
+        raise ServiceError(f"unknown ruleset {ruleset_id!r} (see: alle routes ls).")
+    shadows = routes.shadowed_by(store.rules())
+    planned = _decorate_ruleset(block, shadows)
+    if dry_run:
+        return {"ruleset": planned, "dry_run": True}
+    try:
+        store.remove_ruleset(ruleset_id)
+    except ValueError as e:
+        raise ServiceError(str(e)) from e
+    applog.log(f"removed ruleset {planned['id']} {planned['name']!r}")
+    daemon.ensure_running()
+    return {"ruleset": planned, "dry_run": False}
+
+
+def routes_ruleset_rename(ruleset_id: str, name: str) -> dict:
+    store = Store.load()
+    try:
+        block = store.rename_ruleset(ruleset_id, name.strip())
+    except ValueError as e:
+        raise ServiceError(str(e)) from e
+    shadows = routes.shadowed_by(store.rules())
+    decorated = _decorate_ruleset(block, shadows)
+    return {"ruleset": decorated, "router": _router_info(store)}
+
+
+def routes_ruleset_retarget(ruleset_id: str, target: str) -> dict:
+    target = _normalize_target(target)
+    store = Store.load()
+    try:
+        block = store.retarget_ruleset(ruleset_id, target)
+    except ValueError as e:
+        raise ServiceError(f"{e} (see: alle channels ls --refs).") from e
+    shadows = routes.shadowed_by(store.rules())
+    decorated = _decorate_ruleset(block, shadows)
+    daemon.ensure_running()
+    return {"ruleset": decorated, "router": _router_info(store)}
+
+
+def routes_ruleset_update(
+    ruleset_id: str, name: str, target: str, matchers: list
+) -> dict:
+    """Update one ruleset's name, target, and matchers (id/position kept)."""
+    target = _normalize_target(target)
+    normalized = _normalize_matchers(matchers)
+    name = (name or "").strip()
+    store = Store.load()
+    try:
+        block = store.update_ruleset(ruleset_id, name, target, normalized)
+    except ValueError as e:
+        raise ServiceError(str(e)) from e
+    shadows = routes.shadowed_by(store.rules())
+    decorated = _decorate_ruleset(block, shadows)
+    applog.log(f"updated ruleset {ruleset_id}: {name!r} via {target}")
+    daemon.ensure_running()
+    return {"ruleset": decorated, "router": _router_info(store)}
+
+
+def routes_list(channel: str | None = None, flat: bool = False) -> dict:
+    """Rulesets in evaluation order, plus flat rows for debugging/API clients."""
+    return _routes_payload(Store.load(), channel=channel, flat=flat)
 
 
 def routes_remove(ids: list[str], dry_run: bool = False) -> dict:
@@ -709,24 +834,38 @@ def routes_remove(ids: list[str], dry_run: bool = False) -> dict:
     return {"rules": planned, "dry_run": False}
 
 
-def routes_reorder(ids: list[str]) -> dict:
-    """Replace evaluation order with a full permutation of existing rule ids."""
+def routes_reorder(ids: list[str], flat: bool = False) -> dict:
+    """Replace ruleset-block order (or flat rule order for debugging)."""
     if not ids:
-        raise ServiceError("at least one rule id is required (see: alle routes ls).")
+        what = "rule" if flat else "ruleset"
+        raise ServiceError(f"at least one {what} id is required (see: alle routes ls).")
     store = Store.load()
     try:
-        ordered, changed = store.reorder_rules(ids)
+        if flat:
+            ordered, changed = store.reorder_rules(ids)
+            shadows = routes.shadowed_by(ordered)
+            payload = {
+                "rules": [_decorate_rule(rule, shadows) for rule in ordered],
+                "rulesets": [
+                    _decorate_ruleset(block, shadows) for block in store.rulesets()
+                ],
+            }
+        else:
+            ordered_sets, changed = store.reorder_rulesets(ids)
+            shadows = routes.shadowed_by(store.rules())
+            payload = {
+                "rulesets": [
+                    _decorate_ruleset(block, shadows) for block in ordered_sets
+                ],
+                "rules": [_decorate_rule(rule, shadows) for rule in store.rules()],
+            }
     except ValueError as e:
-        raise ServiceError(f"{e} (pass every rule id exactly once).") from e
-    shadows = routes.shadowed_by(ordered)
+        noun = "rule" if flat else "ruleset"
+        raise ServiceError(f"{e} (pass every {noun} id exactly once).") from e
     if changed:
-        applog.log("reordered routes: " + " ".join(rule["id"] for rule in ordered))
+        applog.log("reordered routes: " + " ".join(ids))
         daemon.ensure_running()
-    return {
-        "rules": [_decorate_rule(rule, shadows) for rule in ordered],
-        "changed": changed,
-        "router": _router_info(store),
-    }
+    return {**payload, "changed": changed, "router": _router_info(store)}
 
 
 def routes_lan_direct(enable: bool | None = None) -> dict:

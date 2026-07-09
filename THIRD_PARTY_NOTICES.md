@@ -1,9 +1,28 @@
 # Third-Party Notices
 
-alle is an orchestration layer. It does not bundle, modify, or redistribute
-any third-party source code or binaries. The components below are obtained at
-runtime (downloaded directly from their upstream release pages onto the user's
-machine) and remain the work of their respective authors under their own licenses.
+alle's package contains only its own code. Two kinds of third-party component
+are involved when you run it:
+
+1. **Python dependencies** — declared in `pyproject.toml` and installed from PyPI
+   alongside alle. These are the work of their respective authors under their own
+   licenses (below).
+2. **sing-box** — not a Python dependency and never bundled. alle downloads the
+   upstream binary at runtime, verifies it against a pinned SHA-256, and runs it
+   as a separate process.
+
+## Python dependencies
+
+### PyYAML
+
+- Project: https://github.com/yaml/pyyaml
+- License: **MIT License**
+- Role in alle: reading and writing the YAML credential store (`credentials.yaml`).
+
+### pycountry
+
+- Project: https://github.com/pycountry/pycountry
+- License: **GNU Lesser General Public License v2.1 only (LGPL-2.1)**
+- Role in alle: ISO country/subdivision name resolution for location selection.
 
 ## sing-box
 

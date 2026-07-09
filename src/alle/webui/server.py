@@ -211,7 +211,15 @@ class _Handler(BaseHTTPRequestHandler):
         if data is None:
             return self._json(404, {"error": "not found"})
         ext = "." + name.rsplit(".", 1)[-1] if "." in name else ""
-        self._send(200, data, _ASSET_TYPES.get(ext, "application/octet-stream"))
+        # no-store: the UI ships inside the daemon, so a browser holding a stale
+        # dashboard.js across an upgrade (or an edit during development) would run
+        # mismatched code against the live API. Loopback + single user = no cache.
+        self._send(
+            200,
+            data,
+            _ASSET_TYPES.get(ext, "application/octet-stream"),
+            {"Cache-Control": "no-store"},
+        )
 
     do_HEAD = do_GET
 
@@ -265,7 +273,7 @@ class _Handler(BaseHTTPRequestHandler):
                 b"Try `alle restart`, or reinstall alle.",
                 "text/plain; charset=utf-8",
             )
-        self._send(200, body, "text/html; charset=utf-8")
+        self._send(200, body, "text/html; charset=utf-8", {"Cache-Control": "no-store"})
 
     def _login_post(self):
         length = int(self.headers.get("Content-Length") or 0)
@@ -340,15 +348,54 @@ class _Handler(BaseHTTPRequestHandler):
             return self._call(
                 lambda: service.channel_remove_many([seg[2]], provider=seg[1])
             )
-        if method == "POST" and seg == ["routes"]:
+        if method == "POST" and seg == ["routes", "rulesets"]:
             return self._call(
-                service.routes_add,
-                body.get("type", ""),
-                body.get("value", ""),
+                service.routes_ruleset_create,
+                body.get("name", ""),
                 body.get("target", ""),
+                body.get("matchers") or [],
             )
+        if method == "POST" and len(seg) == 3 and seg[:2] == ["routes", "rulesets"]:
+            return self._call(
+                service.routes_ruleset_add, seg[2], body.get("matchers") or []
+            )
+        if (
+            method == "POST"
+            and len(seg) == 4
+            and seg[:2] == ["routes", "rulesets"]
+            and seg[3] == "rename"
+        ):
+            return self._call(
+                service.routes_ruleset_rename, seg[2], body.get("name", "")
+            )
+        if (
+            method == "POST"
+            and len(seg) == 4
+            and seg[:2] == ["routes", "rulesets"]
+            and seg[3] == "target"
+        ):
+            return self._call(
+                service.routes_ruleset_retarget, seg[2], body.get("target", "")
+            )
+        if (
+            method == "POST"
+            and len(seg) == 4
+            and seg[:2] == ["routes", "rulesets"]
+            and seg[3] == "update"
+        ):
+            return self._call(
+                service.routes_ruleset_update,
+                seg[2],
+                body.get("name", ""),
+                body.get("target", ""),
+                body.get("matchers") or [],
+            )
+        if method == "DELETE" and len(seg) == 3 and seg[:2] == ["routes", "rulesets"]:
+            return self._call(service.routes_ruleset_remove, seg[2])
         if method == "POST" and seg == ["routes", "reorder"]:
-            return self._call(service.routes_reorder, body.get("ids") or [])
+            return self._call(
+                service.routes_reorder, body.get("ids") or [], bool(body.get("flat"))
+            )
         if method == "POST" and seg == ["routes", "killswitch"]:
             return self._call(service.routes_killswitch, bool(body.get("enabled")))
         if method == "POST" and seg == ["routes", "lan"]:

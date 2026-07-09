@@ -159,11 +159,6 @@ def canonical(parsed: dict, *, masked: bool = False) -> str:
     return "\n".join(lines) + "\n"
 
 
-def suggest_name(parsed: dict) -> str:
-    """A reasonable default channel label when the user gives none: the host."""
-    return parsed["peer"]["endpoint_host"]
-
-
 # ---- alle metadata headers ---------------------------------------------
 #
 # Utilities for embedding alle bookkeeping (provider, country, city, port, ...)

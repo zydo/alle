@@ -17,17 +17,20 @@ omit the prefix.
   - [`alle providers`](#alle-providers)
     - [`alle providers add <provider>`](#alle-providers-add-provider)
     - [`alle providers ls [--json]`](#alle-providers-ls---json)
-    - [`alle providers rm <provider>... [-y|--yes]`](#alle-providers-rm-provider--y--yes)
+    - [`alle providers rm <provider>... [--all] [--dry-run] [-y|--yes]`](#alle-providers-rm-provider---all---dry-run--y--yes)
   - [`alle channels`](#alle-channels)
     - [`alle channels add <provider> …`](#alle-channels-add-provider-)
     - [`alle channels ls [--json|--ids|--refs]`](#alle-channels-ls---json--ids--refs)
     - [`alle channels setlabel <channel> [label]`](#alle-channels-setlabel-channel-label)
     - [`alle channels rm <channel>...`](#alle-channels-rm-channel)
   - [`alle routes`](#alle-routes)
-    - [`alle routes add <target> --<matcher>`](#alle-routes-add-target---matcher)
-    - [`alle routes ls [--channel <ref>] [--json]`](#alle-routes-ls---channel-ref---json)
+    - [`alle routes ruleset create <name> --via <target> --<matcher>...`](#alle-routes-ruleset-create-name---via-target---matcher)
+    - [`alle routes ruleset add <ruleset> --<matcher>...`](#alle-routes-ruleset-add-ruleset---matcher)
+    - [`alle routes ruleset rm <ruleset> [--dry-run]`](#alle-routes-ruleset-rm-ruleset---dry-run)
+    - [`alle routes ruleset rename <ruleset> <name>` / `retarget <ruleset> <target>`](#alle-routes-ruleset-rename-ruleset-name--retarget-ruleset-target)
+    - [`alle routes ls [--channel <ref>] [--flat] [--json]`](#alle-routes-ls---channel-ref---flat---json)
     - [`alle routes rm <id>...`](#alle-routes-rm-id)
-    - [`alle routes reorder <id>... [--json]`](#alle-routes-reorder-id---json)
+    - [`alle routes reorder <ruleset-id>... [--flat] [--json]`](#alle-routes-reorder-ruleset-id---flat---json)
     - [`alle routes killswitch [on|off]`](#alle-routes-killswitch-onoff)
     - [`alle routes lan [on|off]`](#alle-routes-lan-onoff)
   - [`alle locations`](#alle-locations)
@@ -125,7 +128,7 @@ NordVPN     token   ******8fb7
 Proton VPN  config  2 .conf files
 ```
 
-### `alle providers rm <provider>... [-y|--yes]`
+### `alle providers rm <provider>... [--all] [--dry-run] [-y|--yes]`
 
 Remove one or more providers **and all their channels and stored credentials**.
 Prompts for confirmation unless `-y` is given.
@@ -261,8 +264,8 @@ alle channels rm --provider nordvpn --all
 ## `alle routes`
 
 Rule-based routing through the router entrypoint. Rules are evaluated **top to
-bottom — first match wins**; use `alle routes reorder` or the Web UI Routes page
-to change evaluation order. Traffic that matches no rule goes
+bottom — first match wins**; use `alle routes reorder` or drag-reorder in the
+Web UI dashboard to change evaluation order. Traffic that matches no rule goes
 **direct (no VPN)** unless the [kill-switch](#alle-routes-killswitch-onoff) is on.
 
 Before any user rule, a **built-in LAN block** (on by default — see
@@ -270,76 +273,100 @@ Before any user rule, a **built-in LAN block** (on by default — see
 multicast destinations direct, so a catch-all VPN rule never cuts off printers,
 NAS boxes, router admin pages, or LAN discovery.
 
-The entrypoint's port is shown by `alle status` and by `routes add`/`routes ls`;
-it is allocated on the first daemon start and then never changes.
+The entrypoint's port is shown by `alle status` and by `routes ls`; it is
+allocated on the first daemon start and then never changes.
 
-### `alle routes add <target> --<matcher>`
+### `alle routes ruleset create <name> --via <target> --<matcher>...`
 
-Append one rule. `<target>` is where matched traffic exits:
+Create a named ruleset: a contiguous, ordered block of matchers that all share
+one exit target. `<target>` is where matched traffic exits:
 
 - `<provider>/<channel>` — a channel (must exist; see `alle channels ls --refs`),
 - `direct` — straight to the network, no VPN,
 - `block` — refuse the connection.
 
-Exactly one matcher per rule:
+Matcher flags may be repeated; creation is atomic, so a multi-domain ruleset
+lands in one transaction and one daemon reconcile:
 
-| Matcher               | Matches                                                    |
-| --------------------- | ---------------------------------------------------------- |
-| `--domain <d>`        | exactly `d`                                                |
-| `--domain-suffix <d>` | `d` and all its subdomains (dot-boundary)                  |
-| `--cidr <net>`        | destination IP in `net` (a bare IP means that one address) |
-| `--all`               | everything — the catch-all for "VPN by default"            |
+| Matcher               | Matches / inference                                         |
+| --------------------- | ----------------------------------------------------------- |
+| `--domain <d>`        | friendly form: bare domains become suffix, subdomains exact |
+| `--domain-exact <d>`  | advanced: exactly `d`                                       |
+| `--domain-suffix <d>` | advanced: `d` and all subdomains (dot-boundary)             |
+| `--cidr <net>`        | destination IP in `net` (a bare IP means that one address)  |
+| `--all`               | everything — the catch-all for "VPN by default"             |
 
 ```bash
-alle routes add nordvpn/united_states_1 --domain-suffix netflix.com
-alle routes add direct --cidr 192.168.0.0/16
-alle routes add block --domain tracker.example.com
-alle routes add nordvpn/japan_1 --all
+alle routes ruleset create Streaming --via nordvpn/united_states_1 --domain netflix.com --domain hulu.com
+alle routes ruleset create LocalDirect --via direct --cidr 192.168.0.0/16
+alle routes ruleset create BlockTrackers --via block --domain-exact tracker.example.com
+alle routes ruleset create DefaultVPN --via nordvpn/japan_1 --all
 ```
 
 Notes:
 
+- **Ruleset order is priority**: first matching ruleset wins. Matchers inside a
+  ruleset are unordered because they all exit the same way.
 - Domain rules work for HTTPS on any port (destinations are sniffed via SNI when
   the client sends an IP or uses SOCKS without a hostname).
 - `--cidr` matches IP-literal destinations; domain destinations are **not**
   resolved for CIDR matching.
-- If an earlier rule already covers the new one (e.g. `--domain-suffix
-  google.com` before `--domain api.google.com`), `routes add` warns that the new
-  rule is **shadowed** and will never match.
+- If an earlier ruleset already covers a matcher (e.g. `--domain google.com`
+  before `--domain api.google.com`), `routes ls` marks the later matcher as
+  **shadowed** and it will never match.
 
-### `alle routes ls [--channel <ref>] [--json]`
+### `alle routes ruleset add <ruleset> --<matcher>...`
 
-List rules in evaluation order: `ID`, `MATCH`, `TARGET`, and a `NOTE` marking
-shadowed rules. The header line shows the entrypoint address and its unmatched
-behavior. `--channel <name|provider/name>` filters to rules targeting one
-channel — useful before removing it.
+Add matcher(s) to an existing ruleset block. The new matchers inherit that
+ruleset's priority immediately; lower-priority duplicates are left in place and
+shown as shadowed rather than silently deleted.
+
+### `alle routes ruleset rm <ruleset> [--dry-run]`
+
+Remove a whole ruleset block. (A ruleset whose matchers are all removed via
+`routes rm` simply has no rows left, so it no longer appears.)
+
+### `alle routes ruleset rename <ruleset> <name>` / `retarget <ruleset> <target>`
+
+Rename a ruleset or change its exit target. Renaming is presentation-only and
+does not trigger a sing-box reconcile; retargeting does.
+
+### `alle routes ls [--channel <ref>] [--flat] [--json]`
+
+List rulesets in evaluation order. The header line shows the entrypoint address
+and its unmatched behavior. `--channel <name|provider/name>` filters to flat
+matcher rows targeting one channel — useful before removing it. `--flat` shows
+the raw matcher rows (`ID`, `RULESET`, `MATCH`, `TARGET`, `NOTE`) for debugging
+against sing-box logs.
 
 ```text
 Router entrypoint 127.0.0.1:54585 — 3 rule(s), unmatched → direct
-ID  MATCH                        TARGET                   NOTE
---  ---------------------------  -----------------------  ----------------------------
-r1  domain_suffix netflix.com    nordvpn/united_states_1
-r2  domain api.netflix.com       direct                   shadowed by r1 — never matches
-r3  ip_cidr 192.168.0.0/16       direct
+rs1  Streaming → nordvpn/united_states_1 (2 matcher(s))
+  r1  domain_suffix netflix.com
+  r2  domain_suffix hulu.com
+rs2  Direct exceptions → direct (1 matcher(s))
+  r3  ip_cidr 192.168.0.0/16
 ```
 
 ### `alle routes rm <id>...`
 
-Remove rules by id (`--dry-run` to preview). Unknown ids are reported all at
-once and nothing is removed.
+Remove matcher rows by id (`--dry-run` to preview). Unknown ids are reported all
+at once and nothing is removed.
 
 ```bash
 alle routes rm r2
 alle routes rm r1 r3 --dry-run
 ```
 
-### `alle routes reorder <id>... [--json]`
+### `alle routes reorder <ruleset-id>... [--flat] [--json]`
 
-Replace the evaluation order with a full list of rule ids. Pass every existing
-rule id exactly once; ids stay stable and only their order changes.
+Replace the ruleset-block evaluation order with a full list of ruleset ids. Pass
+every existing ruleset id exactly once; ids stay stable and only their order
+changes. `--flat` is a debug escape hatch that reorders raw rule ids, but refuses
+any permutation that would split a ruleset block.
 
 ```bash
-alle routes reorder r3 r1 r2
+alle routes reorder rs3 rs1 rs2
 ```
 
 ### `alle routes killswitch [on|off]`
@@ -461,7 +488,7 @@ Probe channels **now** (rather than waiting for the next background cycle) and p
 quick connectivity table: `LABEL`, `ID`, `PORT`, `COUNTRY`, `CITY`, `STATE`,
 `LATENCY` (probe latency), and `IP` (exit IP). With `--channel`, test just one channel by id.
 `STATE` is `Healthy`, or the failure reason (`Stopped` while the runtime is down, otherwise
-the probe error) — the same convention as [`alle status`](#alle-status).
+the probe error — e.g. `Timeout`, `Failed`) — the same convention as [`alle status`](#alle-status).
 
 ```text
 LABEL           ID                      PORT    COUNTRY        CITY        STATE     LATENCY  IP
@@ -548,8 +575,9 @@ stay blank until you run a per-row or all-channel **Probe** or **Speed Test**
 icon-only provider row plus an always-present "+" to add NordVPN or Proton VPN;
 token providers (NordVPN) pick a country and city from a searchable list, Proton
 VPN uploads a WireGuard `.conf`. Router rules can be added, deleted, and
-drag-reordered (first match wins), with shadow warnings and a kill-switch toggle
-(Unmatched Traffic). Channels a routing rule still targets can't be removed — the
+drag-reordered (first match wins), with an **Allow Non-VPN Traffic** toggle
+(Unmatched row) and a fixed **Priority 0 / LAN** row keeping local traffic
+direct. Channels a routing rule still targets can't be removed — the
 UI shows the exact rules to clear first, same as `alle channels rm`. A **Logs**
 page polls the local log tail. Lifecycle (start/stop/restart) is via the CLI;
 the masthead links to the project on GitHub.
@@ -611,7 +639,7 @@ running, with its version.
 ```text
 Login service: active (launchd).
   Unit: /Users/you/Library/LaunchAgents/com.github.zydo.alle.plist
-Daemon: running, version 0.1.1.
+Daemon: running, version 0.1.2.
 ```
 
 **Upgrades:** the service unit execs a stable shim, so `uv tool upgrade

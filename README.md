@@ -77,13 +77,13 @@ run at the same time.
 
 **Features**
 
-| Phase             | Status                                                                                  |
-| ----------------- | --------------------------------------------------------------------------------------- |
-| Core CLI          | Providers, channels, per-channel proxies, status, tests, logs, metrics                  |
-| Routing           | Router entrypoint with domain/CIDR rules, kill-switch, shadow lint, built-in LAN bypass |
-| Web UI            | Dashboard (channels, probe/speed, routes, kill-switch) + Logs page                      |
-| Desktop companion | Planned                                                                                 |
-| Distribution      | PyPI CLI package; native installers planned                                             |
+| Phase             | Status                                                                                                           |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Core CLI          | Providers, channels, per-channel proxies, status, tests, logs, metrics                                           |
+| Routing           | Ruleset-based router entrypoint with domain/CIDR/all matchers, kill-switch, CLI shadow lint, built-in LAN bypass |
+| Web UI            | Dashboard (channels, probe/speed, routes, kill-switch) + Logs page                                               |
+| Desktop companion | Planned                                                                                                          |
+| Distribution      | PyPI CLI package; native installers planned                                                                      |
 
 ## Install
 
@@ -251,20 +251,23 @@ rule to one. Its port is assigned once and stays stable (`alle status` shows it)
 so apps and future OS-level profiles can point at it permanently.
 
 ```bash
-alle routes add nordvpn/united_states_1 --domain-suffix netflix.com
-alle routes add direct --cidr 192.168.0.0/16
-alle routes add block --domain tracker.example.com
-alle routes add nordvpn/japan_1 --all       # catch-all: VPN by default
+alle routes ruleset create Streaming --via nordvpn/united_states_1 --domain netflix.com --domain hulu.com
+alle routes ruleset create LocalDirect --via direct --cidr 192.168.0.0/16
+alle routes ruleset create BlockTrackers --via block --domain-exact tracker.example.com
+alle routes ruleset create DefaultVPN --via nordvpn/japan_1 --all
 alle routes ls
 ```
 
-- **Matchers** (one per rule): `--domain` (exact), `--domain-suffix` (the domain
-  and its subdomains), `--cidr` (destination IP/CIDR — matches IP-literal
-  destinations; domain destinations are not resolved for matching), and `--all`.
-- **First match wins**, in evaluation order (`alle routes ls` shows it). Reorder
-  with `alle routes reorder r3 r1 r2` (a full id permutation). A rule that can
-  never match because an earlier rule covers it is flagged as *shadowed* when you
-  add it and in `routes ls`.
+- **Rulesets** are the authoring model: a named, ordered block of matchers that
+  all share one exit (`<provider>/<channel>`, `direct`, or `block`). Block order
+  is priority: **first matching ruleset wins**. Reorder blocks with
+  `alle routes reorder rs3 rs1 rs2`.
+- **Matchers** inside a ruleset are unordered because same-target matchers
+  commute. Use `--domain` for the friendly form (bare domains become suffix
+  matches, meaningful subdomains become exact matches), `--domain-exact` /
+  `--domain-suffix` for advanced overrides, `--cidr` for destination IP/CIDR,
+  and `--all` for a catch-all. A matcher that can never win because an earlier
+  ruleset covers it is flagged as *shadowed* in `routes ls`.
 - **Unmatched traffic goes direct** — without a VPN — like other modern VPN
   clients. To block unmatched traffic instead (a kill-switch for the router
   entrypoint), turn it on explicitly: `alle routes killswitch on`. Per-channel
@@ -305,10 +308,10 @@ This opens your browser to a single **Dashboard** (plus a **Logs** page):
   NordVPN, choose a **country and city from a searchable list** (no typing); for
   Proton VPN, upload a WireGuard `.conf` (with a link to the portal).
 - **Router rules** — add/delete rules, **drag to reorder** (first match wins),
-  see shadow-lint, and toggle the **kill-switch** (Unmatched Traffic card:
-  checked blocks unmatched destinations, unchecked lets them go direct). A
-  banner above the rules shows the **built-in LAN protection** (local traffic
-  goes direct ahead of every rule) with a toggle to turn it off.
+  and toggle **Allow Non-VPN Traffic** (the Unmatched row: on lets unmatched
+  destinations reach the Internet, off blocks them). A fixed **Priority 0 / LAN**
+  row at the top keeps local traffic direct ahead of every rule, with a toggle
+  to turn that protection off.
 - Start / stop / restart are host/CLI controls (`alle start|stop|restart`); the
   masthead links to the project on GitHub.
 
@@ -378,10 +381,8 @@ from `~/.alle/control_api.json` into the login page.
 
 Planned next steps:
 
-- Rule-based routing through a single local HTTP+SOCKS entry point.
 - More WireGuard-capable VPN providers. See
   [VPN Provider Research](docs/vpn-provider-research.md).
-- Web UI for managing channels and routing rules.
 - Desktop companion with OS-level VPN integration.
 - Windows support and broader distribution.
 

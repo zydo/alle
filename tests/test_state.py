@@ -9,19 +9,16 @@ import pytest
 
 from alle import paths
 from alle.state import ReferencedError, Store, config_signature
+from conftest import wg_config
 
-WG = {
-    "private_key": "PRIV=",
-    "address": ["10.5.0.2/32"],
-    "peer": {
-        "public_key": "PUB=",
-        "endpoint_host": "se1.example.com",
-        "endpoint_port": 51820,
-        "preshared_key": None,
-        "allowed_ips": ["0.0.0.0/0", "::/0"],
-        "keepalive": 25,
-    },
-}
+
+def _rule(store, mtype, value, target):
+    """Create a singleton ruleset and return its one rule row (the test
+    equivalent of the removed Store.add_rule shim)."""
+    return store.create_ruleset(target, target, [(mtype, value)])["rules"][0]
+
+
+WG = wg_config("se1.example.com")
 
 
 def _state_file():
@@ -247,11 +244,11 @@ def test_rules_get_stable_sequential_ids():
     store = Store.load()
     store.add_provider("nordvpn")
     store.add_channel("nordvpn", "US", "", dict(WG))
-    a = store.add_rule("domain_suffix", "netflix.com", "nordvpn/us_1")
-    b = store.add_rule("ip_cidr", "10.0.0.0/8", "direct")
+    a = _rule(store, "domain_suffix", "netflix.com", "nordvpn/us_1")
+    b = _rule(store, "ip_cidr", "10.0.0.0/8", "direct")
     assert [a["id"], b["id"]] == ["r1", "r2"]
     store.remove_rules(["r1"])
-    c = store.add_rule("all", "", "block")
+    c = _rule(store, "all", "", "block")
     assert c["id"] == "r3"  # ids are never reused while later ones exist
     assert [r["id"] for r in Store.load().rules()] == ["r2", "r3"]
 
@@ -260,16 +257,16 @@ def test_rule_channel_target_must_exist():
     store = Store.load()
     store.add_provider("nordvpn")
     with pytest.raises(ValueError, match="no channel 'nordvpn/us_1'"):
-        store.add_rule("domain", "a.com", "nordvpn/us_1")
+        _rule(store, "domain", "a.com", "nordvpn/us_1")
     # direct/block targets need no channel
-    assert store.add_rule("domain", "a.com", "direct")["id"] == "r1"
+    assert _rule(store, "domain", "a.com", "direct")["id"] == "r1"
 
 
 def test_referenced_channel_cannot_be_removed():
     store = Store.load()
     store.add_provider("nordvpn")
     ch = store.add_channel("nordvpn", "US", "", dict(WG))
-    store.add_rule("domain_suffix", "netflix.com", f"nordvpn/{ch.id}")
+    _rule(store, "domain_suffix", "netflix.com", f"nordvpn/{ch.id}")
 
     with pytest.raises(ReferencedError) as exc:
         store.remove_channel("nordvpn", ch.id)
@@ -319,7 +316,7 @@ def test_config_signature_tracks_router_changes():
     store.add_provider("nordvpn")
     store.add_channel("nordvpn", "US", "", dict(WG))
     before = config_signature(_read_raw())
-    store.add_rule("domain", "a.com", "nordvpn/us_1")
+    _rule(store, "domain", "a.com", "nordvpn/us_1")
     after_rule = config_signature(_read_raw())
     assert after_rule != before  # rule edits reconcile like channel edits
     store.set_killswitch(True)

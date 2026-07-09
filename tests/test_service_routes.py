@@ -6,19 +6,9 @@ import pytest
 
 from alle import cli, service
 from alle.state import Store
+from conftest import wg_config
 
-WG = {
-    "private_key": "PRIV=",
-    "address": ["10.5.0.2/32"],
-    "peer": {
-        "public_key": "PUB=",
-        "endpoint_host": "1.2.3.4",
-        "endpoint_port": 51820,
-        "preshared_key": None,
-        "allowed_ips": ["0.0.0.0/0", "::/0"],
-        "keepalive": 25,
-    },
-}
+WG = wg_config("1.2.3.4")
 
 
 @pytest.fixture(autouse=True)
@@ -33,56 +23,112 @@ def channel():
     return store.add_channel("nordvpn", "US", "", dict(WG))  # id: us_1
 
 
-# ---- routes_add ------------------------------------------------------------------
+def _add(mtype, value, target):
+    """Create a singleton ruleset (replaces the removed service.routes_add shim)."""
+    return service.routes_ruleset_create(
+        target, target, [{"type": mtype, "value": value}]
+    )
 
 
-def test_routes_add_returns_decorated_rule(channel):
-    result = service.routes_add("domain_suffix", "Netflix.COM", "nordvpn/us_1")
-    rule = result["rule"]
-    assert rule["id"] == "r1"
-    assert rule["match"] == "domain_suffix netflix.com"  # normalized
-    assert rule["target"] == "nordvpn/us_1"
-    assert result["shadowed_by"] is None
+# ---- rulesets ------------------------------------------------------------------
 
 
-def test_routes_add_accepts_brand_name_in_target(channel):
-    result = service.routes_add("domain", "a.com", "NordVPN/us_1")
-    assert result["rule"]["target"] == "nordvpn/us_1"
+def test_ruleset_create_returns_decorated_block(channel):
+    result = service.routes_ruleset_create(
+        "Streaming",
+        "nordvpn/us_1",
+        [{"value": "Netflix.COM"}, {"value": "api.netflix.com"}],
+    )
+    rs = result["ruleset"]
+    assert rs["id"] == "rs1"
+    assert rs["name"] == "Streaming"
+    assert rs["target"] == "nordvpn/us_1"
+    assert [r["id"] for r in rs["rules"]] == ["r1", "r2"]
+    assert [r["match"] for r in rs["rules"]] == [
+        "domain_suffix netflix.com",
+        "domain api.netflix.com",
+    ]
 
 
-def test_routes_add_rejects_unknown_provider_and_channel(channel):
+def test_ruleset_create_accepts_brand_name_and_rejects_bad_targets(channel):
+    result = service.routes_ruleset_create("API", "NordVPN/us_1", [{"value": "a.com"}])
+    assert result["ruleset"]["target"] == "nordvpn/us_1"
     with pytest.raises(service.ServiceError, match="unknown provider 'nope'"):
-        service.routes_add("domain", "a.com", "nope/us_1")
+        service.routes_ruleset_create("Bad", "nope/us_1", [{"value": "a.com"}])
     with pytest.raises(service.ServiceError, match="no channel 'nordvpn/gone_1'"):
-        service.routes_add("domain", "a.com", "nordvpn/gone_1")
+        service.routes_ruleset_create("Bad", "nordvpn/gone_1", [{"value": "a.com"}])
 
 
-def test_routes_add_rejects_bad_values(channel):
+def test_ruleset_create_rejects_bad_values(channel):
     with pytest.raises(service.ServiceError, match="not a valid domain"):
-        service.routes_add("domain", "not a domain", "direct")
+        service.routes_ruleset_create("Bad", "direct", [{"value": "not a domain"}])
     with pytest.raises(service.ServiceError, match="not a valid IP or CIDR"):
-        service.routes_add("ip_cidr", "999.9.9.9/40", "direct")
+        service.routes_ruleset_create(
+            "Bad", "direct", [{"type": "ip_cidr", "value": "999.9.9.9/40"}]
+        )
     with pytest.raises(service.ServiceError, match="not valid"):
-        service.routes_add("domain", "a.com", "sideways")
+        service.routes_ruleset_create("Bad", "sideways", [{"value": "a.com"}])
 
 
-def test_routes_add_warns_when_shadowed(channel):
-    service.routes_add("domain_suffix", "google.com", "direct")
-    result = service.routes_add("domain", "api.google.com", "nordvpn/us_1")
-    assert result["shadowed_by"] == "r1"
+def test_ruleset_add_inherits_block_priority_and_reports_later_shadow(channel):
+    service.routes_ruleset_create("US", "nordvpn/us_1", [{"value": "google.com"}])
+    service.routes_ruleset_create("Direct", "direct", [{"value": "api.google.com"}])
+    result = service.routes_ruleset_add("rs1", [{"value": "api.google.com"}])
+    assert [r["id"] for r in result["ruleset"]["rules"]] == ["r1", "r3"]
+    data = service.routes_list()
+    later = data["rulesets"][1]["rules"][0]
+    assert later["id"] == "r2" and later["shadowed_by"] == "r1"
+
+
+def test_ruleset_update_keeps_id_position_name_and_matchers(channel):
+    a = service.routes_ruleset_create("A", "nordvpn/us_1", [{"value": "a.com"}])
+    service.routes_ruleset_create("B", "direct", [{"value": "b.com"}])
+    rsid = a["ruleset"]["id"]
+
+    result = service.routes_ruleset_update(
+        rsid, "Renamed", "nordvpn/us_1", [{"value": "x.com"}, {"value": "10.0.0.0/8"}]
+    )
+    rs = result["ruleset"]
+    assert rs["id"] == rsid  # id + position preserved
+    assert rs["name"] == "Renamed"
+    assert rs["target"] == "nordvpn/us_1"
+    assert [r["match"] for r in rs["rules"]] == [
+        "domain_suffix x.com",
+        "ip_cidr 10.0.0.0/8",
+    ]
+    assert [r["id"] for r in service.routes_list()["rulesets"]] == [rsid, "rs2"]
+
+
+def test_ruleset_update_retargets_and_validates(channel):
+    a = service.routes_ruleset_create("A", "nordvpn/us_1", [{"value": "a.com"}])
+    rsid = a["ruleset"]["id"]
+    retargeted = service.routes_ruleset_update(
+        rsid, "A", "direct", [{"value": "a.com"}]
+    )
+    assert retargeted["ruleset"]["target"] == "direct"
+    with pytest.raises(service.ServiceError, match="name cannot be empty"):
+        service.routes_ruleset_update(rsid, "  ", "direct", [{"value": "a.com"}])
+    with pytest.raises(service.ServiceError, match="not a valid domain"):
+        service.routes_ruleset_update(rsid, "A", "direct", [{"value": "xxx"}])
+    with pytest.raises(service.ServiceError, match="at least one matcher"):
+        service.routes_ruleset_update(rsid, "A", "direct", [])
 
 
 # ---- routes_list / routes_remove / killswitch -------------------------------------
 
 
 def test_routes_list_annotates_and_filters(channel):
-    service.routes_add("domain_suffix", "google.com", "nordvpn/us_1")
-    service.routes_add("domain", "api.google.com", "direct")  # shadowed by r1
-    service.routes_add("ip_cidr", "10.0.0.0/8", "block")
+    service.routes_ruleset_create("US", "nordvpn/us_1", [{"value": "google.com"}])
+    service.routes_ruleset_create("Direct", "direct", [{"value": "api.google.com"}])
+    service.routes_ruleset_create(
+        "Block local", "block", [{"type": "ip_cidr", "value": "10.0.0.0/8"}]
+    )
 
     data = service.routes_list()
     assert [r["id"] for r in data["rules"]] == ["r1", "r2", "r3"]
+    assert [rs["id"] for rs in data["rulesets"]] == ["rs1", "rs2", "rs3"]
     assert data["rules"][1]["shadowed_by"] == "r1"
+    assert data["rulesets"][1]["shadowed_count"] == 1
     assert data["router"]["rule_count"] == 3
     assert data["router"]["unmatched"] == "direct"
 
@@ -93,14 +139,14 @@ def test_routes_list_annotates_and_filters(channel):
 
 
 def test_routes_remove_reports_all_missing_ids(channel):
-    service.routes_add("domain", "a.com", "direct")
+    _add("domain", "a.com", "direct")
     with pytest.raises(service.ServiceError, match="r7, r9"):
         service.routes_remove(["r1", "r7", "r9"])
     assert [r["id"] for r in Store.load().rules()] == ["r1"]  # nothing removed
 
 
 def test_routes_remove_dry_run_then_real(channel):
-    service.routes_add("domain", "a.com", "direct")
+    _add("domain", "a.com", "direct")
     dry = service.routes_remove(["r1"], dry_run=True)
     assert dry["dry_run"] is True
     assert [r["id"] for r in Store.load().rules()] == ["r1"]
@@ -110,39 +156,45 @@ def test_routes_remove_dry_run_then_real(channel):
 
 
 def test_routes_reorder_persists_and_recomputes_shadow_lint(channel):
-    service.routes_add("domain", "api.google.com", "nordvpn/us_1")
-    service.routes_add("domain_suffix", "google.com", "direct")
-    service.routes_add("ip_cidr", "10.0.0.0/8", "block")
+    service.routes_ruleset_create("API", "nordvpn/us_1", [{"value": "api.google.com"}])
+    service.routes_ruleset_create("Google", "direct", [{"value": "google.com"}])
+    service.routes_ruleset_create(
+        "Block local", "block", [{"type": "ip_cidr", "value": "10.0.0.0/8"}]
+    )
 
-    result = service.routes_reorder(["r2", "r1", "r3"])
+    result = service.routes_reorder(["rs2", "rs1", "rs3"])
 
     assert result["changed"] is True
-    assert [r["id"] for r in result["rules"]] == ["r2", "r1", "r3"]
-    assert result["rules"][1]["shadowed_by"] == "r2"
-    assert [r["id"] for r in service.routes_list()["rules"]] == ["r2", "r1", "r3"]
+    assert [rs["id"] for rs in result["rulesets"]] == ["rs2", "rs1", "rs3"]
+    assert result["rulesets"][1]["rules"][0]["shadowed_by"] == "r2"
+    assert [rs["id"] for rs in service.routes_list()["rulesets"]] == [
+        "rs2",
+        "rs1",
+        "rs3",
+    ]
 
 
 def test_routes_reorder_rejects_invalid_permutations_without_mutating(channel):
-    service.routes_add("domain", "a.com", "direct")
-    service.routes_add("domain", "b.com", "direct")
-    service.routes_add("domain", "c.com", "direct")
+    service.routes_ruleset_create("A", "direct", [{"value": "a.com"}])
+    service.routes_ruleset_create("B", "direct", [{"value": "b.com"}])
+    service.routes_ruleset_create("C", "direct", [{"value": "c.com"}])
 
     cases = [
-        (["r1", "r1", "r3"], "duplicate rule"),
-        (["r1", "r2", "r9"], "unknown rule"),
-        (["r1", "r2"], "missing rule"),
+        (["rs1", "rs1", "rs3"], "duplicate ruleset"),
+        (["rs1", "rs2", "rs9"], "unknown ruleset"),
+        (["rs1", "rs2"], "missing ruleset"),
     ]
     for ids, msg in cases:
         with pytest.raises(service.ServiceError, match=msg):
             service.routes_reorder(ids)
-        assert [r["id"] for r in Store.load().rules()] == ["r1", "r2", "r3"]
+        assert [rs["id"] for rs in Store.load().rulesets()] == ["rs1", "rs2", "rs3"]
 
 
 def test_routes_reorder_noop_is_reported(channel):
-    service.routes_add("domain", "a.com", "direct")
-    result = service.routes_reorder(["r1"])
+    service.routes_ruleset_create("A", "direct", [{"value": "a.com"}])
+    result = service.routes_reorder(["rs1"])
     assert result["changed"] is False
-    assert [r["id"] for r in result["rules"]] == ["r1"]
+    assert [rs["id"] for rs in result["rulesets"]] == ["rs1"]
 
 
 def test_killswitch_toggles_unmatched_behavior():
@@ -176,8 +228,8 @@ def test_status_snapshot_carries_router_info():
 
 
 def test_referenced_channel_removal_is_blocked_with_fix_commands(channel):
-    service.routes_add("domain_suffix", "netflix.com", "nordvpn/us_1")
-    service.routes_add("all", "", "nordvpn/us_1")
+    _add("domain_suffix", "netflix.com", "nordvpn/us_1")
+    _add("all", "", "nordvpn/us_1")
 
     with pytest.raises(service.ServiceError) as exc:
         service.channel_remove_many(["us_1"])
@@ -193,22 +245,22 @@ def test_referenced_channel_removal_is_blocked_with_fix_commands(channel):
 
 
 def test_referenced_provider_removal_is_blocked(channel):
-    service.routes_add("domain", "a.com", "nordvpn/us_1")
+    _add("domain", "a.com", "nordvpn/us_1")
     with pytest.raises(service.ServiceError, match="alle routes rm r1"):
         service.provider_remove_many(["nordvpn"])
     assert Store.load().has_provider("nordvpn")
 
 
 def test_unreferenced_removal_works_after_rules_are_gone(channel):
-    service.routes_add("domain", "a.com", "nordvpn/us_1")
+    _add("domain", "a.com", "nordvpn/us_1")
     service.routes_remove(["r1"])
     result = service.channel_remove_many(["us_1"])
     assert result["channels"][0]["channel"] == "us_1"
 
 
 def test_direct_and_block_targets_never_block_removal(channel):
-    service.routes_add("domain", "a.com", "direct")
-    service.routes_add("domain", "b.com", "block")
+    _add("domain", "a.com", "direct")
+    _add("domain", "b.com", "block")
     assert service.channel_remove_many(["us_1"])["channels"]
 
 
@@ -222,15 +274,37 @@ def run_cli(args, capsys):
 
 def test_cli_routes_round_trip(channel, capsys):
     out = run_cli(
-        ["routes", "add", "nordvpn/us_1", "--domain-suffix", "netflix.com"], capsys
+        [
+            "routes",
+            "ruleset",
+            "create",
+            "Streaming",
+            "--via",
+            "nordvpn/us_1",
+            "--domain",
+            "netflix.com",
+        ],
+        capsys,
     )
-    assert "Added rule r1: domain_suffix netflix.com → nordvpn/us_1." in out
+    assert "Added ruleset rs1 'Streaming': 1 matcher(s) → nordvpn/us_1." in out
 
-    out = run_cli(["routes", "add", "direct", "--domain", "api.netflix.com"], capsys)
-    assert "WARNING: shadowed by earlier rule r1" in out
+    out = run_cli(
+        [
+            "routes",
+            "ruleset",
+            "create",
+            "Direct",
+            "--via",
+            "direct",
+            "--domain",
+            "api.netflix.com",
+        ],
+        capsys,
+    )
+    assert "shadowed by earlier rule r1" in out
 
-    out = run_cli(["routes", "reorder", "r2", "r1"], capsys)
-    assert "Reordered 2 rules" in out
+    out = run_cli(["routes", "reorder", "rs2", "rs1"], capsys)
+    assert "Reordered 2 rulesets" in out
     assert "WARNING:" not in out
 
     out = run_cli(["routes", "killswitch", "on"], capsys)
@@ -244,14 +318,17 @@ def test_cli_routes_round_trip(channel, capsys):
     assert "LAN direct ON" in out and "10.0.0.0/8" in out
 
     out = run_cli(["routes", "rm", "r1", "r2"], capsys)
-    assert "Removed rule r1" in out and "Removed rule r2" in out
+    assert "Removed matcher r1" in out and "Removed matcher r2" in out
 
     out = run_cli(["routes", "ls"], capsys)
-    assert "No routing rules" in out
+    assert "No routing rulesets" in out
 
 
 def test_cli_blocked_channel_rm_shows_blockers(channel, capsys):
-    run_cli(["routes", "add", "nordvpn/us_1", "--all"], capsys)
+    run_cli(
+        ["routes", "ruleset", "create", "Default", "--via", "nordvpn/us_1", "--all"],
+        capsys,
+    )
     with pytest.raises(SystemExit) as exc:
         cli.main(["channels", "rm", "us_1"])
     assert "alle routes rm r1" in str(exc.value)

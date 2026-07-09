@@ -3,48 +3,48 @@
 import { api, esc, toast, modal, confirmDialog, customSelectHTML, wireCustomSelects, bytes, mbps } from "./core.js";
 
 const GAUGE = `<svg class="ico" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4z"/><path d="m13.4 10.6 2.6-2.6"/><path d="M3.5 18a9 9 0 1 1 17 0"/></svg>`;
+const GRIP = `<svg class="ico" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>`;
+const GRAB = `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 11V6a2 2 0 0 0-4 0"/><path d="M14 10V4a2 2 0 0 0-4 0v2"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg>`;
+const COPY = `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+const PEN = `<svg class="pen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>`;
 const PROVIDER_ICONS = {
   nordvpn: "/nordvpn.svg",
   protonvpn: "/protonvpn.svg",
 };
-const ROUTE_MATCH_OPTIONS = [
-  { value: "domain_suffix", label: "Domain suffix" },
-  { value: "domain", label: "Exact domain" },
-  { value: "ip_cidr", label: "IP CIDR" },
-  { value: "all", label: "All traffic" },
-];
 
 const SHELL = `
   <div class="dashboard-shell">
     <section class="entry compact dash-entry rise" id="entry" hidden>
-      <div class="entry-head"><span class="eyebrow">Router entrypoint</span></div>
-      <p class="entry-addr"><span class="scheme">http://</span><span id="entry-addr"></span></p>
+      <div class="entry-row">
+        <span class="entry-bead" aria-hidden="true"></span>
+        <span class="entry-label">Router Entrypoint</span>
+        <span class="entry-div" aria-hidden="true"></span>
+        <span class="entry-addr"><span class="scheme">http://</span><span id="entry-addr"></span><span class="entry-copy">${COPY}</span></span>
+      </div>
     </section>
     <section class="dash-panel dash-panel-channels rise">
-      <div class="table-title"><span class="eyebrow">Channels</span>
-        <div class="header-actions">
-          <button class="btn primary" id="add-channel">+ Add channel</button>
-        </div>
-      </div>
+      <div class="table-title"><span class="eyebrow">Channels</span></div>
       <div id="channels"></div>
     </section>
     <section class="dash-panel dash-panel-routes rise">
-      <div class="table-title"><span class="eyebrow">Router rules</span>
-        <button class="btn primary" id="add-rule">+ Add rule</button></div>
-      <p class="route-banner">Per-channel ports take priority and reach their VPN directly. Rules below apply only to the router entrypoint — first match wins.</p>
+      <div class="table-title"><span class="eyebrow">Router rules</span></div>
+      <p class="route-banner">When a matcher (domain or IP) appears in multiple rules, <b>the first match wins</b>. Drag to reorder.</p>
       <div id="routes"></div>
     </section>
   </div>`;
 
 let el = {};
 let status = null;
-let rules = [];
+let rulesets = [];
 let router = null;
 let catalog = [];
 let measured = new Map();
 let busy = new Set();
 let dragRuleId = null;
 let paused = false;
+// Pending ruleset-id order staged by dragging; null when there is no un-applied
+// change. Apply posts this order; refreshRoutes clears it.
+let pendingIds = null;
 let refreshStatus = () => { };
 
 export function mount(view, ctx) {
@@ -55,8 +55,6 @@ export function mount(view, ctx) {
     channels: view.querySelector("#channels"), routes: view.querySelector("#routes"),
     probeAll: null, speedAll: null,
   };
-  view.querySelector("#add-channel").onclick = openAddChannel;
-  view.querySelector("#add-rule").onclick = openAddRule;
   view.addEventListener("click", (e) => {
     const t = e.target.closest("[data-copy]");
     if (t?.dataset.copy) { copy(t.dataset.copy); e.stopPropagation(); }
@@ -66,17 +64,22 @@ export function mount(view, ctx) {
   el.routes.addEventListener("dragstart", onRouteDragStart);
   el.routes.addEventListener("dragover", onRouteDragOver);
   el.routes.addEventListener("drop", onRouteDrop);
+  el.routes.addEventListener("dragend", onRouteDragEnd);
   refreshRoutes();
 }
 
-export function unmount() { el = {}; status = null; rules = []; router = null; measured = new Map(); busy = new Set(); dragRuleId = null; paused = false; }
+export function unmount() { el = {}; status = null; rulesets = []; router = null; measured = new Map(); busy = new Set(); dragRuleId = null; paused = false; pendingIds = null; }
 
 export function onStatus(s) {
   status = s;
   if (!el.entry) return;
   renderEntry(s);
   if (!paused) renderChannels();
-  if (router) renderRoutes();
+  // Never rebuild the routes DOM while a drag is in progress — doing so
+  // detaches the node being dragged and reverts the staged order. The routes
+  // panel is reconciled on demand by refreshRoutes(); the periodic tick only
+  // needs to refresh channels/entry above.
+  if (router && !dragRuleId) renderRoutes();
 }
 
 function renderEntry(s) {
@@ -111,10 +114,6 @@ function chanKey(c) { return `${c.provider}/${c.name}`; }
 function loc(c) { return c.city && !["(Unknown)", "(Any City)"].includes(c.city) ? `${c.city}, ${c.country}` : c.country; }
 function spin(key, kind, icon) { return busy.has(key) || busy.has(`${key}:${kind}`) ? '<span class="spinner small"></span>' : icon; }
 function isSet(value) { return value !== null && value !== undefined; }
-function channelOptionLabel(c) {
-  const key = chanKey(c);
-  return c.label ? `${c.label} (${key})` : key;
-}
 function syncHeaderBusy() {
   el.probeAll = el.channels?.querySelector("#probe-all");
   el.speedAll = el.channels?.querySelector("#speed-all");
@@ -134,8 +133,8 @@ function chanRow(c) {
       <div class="ref">${esc(key)}</div></span>
     <span class="loc" title="${esc(loc(c))}">${esc(loc(c))}</span>
     <span class="port copyable" data-copy="http://127.0.0.1:${esc(c.port_number)}" title="Click to copy">${esc(c.port)}</span>
-    <span class="lat">${isSet(m.latency_ms) ? `${esc(m.latency_ms)} ms` : ""}</span>
     <span class="ip">${esc(m.ip || "")}</span>
+    <span class="lat">${isSet(m.latency_ms) ? `${esc(m.latency_ms)} ms` : ""}</span>
     <span class="mono">${m.metrics ? bytes(m.metrics.sent) : ""}</span>
     <span class="mono">${m.metrics ? bytes(m.metrics.received) : ""}</span>
     <span class="mono">${speed.download_bps ? mbps(speed.download_bps) : ""}</span>
@@ -150,16 +149,13 @@ function chanRow(c) {
 
 function renderChannels() {
   const chans = status?.channels || [];
-  if (!status?.running && chans.length === 0) {
-    el.channels.innerHTML = `<div class="stopped"><div class="big">Stopped</div>alle isn't running. Use Start above or <code>alle start</code>.</div>`;
-    return;
-  }
+  const addRow = `<div class="row dashchan add" data-add-channel role="button" tabindex="0"><span class="add-cell" aria-hidden="true">＋</span><span class="add-label">Add Channel</span></div>`;
   if (!chans.length) {
-    el.channels.innerHTML = `<div class="empty"><div class="big">No channels</div>Use + Add channel to choose a provider and create one.</div>`;
+    el.channels.innerHTML = `<div class="grid">${addRow}</div>`;
     return;
   }
-  const head = `<div class="row dashchan head"><span>Channel</span><span>Location</span><span>Port</span><span>Latency</span><span>IP</span><span>Sent</span><span>Received</span><span>Down Speed</span><span>Up Speed</span><span class="row-actions channel-actions channel-all-actions"><button class="icon-btn" id="probe-all" title="Probe all" aria-label="Probe all" data-probe-all>◉</button><button class="icon-btn" id="speed-all" title="Speed test all" aria-label="Speed test all" data-speed-all>${GAUGE}</button></span></div>`;
-  el.channels.innerHTML = `<div class="grid">${head}${chans.map(chanRow).join("")}</div>`;
+  const head = `<div class="row dashchan head"><span>Channel</span><span>Location</span><span>Port</span><span>IP</span><span>Latency</span><span>Sent</span><span>Received</span><span>Down SPD</span><span>Up SPD</span><span class="row-actions channel-actions channel-all-actions"><button class="icon-btn" id="probe-all" title="Probe all" aria-label="Probe all" data-probe-all>◉</button><button class="icon-btn" id="speed-all" title="Speed test all" aria-label="Speed test all" data-speed-all>${GAUGE}</button></span></div>`;
+  el.channels.innerHTML = `<div class="grid">${head}${chans.map(chanRow).join("")}${addRow}</div>`;
   syncHeaderBusy();
 }
 
@@ -185,6 +181,7 @@ async function runTest(channel, speed) {
 }
 
 async function onChannelClick(e) {
+  if (e.target.closest("[data-add-channel]")) { openAddChannel(); return; }
   if (e.target.closest("[data-probe-all]")) return runTest(null, false);
   if (e.target.closest("[data-speed-all]")) return runTest(null, true);
   const row = e.target.closest(".row.dashchan.body");
@@ -231,107 +228,178 @@ function startRelabel(rowEl, c, current) {
 async function refreshRoutes() {
   const res = await api.get("/api/v1/routes");
   if (!res.ok) { toast(res.error, "err"); return; }
-  rules = res.data.rules || [];
+  rulesets = res.data.rulesets || [];
   router = res.data.router || {};
+  pendingIds = null; // fresh from the server — no staged change
   renderRoutes();
 }
 
 function targetLabel(target) {
   if (target === "direct") return { name: "Direct", ref: "No VPN" };
-  if (target === "block") return { name: "Block", ref: "Drop traffic" };
+  if (target === "block") return { name: "Block", ref: "Drop Traffic" };
   const c = (status?.channels || []).find((x) => chanKey(x) === target);
   return c ? { name: c.label || c.name, ref: target } : { name: target, ref: "channel ref" };
 }
 
-const MATCH_TYPE_LABEL = { domain: "domain", domain_suffix: "domain suffix", ip_cidr: "IP CIDR", all: "" };
+function rulesetDisplayName(rs) {
+  return rs.name || targetLabel(rs.target).name;
+}
 
-function routeRow(r) {
-  const target = targetLabel(r.target);
-  const valueLine = r.type === "all" ? "all traffic" : (r.value || "");
-  const typeLine = MATCH_TYPE_LABEL[r.type] || r.type;
-  const typeHtml = typeLine ? `<div class="ref">${esc(typeLine)}</div>` : "";
-  return `<div class="row route body" draggable="true" data-id="${esc(r.id)}"><span class="route-handle" title="Drag to reorder" aria-label="${esc(r.id)}">⋮⋮</span>
-    <span class="route-match"><div class="name">${esc(valueLine)}</div>${typeHtml}</span>
-    <span class="target-label"><div class="name">${esc(target.name)}</div><div class="ref">${esc(target.ref)}</div></span>
-    <span class="row-actions"><button class="icon-btn danger" title="Remove" aria-label="Remove" data-route-remove="${esc(r.id)}">×</button></span></div>`;
+function orderedRulesets() {
+  if (!pendingIds) return rulesets;
+  const byId = new Map(rulesets.map((rs) => [rs.id, rs]));
+  const ordered = [];
+  for (const id of pendingIds) {
+    if (byId.has(id)) ordered.push(byId.get(id));
+  }
+  // rulesets not in the staged order (e.g. added mid-drag) keep their place at the end
+  for (const rs of rulesets) {
+    if (!pendingIds.includes(rs.id)) ordered.push(rs);
+  }
+  return ordered;
+}
+
+function rulesetBar(rs, index) {
+  const channelLabel = targetLabel(rs.target).name;
+  const name = rulesetDisplayName(rs);
+  const isChannel = rs.target !== "direct" && rs.target !== "block";
+  const rules = rs.rules || [];
+  const hasAll = rules.some((r) => r.type === "all");
+  const n = rules.length;
+  const addrLabel = n === 1 ? "matcher" : "matchers";
+  const addrsInner = hasAll
+    ? `<span class="ct">All</span>${PEN}`
+    : `<span class="ct">${n}</span><span class="lb">${esc(addrLabel)}</span>${PEN}`;
+  const via = isChannel
+    ? `<span class="rule-via"><span class="vw">via</span><span class="vch">${esc(channelLabel)}</span></span>`
+    : "";
+  return `<div class="rule-row" draggable="true" data-id="${esc(rs.id)}">
+    <div class="rule-handle" title="Drag to reorder" aria-label="Drag ${esc(name)} to reorder">
+      <span class="hh rest">${GRIP} Priority ${index + 1}</span>
+      <span class="hh sort">${GRAB} Sort</span>
+    </div>
+    <div class="rule-name" title="${esc(name)}">${esc(name)}</div>
+    <button class="rule-addrs" data-id-edit="${esc(rs.id)}" title="Edit matchers">${addrsInner}</button>
+    ${via}
+    <button class="icon-btn danger rule-del" title="Remove ruleset" aria-label="Remove ruleset" data-id-remove="${esc(rs.id)}">×</button>
+  </div>`;
 }
 
 function renderRoutes() {
-  const head = `<div class="row route head"><span aria-hidden="true"></span><span>Match</span><span>Via Channel</span><span></span></div>`;
-  const body = rules.length ? rules.map(routeRow).join("") : `<div class="empty inset"><div class="big">No rules</div>Unmatched traffic currently goes ${router?.unmatched || "direct"}.</div>`;
+  const list = orderedRulesets();
   const lanOn = router?.lan_direct !== false;
-  const lan = `<div class="lan-banner${lanOn ? "" : " off"}">
-    <span class="lan-copy">${lanOn
-      ? `LAN traffic (printers, NAS, router admin, local discovery, etc.) always bypass VPN`
-      : `<b>Warning:</b> LAN traffic may go through VPN according to the rules below, some devices (printers, NAS, router admin, local discovery, etc.) may not be accessible`}</span>
-    <span class="kill-toggle-wrap">
-      <span class="kill-toggle-state">${lanOn ? "ON" : "OFF"}</span>
-      <button class="toggle ${lanOn ? "on" : ""}" id="dash-lan" role="switch" aria-checked="${lanOn}" aria-label="LAN direct" title="Send LAN/local destinations direct, ahead of all rules"><span class="toggle-knob"></span></button>
-    </span>
+  const lanBar = `<div class="rule-row lan${lanOn ? "" : " off"}">
+    <div class="lan-priority">Priority 0</div>
+    <div class="lan-text">${lanOn
+      ? `LAN traffic (printers, NAS, router admin, local discovery, etc.) bypass VPN`
+      : `LAN traffic follows the rules below; local devices (printers, NAS, router admin, local discovery, etc.) may not be reachable`}</div>
+    <span class="toggle ${lanOn ? "on" : ""}" data-lan-toggle role="button" tabindex="0" aria-label="Toggle LAN/local direct"><span class="toggle-knob"></span></span>
   </div>`;
-  const on = !!router?.killswitch;
-  const kill = `<div class="kill-card">
-    <div class="kill-card-head">
-      <div class="kill-copy">
-        <span class="kill-title">Unmatched Traffic</span>
-        <p class="kill-content">For traffic that matches none of the channels and rules above, this controls whether it reaches the Internet directly (no VPN) or is blocked. Off by default, so you keep normal Internet access alongside your VPN traffic.</p>
-      </div>
-      <div class="kill-toggle-wrap">
-        <span class="kill-toggle-label">Kill-switch</span>
-        <span class="kill-toggle-state">${on ? "ON" : "OFF"}</span>
-        <button class="toggle ${on ? "on danger" : ""}" id="dash-kill" role="switch" aria-checked="${on}" aria-label="Kill-switch" title="Block traffic that matches no rule"><span class="toggle-knob"></span></button>
-      </div>
-    </div>
-    <div class="kill-states">
-      <div class="kill-state"><span class="kill-state-label">Kill-switch off</span><span class="kill-state-desc">Unmatched traffic goes direct — normal Internet access for anything not routed through a channel or rule.</span></div>
-      <div class="kill-state"><span class="kill-state-label">Kill-switch on</span><span class="kill-state-desc">Unmatched traffic is blocked — only matched traffic reaches the Internet. Per-channel ports keep working.</span></div>
-    </div>
+  const addRow = `<div class="rule-row add" data-add-rule role="button" tabindex="0"><span class="rule-add-cell" aria-hidden="true">＋</span><span class="add-label">Add Rule</span></div>`;
+  const bars = list.map((rs, i) => rulesetBar(rs, i)).join("");
+  const ks = !!router?.killswitch;
+  const allow = !ks;
+  const unmatchedRow = `<div class="rule-row unmatched${allow ? "" : " off"}">
+    <div class="unmatched-priority">Unmatched</div>
+    <div class="unmatched-text">For all other Internet traffic that is not matched by any of the VPN rulesets above, control whether you want it to go to the Internet.</div>
+    <div class="unmatched-control"><span class="unmatched-label">Allow Non-VPN Traffic</span><span class="toggle ${allow ? "on" : ""}" data-unmatched-toggle role="button" tabindex="0" aria-label="Toggle allow non-VPN traffic"><span class="toggle-knob"></span></span></div>
   </div>`;
-  el.routes.innerHTML = `${lan}<div class="grid route-grid">${rules.length ? head : ""}${body}</div>${kill}`;
-  el.routes.querySelector("#dash-kill").onclick = () => toggleKillswitch({ target: { checked: !on } });
-  el.routes.querySelector("#dash-lan").onclick = () => toggleLanDirect(!lanOn);
+  const body = lanBar + bars + addRow + unmatchedRow;
+  const dirty = !!pendingIds;
+  const applyBar = dirty ? `<div class="apply-bar">
+    <span class="apply-copy">Order changed — drag more, or apply to save.</span>
+    <span class="apply-actions"><button class="btn ghost" id="dash-reorder-cancel">Cancel</button><button class="btn primary" id="dash-reorder-apply">Apply new order</button></span>
+  </div>` : "";
+  el.routes.innerHTML = `<div class="ruleset-list ${dirty ? "dirty" : ""}">${body}</div>${applyBar}`;
+  el.routes.querySelector("[data-unmatched-toggle]").onclick = () => toggleKillswitch({ target: { checked: !ks } });
+  el.routes.querySelector("[data-lan-toggle]").onclick = () => toggleLanDirect(!lanOn);
+  if (dirty) {
+    el.routes.querySelector("#dash-reorder-apply").onclick = applyReorder;
+    el.routes.querySelector("#dash-reorder-cancel").onclick = cancelReorder;
+  }
 }
 
 async function onRouteClick(e) {
-  const id = e.target.closest("[data-route-remove]")?.dataset.routeRemove;
-  if (!id) return;
-  if (!(await confirmDialog("Remove rule", `Remove rule ${id}?`, { confirmText: "Remove", danger: true }))) return;
-  const res = await api.del(`/api/v1/routes/${encodeURIComponent(id)}`);
-  if (res.ok) { toast(`Removed ${id}.`); refreshRoutes(); refreshStatus(); } else toast(res.error, "err");
+  if (e.target.closest("[data-add-rule]")) { openAddRule(); return; }
+  const editId = e.target.closest("[data-id-edit]")?.dataset.idEdit;
+  if (editId) { openEditRuleset(editId); return; }
+  const removeId = e.target.closest("[data-id-remove]")?.dataset.idRemove;
+  if (!removeId) return;
+  const rs = rulesets.find((r) => r.id === removeId);
+  const name = rs ? rulesetDisplayName(rs) : removeId;
+  if (!(await confirmDialog("Remove ruleset", `Remove the ruleset "${name}"?`, { confirmText: "Remove", danger: true }))) return;
+  const res = await api.del(`/api/v1/routes/rulesets/${encodeURIComponent(removeId)}`);
+  if (res.ok) { toast(`Removed ${name}.`); refreshRoutes(); refreshStatus(); } else toast(res.error, "err");
 }
 
 function onRouteDragStart(e) {
-  const row = e.target.closest(".row.route.body");
-  if (!row) return;
-  dragRuleId = row.dataset.id;
+  const card = e.target.closest(".rule-row:not(.add):not(.lan):not(.unmatched)");
+  if (!card) return;
+  dragRuleId = card.dataset.id;
   e.dataTransfer.effectAllowed = "move";
-  row.classList.add("dragging");
+  card.classList.add("dragging");
 }
 
 function onRouteDragOver(e) {
-  const over = e.target.closest(".row.route.body");
+  const over = e.target.closest(".rule-row:not(.add):not(.lan):not(.unmatched)");
   if (!over || !dragRuleId || over.dataset.id === dragRuleId) return;
   e.preventDefault();
-  const grid = over.parentElement;
-  const dragged = grid.querySelector(`[data-id="${CSS.escape(dragRuleId)}"]`);
+  const list = over.parentElement;
+  const dragged = list.querySelector(`[data-id="${CSS.escape(dragRuleId)}"]`);
   const after = e.clientY > over.getBoundingClientRect().top + over.offsetHeight / 2;
-  grid.insertBefore(dragged, after ? over.nextSibling : over);
+  list.insertBefore(dragged, after ? over.nextSibling : over);
 }
 
 async function onRouteDrop(e) {
-  const grid = e.target.closest(".route-grid");
-  if (!grid || !dragRuleId) return;
+  const list = e.target.closest(".ruleset-list");
+  if (!list || !dragRuleId) return;
   e.preventDefault();
-  grid.querySelectorAll(".dragging").forEach((r) => r.classList.remove("dragging"));
-  const ids = [...grid.querySelectorAll(".row.route.body")].map((r) => r.dataset.id);
-  dragRuleId = null;
-  const res = await api.post("/api/v1/routes/reorder", { ids });
-  if (!res.ok) { toast(res.error, "err"); refreshRoutes(); return; }
-  rules = res.data.rules || [];
-  router = res.data.router || router;
-  renderRoutes();
-  toast(res.data.changed ? "Routes reordered." : "Routes already in that order.");
+  list.querySelectorAll(".dragging").forEach((r) => r.classList.remove("dragging"));
+  stageDraggedOrder();
+}
+
+function onRouteDragEnd() {
+  // Always fires when a drag finishes (drop or cancel). Clear the in-progress
+  // flag so the periodic status tick may reconcile the routes panel again, and
+  // stage the order as a fallback for drags that ended without a drop event.
+  el.routes?.querySelectorAll(".dragging").forEach((r) => r.classList.remove("dragging"));
+  if (dragRuleId) {
+    dragRuleId = null;
+    stageDraggedOrder();
+  }
+}
+
+function stageDraggedOrder() {
+  const list = el.routes?.querySelector(".ruleset-list");
+  if (!list) return;
+  const ids = [...list.querySelectorAll(".rule-row:not(.add):not(.lan):not(.unmatched)")].map((card) => card.dataset.id);
+  // Stage the new order locally — nothing is sent until Apply is clicked.
+  const persisted = rulesets.map((rs) => rs.id);
+  const next = JSON.stringify(ids) === JSON.stringify(persisted) ? null : ids;
+  if (next !== pendingIds) {
+    pendingIds = next;
+    renderRoutes();
+  }
+}
+
+async function applyReorder() {
+  if (!pendingIds) return;
+  const btn = el.routes.querySelector("#dash-reorder-apply");
+  if (btn) { btn.disabled = true; btn.textContent = "Applying…"; }
+  const res = await api.post("/api/v1/routes/reorder", { ids: pendingIds });
+  if (!res.ok) {
+    toast(res.error, "err");
+    if (btn) { btn.disabled = false; btn.textContent = "Apply new order"; }
+    return;
+  }
+  toast("Order applied.");
+  await refreshRoutes();
   refreshStatus();
+}
+
+function cancelReorder() {
+  pendingIds = null;
+  renderRoutes();
 }
 
 async function toggleLanDirect(enabled) {
@@ -350,7 +418,7 @@ async function toggleKillswitch(e) {
   router = res.data.router || router;
   renderRoutes();
   refreshStatus();
-  toast(enabled ? "Kill-switch on — unmatched traffic is blocked." : "Kill-switch off — unmatched traffic goes direct.");
+  toast(enabled ? "Non-VPN traffic is now blocked." : "Non-VPN traffic is now allowed.");
 }
 
 async function ensureCatalog() {
@@ -418,7 +486,7 @@ async function openAddChannel() {
     const added = provRes.ok ? provRes.data.providers : [];
     const addable = catalog.filter((p) => !added.some((a) => a.provider === p.provider));
     if (!addable.length) {
-      wiz.innerHTML = `<div class="empty inset">All providers are already added.</div><div class="confirm-actions"><button class="btn" type="button" data-back>Back</button></div>`;
+      wiz.innerHTML = `<div class="empty inset">All supported providers are already added.</div><div class="confirm-actions"><button class="btn" type="button" data-back>Back</button></div>`;
       wiz.querySelector("[data-back]").onclick = renderProviders;
       return;
     }
@@ -465,7 +533,7 @@ async function openAddChannel() {
         </div></label>
       <label class="field"><span>Label <em>(optional)</em></span><input id="label" placeholder="e.g. Streaming — US" spellcheck="false"></label>
       <p class="form-err" id="cerr"></p>
-      <div class="confirm-actions"><button class="btn ghost" type="button" data-back>Back</button><button class="btn primary" type="submit">Add channel</button></div>
+      <div class="confirm-actions"><button class="btn ghost" type="button" data-back>Back</button><button class="btn primary" type="submit">Add Channel</button></div>
     </form>`;
     const conf = wiz.querySelector("#conf"), fname = wiz.querySelector("[data-file-name]");
     wiz.querySelector("[data-pick]").onclick = () => conf.click();
@@ -545,7 +613,7 @@ async function openAddChannel() {
       <p class="field-guide">New channel in <b>${esc(where)}</b>.</p>
       <label class="field"><span>Label <em>(optional)</em></span><input id="label" placeholder="e.g. Streaming — US" spellcheck="false"></label>
       <p class="form-err" id="lerr"></p>
-      <div class="confirm-actions"><button class="btn ghost" type="button" data-back>Back</button><button class="btn primary" type="submit">Add channel</button></div>
+      <div class="confirm-actions"><button class="btn ghost" type="button" data-back>Back</button><button class="btn primary" type="submit">Add Channel</button></div>
     </form>`;
     wiz.querySelector("[data-back]").onclick = renderCityStep;
     wiz.querySelector("#lf").onsubmit = async (e) => {
@@ -564,27 +632,104 @@ async function openAddChannel() {
 
 function routeTargetOptions() {
   return [
-    { value: "direct", label: "Direct — no VPN" },
-    { value: "block", label: "Block — drop traffic" },
-    ...((status?.channels || []).map((c) => ({ value: chanKey(c), label: channelOptionLabel(c) }))),
+    { value: "direct", label: "Direct — No VPN" },
+    { value: "block", label: "Block — Drop Traffic" },
+    ...((status?.channels || []).map((c) => ({ value: chanKey(c), label: c.label || c.name }))),
   ];
 }
 
-function openAddRule() {
-  const m = modal("Add route", `<form id="rf">
-    <label class="field"><span>Match type</span>${customSelectHTML("type", ROUTE_MATCH_OPTIONS, "domain_suffix")}</label>
-    <label class="field" id="value-field"><span>Value</span><input id="value" placeholder="example.com" spellcheck="false"></label>
-    <label class="field"><span>Via channel</span>${customSelectHTML("target", routeTargetOptions(), "direct")}</label>
-    <p class="form-err" id="err"></p><button class="btn primary" type="submit">Add rule</button>
+function matcherInputHTML(buttonText) {
+  return `<div class="match-group">
+      <label class="field check" id="match-all"><input type="checkbox" id="all-traffic"><span><b>All traffic</b> — match everything (catch-all).</span></label>
+      <div class="or-divider" aria-hidden="true"><span>or</span></div>
+      <label class="field" id="match-list"><span>Specific domains / IPs (one per line)</span><textarea id="matchers" placeholder="netflix.com\napi.openai.com\n10.8.0.0/16"></textarea>
+        <div class="match-examples">
+          <div class="mx-title">Examples:</div>
+          <div class="mx-item"><code>netflix.com</code>suffix match — any <code>*.netflix.com</code></div>
+          <div class="mx-item"><code>api.anthropic.com</code>that exact subdomain only</div>
+          <div class="mx-item"><code>185.98.169.31</code>that exact IPv4 address</div>
+          <div class="mx-item"><code>185.81.1.1/16</code>the whole 185.81.0.0/16 IPv4 CIDR range</div>
+          <div class="mx-item"><code>2001:db8::1</code>that exact IPv6 address</div>
+          <div class="mx-item"><code>2001:db8::/32</code>the 2001:db8::/32 IPv6 CIDR range</div>
+        </div></label>
+    </div>
+    <p class="form-err" id="err"></p><button class="btn primary" type="submit">${esc(buttonText)}</button>`;
+}
+
+function wireMatchers(root) {
+  const cb = root.querySelector("#all-traffic");
+  const ta = root.querySelector("#matchers");
+  const list = root.querySelector("#match-list");
+  if (!cb || !ta) return;
+  const sync = () => {
+    const on = cb.checked;
+    ta.disabled = on;
+    if (on) ta.value = "";
+    list?.classList.toggle("is-disabled", on);
+  };
+  cb.onchange = sync;
+  sync();
+}
+
+function matcherEntries(root) {
+  if (root.querySelector("#all-traffic")?.checked) return [{ value: "all" }];
+  return root.querySelector("#matchers").value.split(/\r?\n/).map((v) => v.trim()).filter(Boolean).map((value) => ({ value }));
+}
+
+function openEditRuleset(rulesetId) {
+  const rs = rulesets.find((r) => r.id === rulesetId);
+  if (!rs) return;
+  const opts = routeTargetOptions();
+  const via = opts.some((o) => o.value === rs.target) ? rs.target : (opts[0]?.value || "direct");
+  const curName = rs.name && rs.name !== rs.target ? rs.name : "";
+  const hasAll = (rs.rules || []).some((r) => r.type === "all");
+  const curMatchers = (rs.rules || []).filter((r) => r.type !== "all").map((r) => r.value || "").join("\n");
+  const m = modal("Edit ruleset", `<form id="rf">
+    <label class="field"><span>Name</span><input id="name" placeholder="Streaming" spellcheck="false"></label>
+    <label class="field"><span>Via channel</span>${customSelectHTML("target", opts, via)}</label>
+    ${matcherInputHTML("Save")}
   </form>`);
   wireCustomSelects(m.root);
-  const type = m.root.querySelector("#type"), field = m.root.querySelector("#value-field"), value = m.root.querySelector("#value"), err = m.root.querySelector("#err");
-  const sync = () => { const all = type.value === "all"; field.hidden = all; value.disabled = all; if (all) value.value = ""; };
-  type.onchange = sync; sync();
+  m.root.querySelector("#name").value = curName;
+  m.root.querySelector("#all-traffic").checked = hasAll;
+  m.root.querySelector("#matchers").value = curMatchers;
+  wireMatchers(m.root);
+  const err = m.root.querySelector("#err");
   m.root.querySelector("#rf").onsubmit = async (e) => {
     e.preventDefault(); err.textContent = "";
-    const res = await api.post("/api/v1/routes", { type: type.value, value: value.value.trim(), target: m.root.querySelector("#target").value });
-    if (!res.ok) { err.textContent = res.error; return; }
-    m.close(); toast(`Added rule ${res.data.rule.id}.`); refreshRoutes(); refreshStatus();
+    const name = m.root.querySelector("#name").value.trim();
+    if (!name) { err.textContent = "Name is required."; return; }
+    const matchers = matcherEntries(m.root);
+    if (!matchers.length) { err.textContent = "Add at least one matcher."; return; }
+    const target = m.root.querySelector("#target").value;
+    const btn = m.root.querySelector('button[type="submit"]');
+    btn.disabled = true; btn.textContent = "Saving…";
+    const res = await api.post(`/api/v1/routes/rulesets/${encodeURIComponent(rulesetId)}/update`, { name, target, matchers });
+    if (!res.ok) { err.textContent = res.error; btn.disabled = false; btn.textContent = "Save"; return; }
+    m.close(); toast(`Saved ${name}.`); refreshRoutes(); refreshStatus();
   };
+  m.root.querySelector("#name").focus();
+}
+
+function openAddRule() {
+  const m = modal("Add ruleset", `<form id="rf">
+    <label class="field"><span>Name</span><input id="name" placeholder="Streaming" spellcheck="false"></label>
+    <label class="field"><span>Via channel</span>${customSelectHTML("target", routeTargetOptions(), routeTargetOptions()[0]?.value || "direct")}</label>
+    ${matcherInputHTML("Create ruleset")}
+  </form>`);
+  wireCustomSelects(m.root);
+  wireMatchers(m.root);
+  const err = m.root.querySelector("#err");
+  m.root.querySelector("#rf").onsubmit = async (e) => {
+    e.preventDefault(); err.textContent = "";
+    const name = m.root.querySelector("#name").value.trim();
+    if (!name) { err.textContent = "Name is required."; return; }
+    const matchers = matcherEntries(m.root);
+    if (!matchers.length) { err.textContent = "Add at least one matcher."; return; }
+    const target = m.root.querySelector("#target").value;
+    const res = await api.post("/api/v1/routes/rulesets", { name, target, matchers });
+    if (!res.ok) { err.textContent = res.error; return; }
+    m.close(); toast(`Created ${res.data.ruleset.name}.`); refreshRoutes(); refreshStatus();
+  };
+  m.root.querySelector("#name").focus();
 }

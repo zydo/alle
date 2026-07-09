@@ -19,8 +19,6 @@ from __future__ import annotations
 import ipaddress
 import re
 
-MATCHER_TYPES = ("domain", "domain_suffix", "ip_cidr", "all")
-
 # Built-in default-direct destinations: private, link-local, loopback, and
 # multicast/broadcast ranges. Compiled ahead of all user rules (when the
 # ``lan_direct`` toggle is on) so LAN access — printers, NAS, router admin
@@ -45,7 +43,10 @@ LAN_DIRECT_CIDRS = (
 
 # One DNS label: alnum (plus inner hyphens/underscores), max 63 chars.
 _LABEL = r"(?!-)[a-z0-9_-]{1,63}(?<!-)"
-_DOMAIN_RE = re.compile(rf"^{_LABEL}(\.{_LABEL})*$")
+# A routable domain needs at least one dot (≥2 labels): a bare single label like
+# "xxx" is neither a usable domain nor an IP, so it is rejected rather than
+# silently becoming a one-label suffix match.
+_DOMAIN_RE = re.compile(rf"^{_LABEL}(\.{_LABEL})+$")
 
 
 class RuleError(Exception):
@@ -77,6 +78,27 @@ def normalize_value(matcher_type: str, value: str) -> str:
         except ValueError as e:
             raise RuleError(f"{value!r} is not a valid IP or CIDR block") from e
     raise RuleError(f"unknown matcher type {matcher_type!r}")
+
+
+def infer_matcher(value: str, matcher_type: str | None = None) -> tuple[str, str]:
+    """Infer and normalize a ruleset matcher from one user-facing entry.
+
+    Explicit ``matcher_type`` remains available for advanced overrides. Without
+    it, CIDR/IP-looking entries become ``ip_cidr``; domains with two labels are
+    suffix matches; domains with a meaningful subdomain are exact matches.
+    """
+    raw = value.strip()
+    if matcher_type:
+        return matcher_type, normalize_value(matcher_type, raw)
+    if raw.lower() == "all":
+        return "all", ""
+    try:
+        return "ip_cidr", str(ipaddress.ip_network(raw, strict=False))
+    except ValueError:
+        pass
+    domain = normalize_domain(raw)
+    labels = domain.split(".")
+    return ("domain_suffix" if len(labels) <= 2 else "domain"), domain
 
 
 def parse_target(target: str) -> tuple[str, tuple[str, str] | None]:

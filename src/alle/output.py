@@ -183,30 +183,55 @@ def routes_list(data: dict) -> str:
     router = data["router"]
     head = f"Router entrypoint {_router_where(router)} — {_router_mode(router)}"
     rules = data["rules"]
-    if not rules:
-        if data.get("filter"):
-            return f"No rules targeting {data['filter']!r}. See: alle routes ls"
+    if data.get("flat") or data.get("filter"):
+        if not rules:
+            if data.get("filter"):
+                return f"No matchers targeting {data['filter']!r}. See: alle routes ls"
+            return "\n".join(
+                [
+                    head,
+                    "No routing matchers — the entrypoint passes everything through "
+                    "without a VPN.",
+                    "Add one:  alle routes ruleset create Streaming --via <provider>/<channel> --domain netflix.com",
+                ]
+            )
+        headers = ["ID", "RULESET", "MATCH", "TARGET", "NOTE"]
+        rows = [
+            [
+                r["id"],
+                r.get("ruleset", ""),
+                r["match"],
+                r["target"],
+                f"shadowed by {r['shadowed_by']} — never matches"
+                if r.get("shadowed_by")
+                else "",
+            ]
+            for r in rules
+        ]
+        return "\n".join([head, *_table(headers, rows)])
+
+    rulesets = data.get("rulesets") or []
+    if not rulesets:
         return "\n".join(
             [
                 head,
-                "No routing rules — the entrypoint passes everything through "
-                "without a VPN.",
-                "Add one:  alle routes add <provider>/<channel> --domain-suffix example.com",
+                "No routing rulesets — the entrypoint passes everything through without a VPN.",
+                "Add one:  alle routes ruleset create Streaming --via <provider>/<channel> --domain netflix.com",
             ]
         )
-    headers = ["ID", "MATCH", "TARGET", "NOTE"]
-    rows = [
-        [
-            r["id"],
-            r["match"],
-            r["target"],
-            f"shadowed by {r['shadowed_by']} — never matches"
-            if r.get("shadowed_by")
-            else "",
-        ]
-        for r in rules
-    ]
-    return "\n".join([head, *_table(headers, rows)])
+    lines = [head]
+    for rs in rulesets:
+        lines.append(
+            f"{rs['id']}  {rs['name']} → {rs['target']} ({rs['matcher_count']} matcher(s))"
+        )
+        for rule in rs["rules"]:
+            note = (
+                f"  [shadowed by {rule['shadowed_by']} — never matches]"
+                if rule.get("shadowed_by")
+                else ""
+            )
+            lines.append(f"  {rule['id']}  {rule['match']}{note}")
+    return "\n".join(lines)
 
 
 def metrics(data: dict) -> str:

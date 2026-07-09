@@ -314,55 +314,95 @@ def cmd_channels_rm(args):
 # ---- routes ------------------------------------------------------------------
 
 
-def cmd_routes_add(args):
+def _rule_entries(args) -> list[dict]:
+    out = []
+    for value in args.domain or []:
+        out.append({"type": None, "value": value})
+    for value in args.domain_exact or []:
+        out.append({"type": "domain", "value": value})
+    for value in args.domain_suffix or []:
+        out.append({"type": "domain_suffix", "value": value})
+    for value in args.cidr or []:
+        out.append({"type": "ip_cidr", "value": value})
     if args.all:
-        matcher_type, value = "all", ""
-    elif args.domain:
-        matcher_type, value = "domain", args.domain
-    elif args.domain_suffix:
-        matcher_type, value = "domain_suffix", args.domain_suffix
-    else:
-        matcher_type, value = "ip_cidr", args.cidr
+        out.append({"type": "all", "value": ""})
+    return out
 
-    result = service.routes_add(matcher_type, value, args.target)
-    rule = result["rule"]
-    print(f"Added rule {rule['id']}: {rule['match']} → {rule['target']}.")
-    if result["router_port"]:
-        print(f"  Router entrypoint: 127.0.0.1:{result['router_port']}")
-    else:
-        print("  Router entrypoint port is assigned on the next daemon start.")
-    if result["shadowed_by"]:
-        print(
-            f"  WARNING: shadowed by earlier rule {result['shadowed_by']} — it will "
-            "never match. Rules are first-match-wins; remove or re-add the broader "
-            "rule after this one (see: alle routes ls)."
-        )
+
+def _print_ruleset_added(result: dict, verb: str = "Added") -> None:
+    rs = result["ruleset"]
+    print(
+        f"{verb} ruleset {rs['id']} {rs['name']!r}: {rs['matcher_count']} matcher(s) → {rs['target']}."
+    )
+    for rule in rs["rules"]:
+        if rule.get("shadowed_by"):
+            print(
+                f"  WARNING: {rule['id']} {rule['match']} is shadowed by earlier rule "
+                f"{rule['shadowed_by']} — it will never match."
+            )
+
+
+def cmd_routes_ruleset_create(args):
+    _print_ruleset_added(
+        service.routes_ruleset_create(args.name, args.target, _rule_entries(args))
+    )
+
+
+def cmd_routes_ruleset_add(args):
+    _print_ruleset_added(
+        service.routes_ruleset_add(args.ruleset, _rule_entries(args)), verb="Updated"
+    )
+
+
+def cmd_routes_ruleset_rm(args):
+    result = service.routes_ruleset_remove(args.ruleset, dry_run=args.dry_run)
+    rs = result["ruleset"]
+    verb = "Would remove" if result["dry_run"] else "Removed"
+    print(
+        f"{verb} ruleset {rs['id']} {rs['name']!r}: {rs['matcher_count']} matcher(s)."
+    )
+
+
+def cmd_routes_ruleset_rename(args):
+    rs = service.routes_ruleset_rename(args.ruleset, args.name)["ruleset"]
+    print(f"Renamed ruleset {rs['id']} to {rs['name']!r}.")
+
+
+def cmd_routes_ruleset_retarget(args):
+    rs = service.routes_ruleset_retarget(args.ruleset, args.target)["ruleset"]
+    print(f"Retargeted ruleset {rs['id']} {rs['name']!r} → {rs['target']}.")
 
 
 def cmd_routes_ls(args):
-    _print_or_json(service.routes_list(args.channel), output.routes_list, args.json)
+    _print_or_json(
+        service.routes_list(args.channel, flat=args.flat), output.routes_list, args.json
+    )
 
 
 def cmd_routes_rm(args):
     result = service.routes_remove(args.ids, dry_run=args.dry_run)
     verb = "Would remove" if result["dry_run"] else "Removed"
     for rule in result["rules"]:
-        print(f"{verb} rule {rule['id']}: {rule['match']} → {rule['target']}.")
+        print(
+            f"{verb} matcher {rule['id']}: {rule['match']} from ruleset {rule.get('ruleset')}."
+        )
 
 
 def cmd_routes_reorder(args):
-    result = service.routes_reorder(args.ids)
+    result = service.routes_reorder(args.ids, flat=args.flat)
     if args.json:
         print(output.json_text(result))
         return
-    n = len(result["rules"])
+    items = result["rules"] if args.flat else result["rulesets"]
+    noun = "rule" if args.flat else "ruleset"
+    n = len(items)
     if result["changed"]:
         print(
-            f"Reordered {n} rule{'s' if n != 1 else ''}. Rules are evaluated top to bottom."
+            f"Reordered {n} {noun}{'s' if n != 1 else ''}. Rules are evaluated top to bottom."
         )
     else:
-        print(f"Routes already in that order ({n} rule{'s' if n != 1 else ''}).")
-    for rule in result["rules"]:
+        print(f"Routes already in that order ({n} {noun}{'s' if n != 1 else ''}).")
+    for rule in result.get("rules", []):
         if rule.get("shadowed_by"):
             print(
                 f"  WARNING: {rule['id']} is shadowed by earlier rule "
@@ -716,30 +756,71 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ro.set_defaults(func=_show_help(ro))
     ro_sub = ro.add_subparsers(dest="routes_command")
-    ra = ro_sub.add_parser(
-        "add",
-        help="append a routing rule (rules are evaluated in order; first match wins)",
+
+    def _add_matcher_args(parser):
+        parser.add_argument(
+            "--domain",
+            action="append",
+            help="domain entry; bare domains become suffix matches, subdomains exact",
+        )
+        parser.add_argument(
+            "--domain-exact",
+            action="append",
+            help="advanced: exact domain match",
+        )
+        parser.add_argument(
+            "--domain-suffix",
+            action="append",
+            help="advanced: suffix match for the domain and subdomains",
+        )
+        parser.add_argument(
+            "--cidr", action="append", help="destination IP or CIDR block"
+        )
+        parser.add_argument(
+            "--all",
+            action="store_true",
+            help="match all traffic (catch-all — routes everything not matched earlier)",
+        )
+
+    rs = ro_sub.add_parser("ruleset", help="create and edit grouped routing rulesets")
+    rs.set_defaults(func=_show_help(rs))
+    rs_sub = rs.add_subparsers(dest="ruleset_command")
+    rsc = rs_sub.add_parser("create", help="create a ruleset with one or more matchers")
+    rsc.add_argument("name", help="display name for the ruleset")
+    rsc.add_argument(
+        "--via",
+        dest="target",
+        required=True,
+        help="exit for matched traffic: <provider>/<channel>, 'direct', or 'block'",
     )
-    ra.add_argument(
+    _add_matcher_args(rsc)
+    rsc.set_defaults(func=cmd_routes_ruleset_create)
+    rsa = rs_sub.add_parser("add", help="add matchers to an existing ruleset")
+    rsa.add_argument("ruleset", help="ruleset id shown by: alle routes ls")
+    _add_matcher_args(rsa)
+    rsa.set_defaults(func=cmd_routes_ruleset_add)
+    rsrm = rs_sub.add_parser("rm", help="remove a whole ruleset by id")
+    rsrm.add_argument("ruleset", help="ruleset id shown by: alle routes ls")
+    rsrm.add_argument(
+        "--dry-run", action="store_true", help="show what would be removed"
+    )
+    rsrm.set_defaults(func=cmd_routes_ruleset_rm)
+    rsrn = rs_sub.add_parser("rename", help="rename a ruleset")
+    rsrn.add_argument("ruleset", help="ruleset id shown by: alle routes ls")
+    rsrn.add_argument("name", help="new display name")
+    rsrn.set_defaults(func=cmd_routes_ruleset_rename)
+    rst = rs_sub.add_parser("retarget", help="change a ruleset's exit target")
+    rst.add_argument("ruleset", help="ruleset id shown by: alle routes ls")
+    rst.add_argument(
         "target",
         help="exit for matched traffic: <provider>/<channel>, 'direct', or 'block'",
     )
-    rm_group = ra.add_mutually_exclusive_group(required=True)
-    rm_group.add_argument("--domain", help="exact domain to match")
-    rm_group.add_argument(
-        "--domain-suffix", help="match the domain and all its subdomains"
-    )
-    rm_group.add_argument("--cidr", help="destination IP or CIDR block")
-    rm_group.add_argument(
-        "--all",
-        action="store_true",
-        help="match all traffic (catch-all — routes everything not matched earlier)",
-    )
-    ra.set_defaults(func=cmd_routes_add)
-    rls = ro_sub.add_parser("ls", help="list rules in evaluation order")
+    rst.set_defaults(func=cmd_routes_ruleset_retarget)
+    rls = ro_sub.add_parser("ls", help="list rulesets in evaluation order")
     rls.add_argument(
         "--channel", help="only rules targeting this channel (name or provider/name)"
     )
+    rls.add_argument("--flat", action="store_true", help="show the flat matcher rows")
     rls.add_argument("--json", action="store_true", help="print machine-readable JSON")
     rls.set_defaults(func=cmd_routes_ls)
     rrm = ro_sub.add_parser("rm", help="remove rules by id")
@@ -749,9 +830,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rrm.set_defaults(func=cmd_routes_rm)
     rre = ro_sub.add_parser(
-        "reorder", help="replace rule evaluation order with the given id sequence"
+        "reorder", help="replace ruleset evaluation order with the given id sequence"
     )
-    rre.add_argument("ids", nargs="+", help="every rule id, in the new order")
+    rre.add_argument("ids", nargs="+", help="every ruleset id, in the new order")
+    rre.add_argument(
+        "--flat", action="store_true", help="reorder flat rule ids instead"
+    )
     rre.add_argument("--json", action="store_true", help="print machine-readable JSON")
     rre.set_defaults(func=cmd_routes_reorder)
     rks = ro_sub.add_parser(

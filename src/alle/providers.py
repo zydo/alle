@@ -258,10 +258,6 @@ def config_help(provider: str) -> str:
     return REGISTRY.get(provider, {}).get("config_help", "")
 
 
-def url(provider: str) -> str:
-    return REGISTRY.get(provider, {}).get("url", "")
-
-
 def auth_fields(provider: str) -> list[AuthField]:
     return REGISTRY.get(provider, {}).get("fields", [])
 

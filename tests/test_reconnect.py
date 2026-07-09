@@ -11,20 +11,10 @@ import pytest
 from alle import applog, reconnect, singbox
 from alle.providers import ProviderAuthError, ProviderError
 from alle.state import Store
+from conftest import wg_config
 
-WG = {
-    "private_key": "PRIV=",
-    "address": ["10.5.0.2/32"],
-    "peer": {
-        "public_key": "PUB=",
-        "endpoint_host": "us1.example.com",
-        "endpoint_port": 51820,
-        "preshared_key": None,
-        "allowed_ips": ["0.0.0.0/0", "::/0"],
-        "keepalive": 25,
-    },
-}
-NEW_WG = {**WG, "peer": {**WG["peer"], "endpoint_host": "us2.example.com"}}
+WG = wg_config("us1.example.com")
+NEW_WG = wg_config("us2.example.com")
 
 FAIL = {"ok": False, "at": 1, "latency_ms": None, "ip": None, "error": "timeout"}
 OK = {"ok": True, "at": 1, "latency_ms": 12.0, "ip": "1.2.3.4", "error": None}

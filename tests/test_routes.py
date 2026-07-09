@@ -20,7 +20,9 @@ def test_wildcard_domain_is_redirected_to_suffix():
         routes.normalize_value("domain", "*.google.com")
 
 
-@pytest.mark.parametrize("bad", ["", "no spaces.com", "-x.com", "a..b", "a b"])
+@pytest.mark.parametrize(
+    "bad", ["", "xxx", "localhost", "no spaces.com", "-x.com", "a..b", "a b"]
+)
 def test_invalid_domains_are_rejected(bad):
     with pytest.raises(routes.RuleError, match="not a valid domain"):
         routes.normalize_value("domain_suffix", bad)

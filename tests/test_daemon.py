@@ -11,19 +11,9 @@ import pytest
 
 from alle import daemon
 from alle.state import Store, _read_raw, config_signature
+from conftest import wg_config
 
-WG = {
-    "private_key": "PRIV=",
-    "address": ["10.5.0.2/32"],
-    "peer": {
-        "public_key": "PUB=",
-        "endpoint_host": "se1.example.com",
-        "endpoint_port": 51820,
-        "preshared_key": None,
-        "allowed_ips": ["0.0.0.0/0", "::/0"],
-        "keepalive": 25,
-    },
-}
+WG = wg_config("se1.example.com")
 
 
 def _sig():

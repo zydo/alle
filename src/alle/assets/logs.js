@@ -12,10 +12,10 @@ export function mount(v) {
     <section>
       <div class="section-head"><span class="eyebrow">Logs</span>
         <label class="log-lines">Last ${customSelectHTML("lines", [
-          { value: "50", label: "50" },
-          { value: "200", label: "200" },
-          { value: "500", label: "500" },
-        ], "200")} lines</label></div>
+    { value: "50", label: "50" },
+    { value: "200", label: "200" },
+    { value: "500", label: "500" },
+  ], "200")} lines</label></div>
       <pre class="log-view" id="log"></pre>
     </section>`;
   wireCustomSelects(view);

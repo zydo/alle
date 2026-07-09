@@ -10,19 +10,9 @@ import pytest
 from alle import applog, routes, singbox
 from alle.engine import Engine
 from alle.state import Store
+from conftest import wg_config
 
-WG = {
-    "private_key": "PRIV=",
-    "address": ["10.5.0.2/32"],
-    "peer": {
-        "public_key": "PUB=",
-        "endpoint_host": "1.2.3.4",
-        "endpoint_port": 51820,
-        "preshared_key": None,
-        "allowed_ips": ["0.0.0.0/0", "::/0"],
-        "keepalive": 25,
-    },
-}
+WG = wg_config("1.2.3.4")
 
 
 def _store(*specs, router=None):

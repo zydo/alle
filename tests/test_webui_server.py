@@ -14,19 +14,9 @@ import pytest
 from alle import service
 from alle.state import Store
 from alle.webui import auth, server
+from conftest import wg_config
 
-WG = {
-    "private_key": "PRIV=",
-    "address": ["10.5.0.2/32"],
-    "peer": {
-        "public_key": "PUB=",
-        "endpoint_host": "1.2.3.4",
-        "endpoint_port": 51820,
-        "preshared_key": None,
-        "allowed_ips": ["0.0.0.0/0", "::/0"],
-        "keepalive": 25,
-    },
-}
+WG = wg_config("1.2.3.4")
 
 
 @pytest.fixture
@@ -284,7 +274,9 @@ def test_remove_channel_blocked_by_rule_returns_verbatim_message(live):
             "conf_text": _conf(),
         },
     )
-    Store.load().add_rule("domain", "x.com", "protonvpn/wg_de_1")
+    Store.load().create_ruleset(
+        "protonvpn/wg_de_1", "protonvpn/wg_de_1", [("domain", "x.com")]
+    )
 
     st, body, _ = _req(
         base + "/api/v1/channels/protonvpn/wg_de_1", method="DELETE", headers=origin
@@ -337,36 +329,55 @@ def test_routes_api_create_reorder_killswitch_delete(live):
         headers=origin,
         data={"type": "domain", "value": "api.example.com", "target": "nordvpn/us_1"},
     )
-    assert st == 200 and json.loads(body)["rule"]["id"] == "r1"
+    assert st == 404  # flat per-rule authoring is no longer user-facing
+
     st, body, _ = _req(
-        base + "/api/v1/routes",
+        base + "/api/v1/routes/rulesets",
         method="POST",
         headers=origin,
-        data={"type": "domain_suffix", "value": "example.com", "target": "direct"},
+        data={
+            "name": "API",
+            "target": "nordvpn/us_1",
+            "matchers": [{"value": "api.example.com"}],
+        },
     )
-    assert st == 200 and json.loads(body)["rule"]["id"] == "r2"
+    assert st == 200 and json.loads(body)["ruleset"]["id"] == "rs1"
+    st, body, _ = _req(
+        base + "/api/v1/routes/rulesets",
+        method="POST",
+        headers=origin,
+        data={
+            "name": "Example",
+            "target": "direct",
+            "matchers": [{"value": "example.com"}],
+        },
+    )
+    assert st == 200 and json.loads(body)["ruleset"]["id"] == "rs2"
 
     st, body, _ = _req(base + "/api/v1/routes", headers=_bearer(secret))
-    assert st == 200 and [r["id"] for r in json.loads(body)["rules"]] == ["r1", "r2"]
+    data = json.loads(body)
+    assert st == 200
+    assert [r["id"] for r in data["rules"]] == ["r1", "r2"]
+    assert [rs["id"] for rs in data["rulesets"]] == ["rs1", "rs2"]
 
     st, body, _ = _req(
         base + "/api/v1/routes/reorder",
         method="POST",
         headers=origin,
-        data={"ids": ["r2", "r1"]},
+        data={"ids": ["rs2", "rs1"]},
     )
     data = json.loads(body)
-    assert st == 200 and [r["id"] for r in data["rules"]] == ["r2", "r1"]
-    assert data["rules"][1]["shadowed_by"] == "r2"
+    assert st == 200 and [rs["id"] for rs in data["rulesets"]] == ["rs2", "rs1"]
+    assert data["rulesets"][1]["rules"][0]["shadowed_by"] == "r2"
 
     st, body, _ = _req(
         base + "/api/v1/routes/reorder",
         method="POST",
         headers=origin,
-        data={"ids": ["r1"]},
+        data={"ids": ["rs1"]},
     )
-    assert st == 400 and "missing rule" in json.loads(body)["error"]
-    assert [r["id"] for r in Store.load().rules()] == ["r2", "r1"]
+    assert st == 400 and "missing ruleset" in json.loads(body)["error"]
+    assert [rs["id"] for rs in Store.load().rulesets()] == ["rs2", "rs1"]
 
     st, body, _ = _req(
         base + "/api/v1/routes/killswitch",
@@ -389,6 +400,12 @@ def test_routes_api_create_reorder_killswitch_delete(live):
     st, _, _ = _req(base + "/api/v1/routes/r1", method="DELETE", headers=origin)
     assert st == 200
     assert [r["id"] for r in Store.load().rules()] == ["r2"]
+
+    st, _, _ = _req(
+        base + "/api/v1/routes/rulesets/rs2", method="DELETE", headers=origin
+    )
+    assert st == 200
+    assert Store.load().rules() == []
 
 
 def test_locations_endpoint_requires_a_provider(live):

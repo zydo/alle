@@ -239,31 +239,6 @@ class Runner:
     def is_running(self) -> bool:
         return self.running_pid() is not None
 
-    def config_exists(self) -> bool:
-        return self.config_path.exists()
-
-    def started_at(self) -> int | None:
-        """Epoch when the current sing-box process started (shared by all channels)."""
-        try:
-            return int(_started_path().read_text().strip())
-        except (OSError, ValueError):
-            return None
-
-    def live_refs(self) -> set[tuple[str, str]]:
-        """``(provider, id)`` of every channel present in the live config."""
-        from alle.state import tag_to_ref
-
-        try:
-            cfg = json.loads(self.config_path.read_text())
-        except (OSError, ValueError):
-            return set()
-        refs = set()
-        for inb in cfg.get("inbounds") or []:
-            ref = tag_to_ref(inb.get("tag", ""))
-            if ref:
-                refs.add(ref)
-        return refs
-
     def apply(self, config: dict) -> bool:
         """Write the config and (re)start sing-box to match it.
 
@@ -429,20 +404,3 @@ class Runner:
         except (OSError, ValueError):
             return []
         return data.get("connections") or []
-
-    def traffic(self) -> dict[str, tuple[int, int]]:
-        """Map outbound tag -> (upload_bytes, download_bytes), best effort.
-
-        Sums currently-tracked connections per outbound chain. Returns {} if the
-        Clash API is unreachable (e.g. sing-box still starting).
-        """
-        out: dict[str, list[int]] = {}
-        for c in self.connections():
-            chain = c.get("chains") or []
-            if not chain:
-                continue
-            tag = chain[0]  # outermost outbound the connection exits through
-            acc = out.setdefault(tag, [0, 0])
-            acc[0] += int(c.get("upload") or 0)
-            acc[1] += int(c.get("download") or 0)
-        return {tag: (u, d) for tag, (u, d) in out.items()}

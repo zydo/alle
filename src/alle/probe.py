@@ -41,9 +41,6 @@ IP_ECHO_SOURCES: list[tuple[str, str]] = [
     ("ipify", "https://api.ipify.org"),
 ]
 
-# Preserved for any caller/test that referenced the original single endpoint.
-IP_ECHO_URL = IP_ECHO_SOURCES[0][1]
-
 _USER_AGENT = "alle-probe/1"
 
 

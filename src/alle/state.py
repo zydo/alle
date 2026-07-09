@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from alle import applog, paths
+from alle.constants import INBOUND_PREFIX, OUTBOUND_PREFIX
 
 STATE_VERSION = 1
 
@@ -119,11 +120,11 @@ class Channel:
 
     @property
     def inbound_tag(self) -> str:
-        return f"in-{self.provider}-{self.id}"
+        return f"{INBOUND_PREFIX}{self.provider}-{self.id}"
 
     @property
     def outbound_tag(self) -> str:
-        return f"out-{self.provider}-{self.id}"
+        return f"{OUTBOUND_PREFIX}{self.provider}-{self.id}"
 
     @property
     def location(self) -> str:
@@ -161,6 +162,103 @@ def _router_blank() -> dict:
     ordered rule list. ``lan_direct`` defaults **on** — readers must treat an
     absent key as True so pre-existing state files inherit the default."""
     return {"port": 0, "killswitch": False, "lan_direct": True, "rules": []}
+
+
+def _rule_num(rule: dict) -> int:
+    rid = str(rule.get("id", ""))
+    return int(rid[1:]) if rid.startswith("r") and rid[1:].isdigit() else 0
+
+
+def _ruleset_num(rule: dict) -> int:
+    rsid = str(rule.get("ruleset", ""))
+    return int(rsid[2:]) if rsid.startswith("rs") and rsid[2:].isdigit() else 0
+
+
+def _next_rule_id(rules: list[dict]) -> str:
+    return f"r{max((_rule_num(r) for r in rules), default=0) + 1}"
+
+
+def _next_ruleset_id(rules: list[dict]) -> str:
+    return f"rs{max((_ruleset_num(r) for r in rules), default=0) + 1}"
+
+
+def _target_name(target: str) -> str:
+    if target == "direct":
+        return "Direct"
+    if target == "block":
+        return "Block"
+    return target
+
+
+def _ensure_channel_target(data: dict, target: str) -> None:
+    provider, _, cid = target.partition("/")
+    if cid:
+        chans = (data["providers"].get(provider) or {}).get("channels") or {}
+        if cid not in chans:
+            raise ValueError(f"no channel {target!r} to route to")
+
+
+def _normalize_rulesets(data: dict) -> None:
+    """Make every loaded rule belong to a contiguous ruleset.
+
+    Legacy flat rows are folded into one auto-named ruleset per contiguous
+    same-target run. Rows that already carry ruleset metadata are left intact,
+    except missing names inherit a target-derived display name. Mixed old/new
+    files are rare but safe: old rows become their own runs without disturbing
+    existing grouped blocks.
+    """
+    router = data.setdefault("router", _router_blank())
+    rules = router.setdefault("rules", [])
+    if not rules:
+        return
+    max_rsid = max((_ruleset_num(r) for r in rules), default=0)
+    last_legacy_target = object()
+    legacy_rsid = ""
+    legacy_name = ""
+    for rule in rules:
+        if rule.get("ruleset"):
+            rule.setdefault("ruleset_name", _target_name(str(rule.get("target", ""))))
+            last_legacy_target = object()
+            continue
+        target = str(rule.get("target", ""))
+        if target != last_legacy_target:
+            max_rsid += 1
+            legacy_rsid = f"rs{max_rsid}"
+            legacy_name = _target_name(target)
+            last_legacy_target = target
+        rule["ruleset"] = legacy_rsid
+        rule["ruleset_name"] = legacy_name
+
+
+def _ruleset_blocks(rules: list[dict]) -> list[dict]:
+    """Ordered contiguous ruleset blocks from a normalized rule list."""
+    blocks: list[dict] = []
+    by_id: dict[str, dict] = {}
+    seen_closed: set[str] = set()
+    current = ""
+    for rule in rules:
+        rsid = str(rule.get("ruleset", ""))
+        if not rsid:
+            raise ValueError(f"rule {rule.get('id')} has no ruleset")
+        if rsid != current:
+            if rsid in seen_closed:
+                raise ValueError(f"ruleset {rsid} is not contiguous")
+            if current:
+                seen_closed.add(current)
+            block = {
+                "id": rsid,
+                "name": str(rule.get("ruleset_name") or _target_name(rule["target"])),
+                "target": rule["target"],
+                "rules": [],
+            }
+            blocks.append(block)
+            by_id[rsid] = block
+            current = rsid
+        block = by_id[rsid]
+        if rule["target"] != block["target"]:
+            raise ValueError(f"ruleset {rsid} has mixed targets")
+        block["rules"].append(dict(rule))
+    return blocks
 
 
 class ReferencedError(RuntimeError):
@@ -222,6 +320,7 @@ def _read_raw() -> dict:
     data.setdefault("version", STATE_VERSION)
     data.setdefault("providers", {})
     data.setdefault("router", _router_blank())
+    _normalize_rulesets(data)
     return data
 
 
@@ -508,6 +607,10 @@ class Store:
         """The ordered routing rules (evaluation order; first match wins)."""
         return [dict(r) for r in self.router.get("rules") or []]
 
+    def rulesets(self) -> list[dict]:
+        """Rules grouped into ordered, contiguous rulesets."""
+        return _ruleset_blocks(self.rules())
+
     def ensure_router_port(self) -> int:
         """Allocate the router entrypoint's contract port once; return it.
 
@@ -526,36 +629,169 @@ class Store:
         self.data = _read_raw()
         return port
 
-    def add_rule(self, matcher_type: str, value: str, target: str) -> dict:
-        """Append a routing rule (order is law) and return it with its id.
-
-        A channel target must exist at append time — verified inside the
-        transaction (raises ``ValueError``), the mirror image of the removal
-        guard: a rule can never be born dangling, and a referenced channel can
-        never be removed.
-        """
+    def create_ruleset(
+        self, name: str, target: str, matchers: list[tuple[str, str]]
+    ) -> dict:
+        """Create one ruleset atomically with one or more matchers."""
+        if not matchers:
+            raise ValueError("at least one matcher is required")
+        label = (name or "").strip()
+        if not label:
+            raise ValueError("ruleset name cannot be empty")
         with transaction() as data:
-            provider, _, cid = target.partition("/")
-            if cid:
-                chans = (data["providers"].get(provider) or {}).get("channels") or {}
-                if cid not in chans:
-                    raise ValueError(f"no channel {target!r} to route to")
+            _ensure_channel_target(data, target)
             router = data.setdefault("router", _router_blank())
             rules = router.setdefault("rules", [])
-            taken = [
-                int(r["id"][1:])
-                for r in rules
-                if str(r.get("id", "")).startswith("r") and r["id"][1:].isdigit()
-            ]
-            rule = {
-                "id": f"r{max(taken, default=0) + 1}",
-                "type": matcher_type,
-                "value": value,
-                "target": target,
-            }
-            rules.append(rule)
+            rsid = _next_ruleset_id(rules)
+            created: list[dict] = []
+            for matcher_type, value in matchers:
+                rule = {
+                    "id": _next_rule_id(rules + created),
+                    "type": matcher_type,
+                    "value": value,
+                    "target": target,
+                    "ruleset": rsid,
+                    "ruleset_name": label,
+                }
+                created.append(rule)
+            rules.extend(created)
+            block = _ruleset_blocks(rules)[-1]
         self.data = _read_raw()
-        return dict(rule)
+        return block
+
+    def add_ruleset_matchers(
+        self, ruleset_id: str, matchers: list[tuple[str, str]]
+    ) -> dict:
+        """Append matchers inside an existing ruleset block."""
+        if not matchers:
+            raise ValueError("at least one matcher is required")
+        with transaction() as data:
+            router = data.setdefault("router", _router_blank())
+            rules = router.setdefault("rules", [])
+            blocks = _ruleset_blocks(rules)
+            block = next((b for b in blocks if b["id"] == ruleset_id), None)
+            if block is None:
+                raise ValueError(f"unknown ruleset {ruleset_id!r}")
+            end = (
+                max(i for i, r in enumerate(rules) if r.get("ruleset") == ruleset_id)
+                + 1
+            )
+            insert: list[dict] = []
+            for matcher_type, value in matchers:
+                insert.append(
+                    {
+                        "id": _next_rule_id(rules + insert),
+                        "type": matcher_type,
+                        "value": value,
+                        "target": block["target"],
+                        "ruleset": ruleset_id,
+                        "ruleset_name": block["name"],
+                    }
+                )
+            rules[end:end] = insert
+            block = next(b for b in _ruleset_blocks(rules) if b["id"] == ruleset_id)
+        self.data = _read_raw()
+        return block
+
+    def remove_ruleset(self, ruleset_id: str) -> list[dict]:
+        """Remove a whole ruleset block; returns removed rule rows."""
+        removed: list[dict] = []
+        with transaction() as data:
+            router = data.setdefault("router", _router_blank())
+            rules = router.setdefault("rules", [])
+            _ruleset_blocks(rules)  # validates contiguity before mutating
+            kept = []
+            for rule in rules:
+                if rule.get("ruleset") == ruleset_id:
+                    removed.append(dict(rule))
+                else:
+                    kept.append(rule)
+            if not removed:
+                raise ValueError(f"unknown ruleset {ruleset_id!r}")
+            router["rules"] = kept
+        self.data = _read_raw()
+        return removed
+
+    def rename_ruleset(self, ruleset_id: str, name: str) -> dict:
+        """Rename a ruleset block."""
+        if not name:
+            raise ValueError("ruleset name cannot be empty")
+        with transaction() as data:
+            router = data.setdefault("router", _router_blank())
+            rules = router.setdefault("rules", [])
+            _ruleset_blocks(rules)
+            found = False
+            for rule in rules:
+                if rule.get("ruleset") == ruleset_id:
+                    rule["ruleset_name"] = name
+                    found = True
+            if not found:
+                raise ValueError(f"unknown ruleset {ruleset_id!r}")
+            block = next(b for b in _ruleset_blocks(rules) if b["id"] == ruleset_id)
+        self.data = _read_raw()
+        return block
+
+    def retarget_ruleset(self, ruleset_id: str, target: str) -> dict:
+        """Change the target for every matcher in a ruleset."""
+        with transaction() as data:
+            _ensure_channel_target(data, target)
+            router = data.setdefault("router", _router_blank())
+            rules = router.setdefault("rules", [])
+            _ruleset_blocks(rules)
+            found = False
+            for rule in rules:
+                if rule.get("ruleset") == ruleset_id:
+                    rule["target"] = target
+                    found = True
+            if not found:
+                raise ValueError(f"unknown ruleset {ruleset_id!r}")
+            block = next(b for b in _ruleset_blocks(rules) if b["id"] == ruleset_id)
+        self.data = _read_raw()
+        return block
+
+    def update_ruleset(
+        self,
+        ruleset_id: str,
+        name: str,
+        target: str,
+        matchers: list[tuple[str, str]],
+    ) -> dict:
+        """Set one ruleset's name, target, and matchers in one transaction,
+        keeping its id and position. The per-ruleset editor's Apply."""
+        if not name:
+            raise ValueError("ruleset name cannot be empty")
+        if not matchers:
+            raise ValueError("at least one matcher is required")
+        with transaction() as data:
+            _ensure_channel_target(data, target)
+            router = data.setdefault("router", _router_blank())
+            rules = router.setdefault("rules", [])
+            if not any(r.get("ruleset") == ruleset_id for r in rules):
+                raise ValueError(f"unknown ruleset {ruleset_id!r}")
+            first_idx = next(
+                i for i, r in enumerate(rules) if r.get("ruleset") == ruleset_id
+            )
+            kept = [r for r in rules if r.get("ruleset") != ruleset_id]
+            insert_at = min(first_idx, len(kept))
+            new_rules: list[dict] = []
+            for matcher_type, value in matchers:
+                new_rules.append(
+                    {
+                        "id": _next_rule_id(kept + new_rules),
+                        "type": matcher_type,
+                        "value": value,
+                        "target": target,
+                        "ruleset": ruleset_id,
+                        "ruleset_name": name,
+                    }
+                )
+            kept[insert_at:insert_at] = new_rules
+            router["rules"] = kept
+            block = next(
+                (b for b in _ruleset_blocks(kept) if b["id"] == ruleset_id), None
+            )
+        self.data = _read_raw()
+        return block
 
     def remove_rules(self, ids: list[str]) -> list[dict]:
         """Remove rules by id; returns the removed rules (missing ids ignored)."""
@@ -574,10 +810,16 @@ class Store:
         return removed
 
     def reorder_rules(self, ids: list[str]) -> tuple[list[dict], bool]:
-        """Replace rule evaluation order with a full id permutation."""
+        """Replace rule evaluation order with a full id permutation.
+
+        Low-level primitive retained for flat/debug operations. A permutation
+        that would split a ruleset block is rejected; user-facing reorder works
+        at ruleset-block level via :meth:`reorder_rulesets`.
+        """
         with transaction() as data:
             router = data.setdefault("router", _router_blank())
             rules = router.get("rules") or []
+            _ruleset_blocks(rules)
             current = [str(rule.get("id")) for rule in rules]
             proposed = [str(i) for i in ids]
             seen: set[str] = set()
@@ -598,8 +840,41 @@ class Store:
                 raise ValueError(f"missing rule id(s): {', '.join(missing)}")
             changed = proposed != current
             by_id = {str(rule.get("id")): rule for rule in rules}
-            router["rules"] = [by_id[rid] for rid in proposed]
-            ordered = [dict(rule) for rule in router["rules"]]
+            ordered = [by_id[rid] for rid in proposed]
+            _ruleset_blocks(ordered)  # validates the proposed contiguity invariant
+            router["rules"] = ordered
+            ordered_copy = [dict(rule) for rule in router["rules"]]
+        self.data = _read_raw()
+        return ordered_copy, changed
+
+    def reorder_rulesets(self, ids: list[str]) -> tuple[list[dict], bool]:
+        """Replace ruleset block order with a full ruleset-id permutation."""
+        with transaction() as data:
+            router = data.setdefault("router", _router_blank())
+            rules = router.get("rules") or []
+            blocks = _ruleset_blocks(rules)
+            current = [block["id"] for block in blocks]
+            proposed = [str(i) for i in ids]
+            seen: set[str] = set()
+            dupes: list[str] = []
+            for rsid in proposed:
+                if rsid in seen and rsid not in dupes:
+                    dupes.append(rsid)
+                seen.add(rsid)
+            if dupes:
+                raise ValueError(f"duplicate ruleset id(s): {', '.join(dupes)}")
+            current_set = set(current)
+            proposed_set = set(proposed)
+            unknown = [rsid for rsid in proposed if rsid not in current_set]
+            if unknown:
+                raise ValueError(f"unknown ruleset id(s): {', '.join(unknown)}")
+            missing = [rsid for rsid in current if rsid not in proposed_set]
+            if missing:
+                raise ValueError(f"missing ruleset id(s): {', '.join(missing)}")
+            changed = proposed != current
+            by_id = {block["id"]: block["rules"] for block in blocks}
+            router["rules"] = [rule for rsid in proposed for rule in by_id[rsid]]
+            ordered = _ruleset_blocks(router["rules"])
         self.data = _read_raw()
         return ordered, changed
 
@@ -674,7 +949,15 @@ def config_signature(data: dict) -> str:
             "port": router.get("port"),
             "killswitch": bool(router.get("killswitch")),
             "lan_direct": bool(router.get("lan_direct", True)),
-            "rules": router.get("rules") or [],
+            "rules": [
+                {
+                    "id": rule.get("id"),
+                    "type": rule.get("type"),
+                    "value": rule.get("value"),
+                    "target": rule.get("target"),
+                }
+                for rule in (router.get("rules") or [])
+            ],
         }
     blob = json.dumps(relevant, sort_keys=True, ensure_ascii=False).encode()
     return hashlib.sha256(blob).hexdigest()
