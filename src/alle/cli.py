@@ -835,10 +835,12 @@ def cmd_ui(args):
     else:
         print("Open the alle dashboard in your browser (one-time sign-in link):")
         print(f"  {login_url}")
+        port = service.web_ui_url().rsplit(":", 1)[1]
         print(
-            "Remote/headless host? Tunnel it first:\n"
-            f"  ssh -L 8080:{service.web_ui_url().split('//')[1]} <user@host>\n"
-            "  then browse http://127.0.0.1:8080"
+            "Remote/headless host? Tunnel the same port first — the sign-in "
+            "link resolves to your local end:\n"
+            f"  ssh -L {port}:127.0.0.1:{port} <user@host>\n"
+            "  then open the link above"
         )
 
 

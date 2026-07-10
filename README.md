@@ -358,13 +358,16 @@ page:
 - Start / stop / restart are host/CLI controls (`alle start|stop|restart`); the
   masthead links to the project on GitHub.
 
-The server binds to `127.0.0.1` only and is never exposed to the network. To
-reach it from another machine, forward the port over SSH rather than exposing it:
+The server binds to `127.0.0.1` only and is never exposed to the network. The
+browser URL uses a per-installation `alle-<random>.localhost` hostname (which
+browsers resolve to loopback on their own) so the session cookie is scoped to
+alle alone, never shared with other local web apps. To reach the UI from
+another machine, forward the **same** port over SSH rather than exposing it:
 
 ```bash
 alle status                              # on the remote host: note the Web UI port
-ssh -L 8080:127.0.0.1:<port> user@host
-# then browse http://127.0.0.1:8080 locally
+ssh -L <port>:127.0.0.1:<port> user@host
+# then open the `alle ui` sign-in link locally — it resolves to your tunnel
 ```
 
 SSH provides the encryption and access control; the browser still reaches alle
@@ -372,7 +375,9 @@ on loopback. Do not open or reverse-proxy the alle Web UI port directly to a
 network.
 
 `alle ui` signs you in automatically. To sign in by hand, paste the `secret`
-from `~/.alle/control_api.json` into the login page.
+from `~/.alle/control_api.json` into the login page. Sessions idle out after
+30 minutes without an open tab (capped at 12 hours); the masthead's **Sign
+out** button revokes every session immediately.
 
 ## How it works
 
@@ -419,6 +424,8 @@ from `~/.alle/control_api.json` into the login page.
   account). alle assumes a single-user machine; don't run it where that
   assumption fails. The internal stats API *is* authenticated with a generated
   per-installation secret, so connection metadata is not exposed locally.
+- The full threat model — trust boundaries, Web UI session design, fail-closed
+  routing — lives in [docs/security.md](docs/security.md).
 
 ## Roadmap and non-goals
 

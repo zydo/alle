@@ -10,12 +10,20 @@ Security posture (the localhost-web-UI attack class is real — DNS rebinding an
 CSRF have burned loopback apps before):
 
 * Bound strictly to ``127.0.0.1``.
-* Every request's ``Host`` must be our loopback host:port — a rebound
+* Every request's ``Host`` must be a loopback host:port — a rebound
   ``evil.com`` resolving to 127.0.0.1 sends a foreign Host and is refused.
+* Browsers use a per-installation ``alle-<rand>.localhost`` hostname (cookies
+  are scoped to hosts, not ports, so a cookie set for ``127.0.0.1`` would be
+  sent to every other local web app): literal-host page loads redirect to the
+  canonical host and the session cookie is only ever minted there. Programmatic
+  Bearer access still works on any loopback host.
 * Mutating requests must carry a same-origin ``Origin`` — CSRF defense, on top
   of the ``SameSite=Strict`` session cookie.
 * The persistent secret is only ever a Bearer header; browsers authenticate with
-  a single-use login token exchanged for an HttpOnly cookie (see ``auth``).
+  a single-use login token exchanged for an HttpOnly cookie (see ``auth``);
+  sessions idle out, roll on activity, and are revocable via logout.
+
+The full threat model lives in ``docs/security.md``.
 """
 
 from __future__ import annotations
@@ -65,18 +73,41 @@ def _config_path() -> Path:
     return paths.state_dir() / "control_api.json"
 
 
+def _mint_host() -> str:
+    """A per-installation browser hostname, e.g. ``alle-3f9c2ab1.localhost``.
+
+    Browsers resolve any ``*.localhost`` to loopback themselves (RFC 6761), so
+    no hosts-file entry is needed. Uniqueness is the point: cookies are scoped
+    to *hosts*, not ports, so a session cookie set for ``127.0.0.1`` would be
+    sent to every other local web app on any port — and two alle homes would
+    collide. A random name no other service occupies isolates the session.
+    """
+    return f"alle-{secrets.token_hex(4)}.localhost"
+
+
 def control_api() -> dict:
-    """The Web UI endpoint ``{"address": "127.0.0.1:<port>", "secret"}``.
+    """The Web UI endpoint ``{"address": "127.0.0.1:<port>", "secret", "host"}``.
 
     Generated once (0600) and kept — the port is a *contract* so the UI URL is
     stable and bookmarkable, and a fixed value to pin Host/Origin against.
+    ``host`` is the per-installation browser hostname (see :func:`_mint_host`);
+    a pre-existing file without one is upgraded in place.
     """
     p = _config_path()
     while True:
         try:
             cfg = json.loads(p.read_text())
             if cfg.get("address") and cfg.get("secret"):
-                return {"address": cfg["address"], "secret": cfg["secret"]}
+                if not cfg.get("host"):  # pre-hostname install: upgrade in place
+                    cfg["host"] = _mint_host()
+                    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with os.fdopen(fd, "w") as f:
+                        json.dump(cfg, f, indent=2)
+                return {
+                    "address": cfg["address"],
+                    "secret": cfg["secret"],
+                    "host": cfg["host"],
+                }
             p.unlink(missing_ok=True)
         except FileNotFoundError:
             pass
@@ -85,7 +116,11 @@ def control_api() -> dict:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
-        fresh = {"address": f"127.0.0.1:{port}", "secret": secrets.token_hex(32)}
+        fresh = {
+            "address": f"127.0.0.1:{port}",
+            "secret": secrets.token_hex(32),
+            "host": _mint_host(),
+        }
         try:
             fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
@@ -95,9 +130,16 @@ def control_api() -> dict:
         return fresh
 
 
+def _canonical_host(api: dict | None = None) -> str:
+    """``<per-install-hostname>:<port>`` — the only host the browser UI uses."""
+    api = api or control_api()
+    port = api["address"].rsplit(":", 1)[1]
+    return f"{api['host']}:{port}"
+
+
 def ui_url() -> str:
     """The plain (token-free) Web UI URL — safe to print and log."""
-    return f"http://{control_api()['address']}"  # noqa:S5332
+    return f"http://{_canonical_host()}"  # noqa:S5332
 
 
 def wait_until_serving(timeout: float = 6.0) -> bool:
@@ -136,10 +178,37 @@ def _health_ok(api: dict) -> bool:
 
 
 def mint_login_url() -> str:
-    """A one-time login URL for ``alle ui`` — carries a single-use token."""
+    """A one-time login URL for ``alle ui`` — carries a single-use token.
+
+    Uses the canonical per-install hostname so the resulting session cookie is
+    scoped to a host no other local service can ever be."""
     api = control_api()
     token = auth.mint_login_token(api["secret"])
-    return f"http://{api['address']}/?token={token}"  # noqa:S5332
+    return f"http://{_canonical_host(api)}/?token={token}"  # noqa:S5332
+
+
+# ---- session revocation (logout) --------------------------------------------
+
+
+def _revocation_path() -> Path:
+    return paths.state_dir() / "web_revocation.json"
+
+
+def revoked_at() -> int:
+    """The persisted logout time: sessions issued before it are dead."""
+    try:
+        return int(json.loads(_revocation_path().read_text()).get("revoked_at", 0))
+    except (OSError, ValueError, AttributeError):
+        return 0
+
+
+def revoke_sessions(now: int) -> None:
+    """Persist a logout: every session issued before ``now`` stops verifying.
+
+    Survives daemon restarts (sessions themselves are stateless, so revocation
+    must not be in-memory only). Not a secret — plain 0644 is fine.
+    """
+    _revocation_path().write_text(json.dumps({"revoked_at": int(now)}))
 
 
 # ---- body field validation -------------------------------------------------
@@ -248,6 +317,7 @@ class _Handler(BaseHTTPRequestHandler):
     server_version = "alle-webui"
     secret = ""
     address = ""
+    canonical = ""  # "<per-install-hostname>:<port>" — the browser-facing host
     consumed: set[str] = set()
     # Socket deadline for reading the request line, headers, and body — a
     # client that connects and stalls cannot pin a worker thread forever.
@@ -259,10 +329,16 @@ class _Handler(BaseHTTPRequestHandler):
     # -- helpers --
     def _loopback_host(self, host: str) -> bool:
         parsed = urlparse("//" + host)
-        return parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+        name = parsed.hostname
+        return name in {"127.0.0.1", "localhost", "::1"} or (
+            bool(name) and host == self.canonical
+        )
 
     def _host_ok(self) -> bool:
         return self._loopback_host(self.headers.get("Host", ""))
+
+    def _on_canonical_host(self) -> bool:
+        return self.headers.get("Host", "") == self.canonical
 
     def _origin_ok(self) -> bool:
         origin = self.headers.get("Origin")
@@ -285,9 +361,18 @@ class _Handler(BaseHTTPRequestHandler):
         return None
 
     def _authed(self) -> bool:
-        return auth.check_bearer(
-            self.secret, self.headers.get("Authorization")
-        ) or auth.verify_session(self.secret, self._cookie())
+        if auth.check_bearer(self.secret, self.headers.get("Authorization")):
+            return True
+        cookie = self._cookie()
+        if not auth.verify_session(self.secret, cookie, revoked_at=revoked_at()):
+            return False
+        # Rolling idle refresh: as the session ages past half its idle window,
+        # re-issue it (attached by _send) so activity keeps it alive up to the
+        # SESSION_MAX cap, while a closed tab idles out in SESSION_IDLE.
+        refreshed = auth.refresh_session(self.secret, cookie or "")
+        if refreshed:
+            self._refresh_cookie = self._cookie_header_value(refreshed)
+        return True
 
     def _send(self, code: int, body: bytes, ctype: str, extra: dict | None = None):
         self.send_response(code)
@@ -297,6 +382,11 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
+        refresh = getattr(self, "_refresh_cookie", None)
+        # an explicit Set-Cookie (login/logout) always outranks a refresh
+        if refresh and 200 <= code < 300 and "Set-Cookie" not in (extra or {}):
+            self.send_header("Set-Cookie", refresh)
+            self._refresh_cookie = None
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -309,14 +399,22 @@ class _Handler(BaseHTTPRequestHandler):
         ).encode()
         self._send(code, body, "application/json", extra)
 
+    def _cookie_header_value(self, cookie: str) -> str:
+        return (
+            f"alle_session={cookie}; Path=/; HttpOnly; SameSite=Strict; "
+            f"Max-Age={auth.SESSION_IDLE}"
+        )
+
     def _set_session_cookie(self) -> dict:
-        cookie = auth.make_session(self.secret)
-        return {
-            "Set-Cookie": (
-                f"alle_session={cookie}; Path=/; HttpOnly; SameSite=Strict; "
-                f"Max-Age={auth.SESSION_TTL}"
-            )
-        }
+        import time
+
+        # mint strictly after any persisted revocation, so a re-login in the
+        # same second as a logout is not swallowed by it
+        now = int(time.time())
+        cookie = auth.make_session(
+            self.secret, now=now, issued=max(now, revoked_at() + 1)
+        )
+        return {"Set-Cookie": self._cookie_header_value(cookie)}
 
     # -- verbs --
     def do_GET(self):
@@ -437,6 +535,20 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -- routes --
     def _root(self, query: dict):
+        if not self._on_canonical_host():
+            # Send browsers on a literal loopback host (old bookmark, typed
+            # 127.0.0.1) to the per-install hostname, query preserved — the
+            # session cookie must only ever exist on our unique host, never on
+            # 127.0.0.1 where every other local web app would receive it.
+            return self._send(
+                302,
+                b"",
+                "text/plain",
+                {
+                    "Location": f"http://{self.canonical}{self.path}",  # noqa: S5332
+                    "Cache-Control": "no-store",
+                },
+            )
         # `alle ui` lands here with a one-time token: consume it, set the session
         # cookie, and redirect to a clean URL so the token leaves the address bar.
         token = (query.get("token") or [None])[0]
@@ -476,6 +588,9 @@ class _Handler(BaseHTTPRequestHandler):
         )
 
     def _login_post(self):
+        if not self._on_canonical_host():
+            # a session cookie must never be minted for a shared literal host
+            return self._json(403, {"error": f"sign in at http://{self.canonical}/"})
         body = self._json_body()
         _fields(body, "token")
         token = _str_field(body, "token")
@@ -622,6 +737,23 @@ class _Handler(BaseHTTPRequestHandler):
         seg = path.strip("/").split("/")[2:]  # drop "api/v1"
         body = self._json_body()
 
+        if method == "POST" and seg == ["logout"]:
+            import time
+
+            _fields(body)
+            # Sessions are stateless, so logout is a persisted revocation
+            # time: every session issued before it stops verifying (on this
+            # and any future daemon). The bearer secret is unaffected.
+            revoke_sessions(int(time.time()))
+            self._refresh_cookie = None  # never re-issue on the logout response
+            applog.log("web ui: logout — all sessions revoked")
+            return self._json(
+                200,
+                {"ok": True},
+                {
+                    "Set-Cookie": "alle_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+                },
+            )
         if method == "POST" and seg == ["validate"]:
             _fields(body, "text")
             return self._call(service.setup_validate, _str_field(body, "text"))
@@ -859,6 +991,7 @@ def build_server() -> ThreadingHTTPServer:
     host, port = api["address"].split(":")
     _Handler.secret = api["secret"]
     _Handler.address = api["address"]
+    _Handler.canonical = _canonical_host(api)
     _Handler.consumed = set()
     return _BoundedServer((host, int(port)), _Handler)
 

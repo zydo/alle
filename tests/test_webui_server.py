@@ -48,10 +48,42 @@ def _req(url, *, method="GET", headers=None, data=None, raw=None):
         return e.code, e.read(), dict(e.headers)
 
 
+def _canon() -> str:
+    """The canonical per-install host:port (sent as an explicit Host header —
+    tests connect to the literal 127.0.0.1 address, like a browser that just
+    resolved the .localhost name)."""
+    return server._canonical_host()
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
+
+
+def _get_no_redirect(url, headers=None):
+    opener = urllib.request.build_opener(_NoRedirect)
+    req = urllib.request.Request(url, headers=headers or {})
+    try:
+        with opener.open(req) as resp:  # noqa: S310 (loopback test)
+            return resp.status, dict(resp.headers)
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers)
+
+
 def test_root_serves_login_page_when_unauthenticated(live):
     base, _ = live
-    status, body, _ = _req(base + "/")
+    status, body, _ = _req(base + "/", headers={"Host": _canon()})
     assert status == 200 and b"sign in" in body.lower()
+
+
+def test_literal_host_page_load_redirects_to_canonical(live):
+    # cookies are host-scoped: a page (and its cookie) must never live on
+    # 127.0.0.1, which every other local web app shares
+    base, _ = live
+    status, headers = _get_no_redirect(base + "/?token=abc")
+    assert status == 302
+    assert headers["Location"] == f"http://{_canon()}/?token=abc"  # query kept
+    assert "Set-Cookie" not in headers  # nothing minted on the literal host
 
 
 def test_api_requires_auth(live):
@@ -81,24 +113,35 @@ def test_bad_host_is_refused_dns_rebinding(live):
 
 def test_loopback_forwarded_host_is_allowed_but_origin_must_match(live):
     base, secret = live
+    # bearer API access works on any loopback host (tunnels, scripts)
     status, _, _ = _req(
         base + "/api/v1/status",
         headers={"Authorization": f"Bearer {secret}", "Host": "127.0.0.1:8080"},
     )
     assert status == 200
 
-    status, _, _ = _req(
+    # … but a session cookie is only ever minted on the canonical host —
+    # a 127.0.0.1-scoped cookie would leak to every other local service
+    status, body, _ = _req(
         base + "/api/v1/login",
         method="POST",
         headers={"Origin": "http://127.0.0.1:8080", "Host": "127.0.0.1:8080"},
         data={"token": secret},
     )
-    assert status == 200
+    assert status == 403 and _canon() in json.loads(body)["error"]
 
+    # on the canonical host, the origin must match it exactly
     status, _, _ = _req(
         base + "/api/v1/login",
         method="POST",
-        headers={"Origin": "http://127.0.0.1:8081", "Host": "127.0.0.1:8080"},
+        headers={"Origin": f"http://{_canon()}", "Host": _canon()},
+        data={"token": secret},
+    )
+    assert status == 200
+    status, _, _ = _req(
+        base + "/api/v1/login",
+        method="POST",
+        headers={"Origin": "http://127.0.0.1:8081", "Host": _canon()},
         data={"token": secret},
     )
     assert status == 403
@@ -121,7 +164,7 @@ def test_login_with_secret_sets_httponly_samesite_cookie(live):
     status, _, headers = _req(
         base + "/api/v1/login",
         method="POST",
-        headers={"Origin": base},
+        headers={"Origin": f"http://{_canon()}", "Host": _canon()},
         data={"token": secret},
     )
     assert status == 200
@@ -134,21 +177,16 @@ def test_one_time_token_redirects_and_is_single_use(live):
     base, secret = live
     token = auth.mint_login_token(secret)
 
-    # first use: 302 to a clean URL with the session cookie set
-    class NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, *a, **k):
-            return None
-
-    opener = urllib.request.build_opener(NoRedirect)
-    try:
-        opener.open(base + f"/?token={token}")  # noqa: S310
-        status = None
-    except urllib.error.HTTPError as e:
-        status, cookie = e.code, e.headers.get("Set-Cookie", "")
-    assert status == 302 and "alle_session=" in cookie
+    # first use (on the canonical host, where the login URL points): 302 to a
+    # clean URL with the session cookie set
+    status, headers = _get_no_redirect(
+        base + f"/?token={token}", headers={"Host": _canon()}
+    )
+    assert status == 302 and "alle_session=" in headers.get("Set-Cookie", "")
+    assert headers["Location"] == "/"
 
     # second use of the same token: no redirect — it just serves the login page
-    st, body, _ = _req(base + f"/?token={token}")
+    st, body, _ = _req(base + f"/?token={token}", headers={"Host": _canon()})
     assert st == 200 and b"sign in" in body.lower()
 
 
@@ -169,8 +207,82 @@ def test_path_traversal_is_blocked(live):
 def test_missing_page_asset_is_a_clear_error_not_blank(live, monkeypatch):
     base, _ = live
     monkeypatch.setattr(server, "_asset", lambda name: None)  # simulate missing assets
-    status, body, _ = _req(base + "/")
+    status, body, _ = _req(base + "/", headers={"Host": _canon()})
     assert status == 500 and b"assets are missing" in body  # never a silent blank page
+
+
+# ---- session lifecycle: logout, revocation, rolling refresh ----
+
+
+def _session_cookie(base, secret) -> str:
+    _, _, headers = _req(
+        base + "/api/v1/login",
+        method="POST",
+        headers={"Origin": f"http://{_canon()}", "Host": _canon()},
+        data={"token": secret},
+    )
+    return headers["Set-Cookie"].split(";")[0]  # "alle_session=<value>"
+
+
+def test_logout_revokes_every_session(live):
+    base, secret = live
+    cookie = _session_cookie(base, secret)
+    st, _, _ = _req(
+        base + "/api/v1/status", headers={"Host": _canon(), "Cookie": cookie}
+    )
+    assert st == 200  # the session works …
+
+    st, _, headers = _req(
+        base + "/api/v1/logout",
+        method="POST",
+        headers={
+            "Origin": f"http://{_canon()}",
+            "Host": _canon(),
+            "Cookie": cookie,
+        },
+        data={},
+    )
+    assert st == 200
+    assert "Max-Age=0" in headers.get("Set-Cookie", "")  # cookie cleared
+
+    # … and is dead afterwards, even though it hasn't expired
+    st, _, _ = _req(
+        base + "/api/v1/status", headers={"Host": _canon(), "Cookie": cookie}
+    )
+    assert st == 401
+    # bearer access (the persistent secret) is unaffected by logout
+    st, _, _ = _req(base + "/api/v1/status", headers=_bearer(secret))
+    assert st == 200
+
+
+def test_aged_session_is_rolled_on_activity(live):
+    base, secret = live
+    # a session past half its idle window (issued in the past, still valid)
+    import time as _time
+
+    now = int(_time.time())
+    aged = auth.make_session(secret, now=now - auth.SESSION_IDLE // 2 - 5)
+    st, _, headers = _req(
+        base + "/api/v1/status",
+        headers={"Host": _canon(), "Cookie": f"alle_session={aged}"},
+    )
+    assert st == 200
+    refreshed = headers.get("Set-Cookie", "")
+    assert "alle_session=" in refreshed  # rolled: a replacement cookie rides along
+    new_value = refreshed.split(";")[0].split("=", 1)[1]
+    assert new_value != aged
+    # the replacement keeps the original issue time (SESSION_MAX still caps)
+    assert new_value.split(".", 1)[0] == aged.split(".", 1)[0]
+
+
+def test_fresh_session_is_not_rolled(live):
+    base, secret = live
+    cookie = _session_cookie(base, secret)
+    st, _, headers = _req(
+        base + "/api/v1/status", headers={"Host": _canon(), "Cookie": cookie}
+    )
+    assert st == 200
+    assert "Set-Cookie" not in headers  # no churn on every poll
 
 
 # ---- /api/v1 providers + channels (Phase 4.2) ----

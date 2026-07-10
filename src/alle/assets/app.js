@@ -55,6 +55,11 @@ async function scheduleNextTick() {
   setTimeout(scheduleNextTick, 3000);
 }
 
+$("logout").addEventListener("click", async () => {
+  await api.post("/api/v1/logout"); // revokes every session, clears the cookie
+  location.href = "/"; // back to the sign-in page
+});
+
 globalThis.addEventListener("hashchange", route);
 route();
 await scheduleNextTick();

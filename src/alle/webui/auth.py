@@ -10,9 +10,13 @@ Three credentials, all keyed off one generated per-installation secret
   can read the secret) and handed to the browser in the URL exactly once. The
   server exchanges it for a session cookie and refuses to accept it twice, so a
   copy left in shell history / browser history is inert.
-* **Session cookie** — an HMAC over an expiry, issued after login. Stateless
-  (validated with the secret alone, so it survives a daemon restart) and set
-  ``HttpOnly; SameSite=Strict`` by the server.
+* **Session cookie** — an HMAC over an issue time + expiry, issued after
+  login. Stateless (validated with the secret alone, so it survives a daemon
+  restart) and set ``HttpOnly; SameSite=Strict`` by the server. Sessions are
+  *idle-scoped*: each lasts ``SESSION_IDLE`` from the last activity (the
+  server re-issues the cookie as it ages), capped at ``SESSION_MAX`` from the
+  original sign-in. Logout revokes every session issued before it (the server
+  persists the revocation time and passes it to :func:`verify_session`).
 
 HMACs are compared with ``hmac.compare_digest`` (constant time).
 """
@@ -25,7 +29,8 @@ import time
 from hashlib import sha256
 
 LOGIN_TTL = 120  # seconds a one-time login token is valid
-SESSION_TTL = 12 * 3600  # seconds a browser session lasts
+SESSION_IDLE = 30 * 60  # a session ends after this much inactivity
+SESSION_MAX = 12 * 3600  # absolute session cap, regardless of activity
 
 
 def _sign(secret: str, msg: str) -> str:
@@ -96,25 +101,75 @@ def _expire_consumed(consumed: set[str], now: int) -> None:
 # ---- session cookie ------------------------------------------------------------
 
 
-def make_session(secret: str, *, now: int | None = None) -> str:
-    """A stateless session token: ``<expiry>.<hmac>``."""
+def make_session(
+    secret: str, *, now: int | None = None, issued: int | None = None
+) -> str:
+    """A stateless session token: ``<issued>.<expiry>.<hmac>``.
+
+    ``issued`` defaults to now; a re-issue (rolling refresh) passes the
+    original sign-in time through so ``SESSION_MAX`` keeps counting from the
+    real login, not from the last activity.
+    """
     now = int(time.time()) if now is None else now
-    expiry = now + SESSION_TTL
-    return f"{expiry}.{_sign(secret, f'session:{expiry}')}"
+    issued = now if issued is None else issued
+    expiry = min(now + SESSION_IDLE, issued + SESSION_MAX)
+    payload = f"session:{issued}:{expiry}"
+    return f"{issued}.{expiry}.{_sign(secret, payload)}"
 
 
-def verify_session(secret: str, cookie: str | None, *, now: int | None = None) -> bool:
+def _parse_session(cookie: str) -> tuple[int, int, str] | None:
+    try:
+        issued_s, expiry_s, sig = cookie.split(".", 2)
+        return int(issued_s), int(expiry_s), sig
+    except (ValueError, AttributeError):
+        return None
+
+
+def verify_session(
+    secret: str,
+    cookie: str | None,
+    *,
+    now: int | None = None,
+    revoked_at: int = 0,
+) -> bool:
+    """True iff the cookie is authentic, unexpired, and not revoked.
+
+    ``revoked_at`` is the persisted logout time: any session issued at or
+    before it is dead, however much idle life it had left (the issuer mints
+    post-logout sessions with ``issued > revoked_at``, so a re-login in the
+    same second still works).
+    """
     now = int(time.time()) if now is None else now
     if not cookie:
         return False
-    try:
-        expiry_s, sig = cookie.split(".", 1)
-        expiry = int(expiry_s)
-    except (ValueError, AttributeError):
+    parsed = _parse_session(cookie)
+    if parsed is None:
         return False
-    if expiry < now:
+    issued, expiry, sig = parsed
+    if expiry < now or issued > expiry or expiry - issued > SESSION_MAX:
         return False
-    return hmac.compare_digest(sig, _sign(secret, f"session:{expiry}"))
+    if revoked_at and issued <= revoked_at:
+        return False
+    return hmac.compare_digest(sig, _sign(secret, f"session:{issued}:{expiry}"))
+
+
+def refresh_session(secret: str, cookie: str, *, now: int | None = None) -> str | None:
+    """A rolled replacement for a valid cookie past half its idle window.
+
+    Keeps the original issue time (so ``SESSION_MAX`` still caps the whole
+    session) and returns None when the cookie is still fresh or the cap is
+    reached — the caller only sets a new cookie when one is returned.
+    """
+    now = int(time.time()) if now is None else now
+    parsed = _parse_session(cookie)
+    if parsed is None:
+        return None
+    issued, expiry, _sig_ = parsed
+    if expiry - now > SESSION_IDLE // 2:
+        return None  # fresh enough — don't re-issue on every poll
+    if now + SESSION_IDLE // 2 >= issued + SESSION_MAX:
+        return None  # absolute cap (nearly) reached — let it expire
+    return make_session(secret, now=now, issued=issued)
 
 
 # ---- readiness challenge ---------------------------------------------------

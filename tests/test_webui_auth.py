@@ -38,14 +38,52 @@ def test_login_token_expires():
     )
 
 
-def test_session_cookie_roundtrip_and_expiry():
+def test_session_cookie_roundtrip_and_idle_expiry():
     cookie = auth.make_session(SECRET, now=1000)
     assert auth.verify_session(SECRET, cookie, now=1000) is True
-    assert auth.verify_session(SECRET, cookie, now=1000 + auth.SESSION_TTL - 1) is True
-    assert auth.verify_session(SECRET, cookie, now=1000 + auth.SESSION_TTL + 1) is False
+    assert auth.verify_session(SECRET, cookie, now=1000 + auth.SESSION_IDLE - 1) is True
+    assert (
+        auth.verify_session(SECRET, cookie, now=1000 + auth.SESSION_IDLE + 1) is False
+    )
     assert auth.verify_session("other", cookie, now=1000) is False
     assert auth.verify_session(SECRET, None) is False
     assert auth.verify_session(SECRET, "garbage") is False
+    # the pre-idle-sessions format ("<expiry>.<sig>") is simply invalid now
+    assert auth.verify_session(SECRET, "2000.abcdef", now=1000) is False
+
+
+def test_session_refresh_rolls_but_caps_at_session_max():
+    cookie = auth.make_session(SECRET, now=1000)
+    # still fresh: no re-issue churn on every poll
+    assert auth.refresh_session(SECRET, cookie, now=1001) is None
+    # past half the idle window: rolled, and the roll extends validity …
+    later = 1000 + auth.SESSION_IDLE - 10
+    rolled = auth.refresh_session(SECRET, cookie, now=later)
+    assert rolled is not None
+    assert (
+        auth.verify_session(SECRET, rolled, now=later + auth.SESSION_IDLE - 1) is True
+    )
+    # … but the original issue time rides along, so SESSION_MAX still caps
+    assert rolled.split(".", 1)[0] == "1000"
+    near_cap = 1000 + auth.SESSION_MAX - 5
+    capped = auth.make_session(SECRET, now=near_cap, issued=1000)
+    assert auth.verify_session(SECRET, capped, now=near_cap) is True
+    assert auth.refresh_session(SECRET, capped, now=near_cap) is None  # no roll
+    assert auth.verify_session(SECRET, capped, now=1000 + auth.SESSION_MAX + 1) is False
+
+
+def test_session_revocation_kills_older_sessions_only():
+    old = auth.make_session(SECRET, now=1000)
+    assert auth.verify_session(SECRET, old, now=1100, revoked_at=1050) is False
+    # issued in the same second as the logout: also dead (the issuer mints
+    # post-logout sessions with issued = revoked_at + 1)
+    same = auth.make_session(SECRET, now=1050)
+    assert auth.verify_session(SECRET, same, now=1100, revoked_at=1050) is False
+    fresh = auth.make_session(SECRET, now=1051, issued=1051)
+    assert auth.verify_session(SECRET, fresh, now=1100, revoked_at=1050) is True
+    # a forged cookie claiming a post-revocation issue time still fails the HMAC
+    forged = "1060." + old.split(".", 1)[1]
+    assert auth.verify_session(SECRET, forged, now=1100, revoked_at=1050) is False
 
 
 def test_bearer_and_secret_checks_are_constant_style():

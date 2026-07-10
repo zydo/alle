@@ -741,14 +741,21 @@ or **replace** the whole setup (replace confirms) — same as `alle import` /
 the masthead links to the project on GitHub.
 
 - The server binds to `127.0.0.1` only and is never exposed to the network (there
-  is no `--bind` option, by design). Reach it remotely over an SSH tunnel:
-  `ssh -L 8080:127.0.0.1:<port> user@host`, then browse `http://127.0.0.1:8080`
-  (the `<port>` is shown by `alle status` / `alle start`). SSH provides
-  encryption and access control; do not expose or reverse-proxy the alle Web UI
-  port directly.
+  is no `--bind` option, by design). The browser URL uses a per-installation
+  `alle-<random>.localhost` hostname (browsers resolve it to loopback
+  themselves) so the session cookie is scoped to alle alone, never shared with
+  other local web apps. Reach it remotely over an SSH tunnel on the **same**
+  port: `ssh -L <port>:127.0.0.1:<port> user@host`, then open the `alle ui`
+  sign-in link locally (the `<port>` is shown by `alle status` / `alle start`).
+  SSH provides encryption and access control; do not expose or reverse-proxy
+  the alle Web UI port directly.
 - Auth: `alle ui` mints a single-use login token (exchanged for an `HttpOnly`
-  session cookie); the persistent secret never appears in a URL. Manual sign-in:
-  paste the `secret` from `~/.alle/control_api.json`.
+  session cookie); the persistent secret never appears in a URL, and `alle ui`
+  only sends the sign-in link after the listener proves (via an HMAC health
+  challenge) that it really is alle. Manual sign-in: paste the `secret` from
+  `~/.alle/control_api.json`. Sessions idle out after 30 minutes without an
+  open tab (12 h absolute cap); the masthead's **Sign out** revokes every
+  session. The full threat model: [docs/security.md](security.md).
 
 ---
 
