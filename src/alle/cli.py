@@ -31,7 +31,7 @@ import threading
 import time
 from pathlib import Path
 
-from alle import __version__, applog, daemon, output, service
+from alle import __version__, applog, credentials, daemon, output, service
 from alle.providers import (
     ProviderError,
     auth_fields,
@@ -40,6 +40,7 @@ from alle.providers import (
     kind,
     known,
     match,
+    preview,
 )
 from alle.state import Store
 
@@ -125,6 +126,11 @@ def cmd_providers_add(args):
     provider = _resolve_provider(args.provider)
 
     if kind(provider) == "config":
+        if getattr(args, "token", None):
+            sys.exit(
+                f"{display_name(provider)} imports channels from a .conf; "
+                "it has no token to set."
+            )
         result = service.provider_add_config(provider)
         print(f"Added provider {result['display_name']}.")
         help_ = result["config_help"]
@@ -132,25 +138,46 @@ def cmd_providers_add(args):
             print(f"  {help_}")
         return
 
-    # token provider — prompt, (validate if functional), store credential
-    help_text, url = auth_help(provider)
-    print(f"Add provider {display_name(provider)}.")
-    if help_text:
-        print(f"  How to obtain: {help_text}")
-    if url:
-        print(f"  {url}")
-    creds = {}
-    for field in auth_fields(provider):
-        prompt = f"  {field.label}: "
-        value = (_read_secret(prompt) if field.secret else input(prompt)).strip()
-        if not value:
-            sys.exit(f"{field.label} is required.")
-        creds[field.key] = value
+    # A token provider that's already added: this is a credential *replacement*
+    # (idempotent add), gated behind confirmation so it can't silently swap a
+    # working token for a bad one.
+    replacing = Store.load().has_provider(provider)
+    if replacing and not _confirm_token_replace(provider, args):
+        sys.exit("Aborted.")
+
+    if not replacing:
+        help_text, url = auth_help(provider)
+        print(f"Add provider {display_name(provider)}.")
+        if help_text:
+            print(f"  How to obtain: {help_text}")
+        if url:
+            print(f"  {url}")
+
+    creds = _collect_token_creds(provider, args)
 
     try:
-        result = service.provider_add_token(provider, creds)
+        result = service.provider_add_or_update_token(provider, creds)
     except ProviderError as e:
+        # Nothing was written (validation runs before the store), so on a replace
+        # the previous credential is intact.
         sys.exit(f"credential rejected: {e}")
+
+    if result.get("unchanged"):
+        # Re-entered the same token — nothing changed, so don't claim a re-resolve.
+        print(
+            f"{result['display_name']} already has that token "
+            f"({result['credential_preview']}) — nothing to do."
+        )
+        return
+
+    if result["updated"]:
+        print(
+            f"Updated {result['display_name']} credential "
+            f"(token {result['credential_preview']})."
+        )
+        for line in output.provider_token_refresh(result["channels"]):
+            print(line)
+        return
 
     if not result["functional"]:
         print(
@@ -160,6 +187,43 @@ def cmd_providers_add(args):
     print(
         f"Added provider {result['display_name']} (credential {result['credential_preview']})."
     )
+
+
+def _confirm_token_replace(provider: str, args) -> bool:
+    """Confirm replacing an already-added token provider's credential. ``--yes``
+    (or ``--token`` in a script) skips the prompt; off a TTY without either we
+    refuse rather than silently overwrite a working token."""
+    creds = credentials.get(provider) or {}
+    current = preview(provider, creds) or "none"
+    print(f"{display_name(provider)} is already added (token {current}).")
+    if getattr(args, "yes", False):
+        return True
+    if not sys.stdin.isatty():
+        sys.exit("Refusing to replace the token without --yes (not a terminal).")
+    return input("Replace its token? [y/N] ").strip().lower() in ("y", "yes")
+
+
+def _collect_token_creds(provider: str, args) -> dict:
+    """Gather a token provider's credential fields, from ``--token`` (single-secret
+    providers, for scripts) or interactive prompts."""
+    fields = auth_fields(provider)
+    token_flag = getattr(args, "token", None)
+    if token_flag:
+        secret_fields = [f for f in fields if f.secret]
+        if len(secret_fields) != 1 or len(fields) != 1:
+            sys.exit(
+                f"--token can't be used with {display_name(provider)} "
+                "(it needs more than one field); run without --token to be prompted."
+            )
+        return {fields[0].key: token_flag.strip()}
+    creds = {}
+    for field in fields:
+        prompt = f"  {field.label}: "
+        value = (_read_secret(prompt) if field.secret else input(prompt)).strip()
+        if not value:
+            sys.exit(f"{field.label} is required.")
+        creds[field.key] = value
+    return creds
 
 
 def cmd_providers_ls(args):
@@ -224,12 +288,21 @@ def cmd_channels_add(args):
         provider, args.country, args.city, args.config, args.label or ""
     )
     channel = result["channel"]
+    labelled = f' labelled "{channel.label}"' if channel.label else ""
+    if result.get("unchanged"):
+        # A byte-identical re-import of an existing .conf changes nothing — say so
+        # rather than reporting a misleading "Updated".
+        print(
+            f"Channel {channel.id}{labelled} already exists under "
+            f"{result['display_name']} with identical settings — nothing to do "
+            f"(on 127.0.0.1:{channel.port})."
+        )
+        return
     if result.get("imported_from"):
         verb = "Updated" if result.get("updated") else "Imported"
         source = f" from {result['imported_from']}"
     else:
         verb, source = "Added", ""
-    labelled = f' labelled "{channel.label}"' if channel.label else ""
     print(
         f"{verb} channel {channel.id}{labelled} under {result['display_name']}{source} "
         f"on 127.0.0.1:{channel.port}."
@@ -866,8 +939,22 @@ def build_parser() -> argparse.ArgumentParser:
     pr = sub.add_parser("providers", help="manage VPN providers")
     pr.set_defaults(func=_show_help(pr))
     pr_sub = pr.add_subparsers(dest="providers_command")
-    pa = pr_sub.add_parser("add", help="add a provider (prompts for a token if needed)")
+    pa = pr_sub.add_parser(
+        "add",
+        help="add a provider, or replace an added token provider's token",
+    )
     pa.add_argument("provider", help=_provider_help())
+    pa.add_argument(
+        "--token",
+        help="token value for scripts (single-secret token providers); "
+        "skips the interactive prompt",
+    )
+    pa.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="skip the confirmation when replacing an existing token",
+    )
     pa.set_defaults(func=cmd_providers_add)
     pls = pr_sub.add_parser("ls", help="list the providers you've added")
     pls.add_argument("--json", action="store_true", help="print machine-readable JSON")

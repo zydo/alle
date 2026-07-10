@@ -39,6 +39,7 @@ def test_provider_add_token_validates_stores_and_lists_masked_secret(monkeypatch
             "display_name": "NordVPN",
             "kind": "token",
             "credential": "******3456",
+            "has_token": True,
             "channel_count": 0,
         }
     ]
@@ -314,3 +315,165 @@ def test_channel_add_stores_label(monkeypatch):
     monkeypatch.setattr(service, "provider_wg", lambda p, c, city: dict(WG))
     result = service.channel_add("nordvpn", "US", None, label="  My US  ")
     assert result["channel"].label == "My US"  # stripped and stored
+
+
+# ---- token replacement (Phase 5.5) ----------------------------------------
+
+
+def _proton_conf(endpoint: str = "1.2.3.4:51820") -> str:
+    import base64
+
+    key = base64.b64encode(b"k" * 32).decode()
+    pub = base64.b64encode(b"p" * 32).decode()
+    return (
+        f"[Interface]\nPrivateKey = {key}\nAddress = 10.0.0.2/32\n"
+        f"[Peer]\nPublicKey = {pub}\nEndpoint = {endpoint}\n"
+    )
+
+
+def test_provider_update_token_replaces_and_reresolves(monkeypatch):
+    monkeypatch.setattr(service, "validate_provider_credentials", lambda p, c: None)
+    store = service.Store.load()
+    store.add_provider("nordvpn")
+    store.add_channel("nordvpn", "Japan", "", dict(WG))
+    store.add_channel("nordvpn", "United States", "", dict(WG))
+    service.credentials.set_("nordvpn", {"token": "old-token"})
+
+    resolved_with = {}
+
+    def fake_resolver(provider, creds):
+        resolved_with["creds"] = creds
+        return lambda country, city: {"private_key": "fresh", "peer": {"loc": country}}
+
+    monkeypatch.setattr(service, "provider_resolver", fake_resolver)
+
+    result = service.provider_update_token("nordvpn", {"token": "new-token"})
+
+    assert result["updated"] is True
+    assert resolved_with["creds"] == {"token": "new-token"}
+    assert service.credentials.get("nordvpn") == {"token": "new-token"}
+    assert sorted(result["channels"]["resolved"]) == ["japan_1", "united_states_1"]
+    assert result["channels"]["failed"] == []
+    # every channel got the freshly-resolved params
+    reloaded = service.Store.load()
+    assert reloaded.get_channel("nordvpn", "japan_1").wg["private_key"] == "fresh"
+
+
+def test_provider_update_token_same_token_is_noop(monkeypatch):
+    monkeypatch.setattr(service, "validate_provider_credentials", lambda p, c: None)
+    store = service.Store.load()
+    store.add_provider("nordvpn")
+    store.add_channel("nordvpn", "Japan", "", {"private_key": "keep", "peer": {}})
+    service.credentials.set_("nordvpn", {"token": "same-token"})
+
+    def must_not_resolve(provider, creds):
+        raise AssertionError("re-resolve must not run for an identical token")
+
+    monkeypatch.setattr(service, "provider_resolver", must_not_resolve)
+
+    # A surrounding-whitespace variant is still "the same" (set_ strips).
+    result = service.provider_update_token("nordvpn", {"token": "  same-token  "})
+
+    assert result["updated"] is False
+    assert result["unchanged"] is True
+    assert result["channels"] == {"resolved": [], "failed": []}
+    # the channel's params were left untouched
+    assert (
+        service.Store.load().get_channel("nordvpn", "japan_1").wg["private_key"]
+        == "keep"
+    )
+
+
+def test_provider_update_token_bad_token_keeps_old(monkeypatch):
+    def reject(provider, creds):
+        raise ProviderError("token rejected")
+
+    monkeypatch.setattr(service, "validate_provider_credentials", reject)
+    store = service.Store.load()
+    store.add_provider("nordvpn")
+    service.credentials.set_("nordvpn", {"token": "good-token"})
+
+    with pytest.raises(ProviderError):
+        service.provider_update_token("nordvpn", {"token": "bad-token"})
+
+    assert service.credentials.get("nordvpn") == {"token": "good-token"}  # unchanged
+
+
+def test_provider_update_token_per_channel_failure_keeps_old_wg(monkeypatch):
+    monkeypatch.setattr(service, "validate_provider_credentials", lambda p, c: None)
+    store = service.Store.load()
+    store.add_provider("nordvpn")
+    store.add_channel("nordvpn", "Japan", "", {"private_key": "keep", "peer": {}})
+    service.credentials.set_("nordvpn", {"token": "t"})
+
+    def failing_resolver(provider, creds):
+        def resolve(country, city):
+            raise ProviderError("no server")
+
+        return resolve
+
+    monkeypatch.setattr(service, "provider_resolver", failing_resolver)
+
+    result = service.provider_update_token("nordvpn", {"token": "t2"})
+
+    assert result["channels"] == {"resolved": [], "failed": ["japan_1"]}
+    # the channel kept its old params (auto-reconnect will refresh it)
+    assert (
+        service.Store.load().get_channel("nordvpn", "japan_1").wg["private_key"]
+        == "keep"
+    )
+
+
+def test_provider_update_token_rejects_config_provider():
+    store = service.Store.load()
+    store.add_provider("protonvpn")
+    with pytest.raises(service.ServiceError, match="no token to replace"):
+        service.provider_update_token("protonvpn", {"token": "x"})
+
+
+def test_provider_update_token_requires_added_provider():
+    with pytest.raises(service.ServiceError, match="is not added"):
+        service.provider_update_token("nordvpn", {"token": "x"})
+
+
+def test_provider_add_or_update_token_dispatches(monkeypatch):
+    monkeypatch.setattr(service, "validate_provider_credentials", lambda p, c: None)
+    monkeypatch.setattr(
+        service, "provider_resolver", lambda p, c: lambda a, b: dict(WG)
+    )
+
+    first = service.provider_add_or_update_token("nordvpn", {"token": "one"})
+    assert first["updated"] is False  # fresh add
+    second = service.provider_add_or_update_token("nordvpn", {"token": "two"})
+    assert second["updated"] is True  # now a replace
+    assert service.credentials.get("nordvpn") == {"token": "two"}
+
+
+# ---- duplicate .conf detection --------------------------------------------
+
+
+def test_reimport_identical_conf_reports_unchanged(tmp_path):
+    store = service.Store.load()
+    store.add_provider("protonvpn")
+    conf = tmp_path / "wg-US-CA-9.conf"
+    conf.write_text(_proton_conf())
+
+    first = service.channel_add("protonvpn", None, None, str(conf))
+    assert first["updated"] is False and first.get("unchanged") is False
+
+    again = service.channel_add("protonvpn", None, None, str(conf))
+    assert again["unchanged"] is True
+    assert again["updated"] is False
+
+
+def test_reimport_changed_conf_reports_updated(tmp_path):
+    store = service.Store.load()
+    store.add_provider("protonvpn")
+    conf = tmp_path / "wg-US-CA-9.conf"
+    conf.write_text(_proton_conf())
+    service.channel_add("protonvpn", None, None, str(conf))
+
+    conf.write_text(_proton_conf("9.9.9.9:51820"))
+    changed = service.channel_add("protonvpn", None, None, str(conf))
+    assert changed["unchanged"] is False
+    assert changed["updated"] is True

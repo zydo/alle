@@ -106,16 +106,40 @@ Manage VPN providers.
 
 ### `alle providers add <provider>`
 
-Add a provider.
+Add a provider — **or replace an already-added token provider's token**.
 
 - **Token providers** (`nordvpn`): prompts for the credential (input hidden, shown as
   `*`), validates it against the provider API, and stores it in `credentials.yaml`.
 - **Config providers** (`protonvpn`): just registers the provider — no credential —
   and prints how to import a `.conf`.
 
+**Replacing a token (idempotent add).** Running `add` for a token provider that is
+already configured is the supported way to rotate a bad/expired token — you don't
+remove and re-add (which would delete every channel). It shows the current masked
+token, confirms (`Replace its token? [y/N]`), validates the new one, and only then
+replaces it:
+
+- **Validation-first:** if the new token is rejected, the **old token is kept** and
+  the provider error is printed — a bad paste can't lock you out.
+- **Same token is a no-op:** re-entering the token already stored changes nothing —
+  it reports `already has that token — nothing to do` and does **not** re-resolve
+  channels.
+- **Channels re-resolve:** after a successful replace with a *different* token, every
+  one of that provider's channels is re-resolved with the new credential in one pass
+  (a fresh server per channel). A channel that can't be re-resolved right now keeps
+  its current server and refreshes on the next reconnect; the summary lists both sets.
+- **The token is never displayed** — only a masked preview (`nGx4****a91k`) is ever
+  shown, in any command, JSON, log, or the Web UI.
+
+`--token <value>` supplies the token non-interactively (for scripts; single-secret
+token providers only) and `-y`/`--yes` skips the replace confirmation. Off a
+terminal, a replace refuses without `--yes` rather than silently overwriting.
+
 ```bash
-alle providers add nordvpn        # prompts for an access token
-alle providers add protonvpn      # registers; import channels with --config
+alle providers add nordvpn                       # prompts for an access token
+alle providers add protonvpn                     # registers; import channels with --config
+alle providers add nordvpn                       # already added → confirm + replace token
+alle providers add nordvpn --token "$TOK" --yes  # scriptable token rotation
 ```
 
 ### `alle providers ls [--json]`
@@ -181,6 +205,9 @@ alle channels add protonvpn --config ~/Downloads/wg-US-CA-842.conf
 - The channel **id is the file name** (`wg-US-CA-842.conf` → `wg_us_ca_842`), no
   numeric suffix. Re-importing the same file is an **update in place** (keys may have
   rotated) — it keeps the id and local port stable and does not create a duplicate.
+  Re-importing a **byte-identical** `.conf` (same keys, server, and location)
+  changes nothing and says so (`… already exists … nothing to do`) instead of
+  reporting a misleading update.
 - Country/city are parsed best-effort from the file name's ISO codes (ProtonVPN's
   `wg-<CC>-<SUB>-<n>` convention, e.g. `US`/`CA` → United States / California). Only
   the country code is reliable; a missing/unknown subdivision shows as `(Unknown)`.

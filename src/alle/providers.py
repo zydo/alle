@@ -81,7 +81,8 @@ def nordvpn_derive_key(creds: dict) -> str:
         if e.code in (401, 403):
             raise ProviderAuthError(
                 f"nordvpn token rejected by API (HTTP {e.code}). "
-                "Generate a fresh token at my.nordaccount.com."
+                "Generate a fresh token at "
+                "https://my.nordaccount.com/dashboard/nordvpn/access-tokens."
             ) from e
         # e.g. 5xx: the API is unhappy, not the credential — retryable
         raise ProviderError(f"nordvpn credentials API failed (HTTP {e.code}).") from e
@@ -203,9 +204,9 @@ REGISTRY: dict[str, dict] = {
         "kind": "token",
         "functional": True,
         "fields": [AuthField("token", "Access token")],
-        "help": "my.nordaccount.com → Services → NordVPN → Manual setup → "
+        "help": "https://my.nordaccount.com/dashboard/nordvpn/access-tokens → "
         "generate a new access token.",
-        "url": "https://my.nordaccount.com/",
+        "url": "https://my.nordaccount.com/dashboard/nordvpn/access-tokens",
         "derive_key": nordvpn_derive_key,
         "wg_address": NORDVPN_WG_ADDRESS,
         "resolve": nordvpn_resolve,

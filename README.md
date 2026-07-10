@@ -182,6 +182,14 @@ alle locations nordvpn --country "United States"
 alle channels add nordvpn --country "United States" --city "Seattle"
 ```
 
+To rotate a bad or expired token later, run `alle providers add nordvpn` again
+(or use the gear on the provider in the Web UI): it confirms, validates the new
+token, and re-resolves the provider's channels — no need to remove and re-add.
+The stored token is never displayed back, only a masked preview. This is distinct
+from a bundle import (which changes your whole setup from a file); a token update
+changes one live credential. See
+[`alle providers add`](docs/cli-reference.md#alle-providers-add-provider).
+
 **Proton VPN** uses WireGuard config files downloaded from Proton:
 
 ```bash
@@ -190,7 +198,8 @@ alle channels add protonvpn --config ~/Downloads/wg-US-CA-842.conf
 ```
 
 Re-importing the same `.conf` file updates that channel in place, keeping the
-same channel id and local port.
+same channel id and local port; re-importing a byte-identical file changes
+nothing and tells you the channel already exists.
 
 **Friendly names**
 
@@ -335,7 +344,9 @@ page:
 - **Add channel wizard** — pick a provider (an icon-only row of providers plus
   an always-present "+" to add NordVPN or Proton VPN). For token providers like
   NordVPN, choose a **country and city from a searchable list** (no typing); for
-  Proton VPN, upload a WireGuard `.conf` (with a link to the portal).
+  Proton VPN, upload a WireGuard `.conf` (with a link to the portal). Each added
+  token provider carries a **gear** to replace its stored token (write-only — the
+  token is never shown back); replacing it re-resolves that provider's channels.
 - **Router rules** — add/delete rules, **drag to reorder** (first match wins),
   and toggle **Allow Non-VPN Traffic** (the Unmatched row: on lets unmatched
   destinations reach the Internet, off blocks them). A fixed **Priority 0 / LAN**

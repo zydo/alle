@@ -39,9 +39,10 @@ from alle.providers import (
     known,
     match,
     preview,
+    provider_resolver,
     provider_wg,
 )
-from alle.state import ReferencedError, Store
+from alle.state import ReferencedError, Store, channel_id_from_filename
 
 
 class ServiceError(RuntimeError):
@@ -114,7 +115,115 @@ def provider_add_token(provider: str, creds: dict) -> dict:
         "display_name": display_name(provider),
         "credential_preview": preview(provider, creds),
         "functional": is_functional(provider),
+        "updated": False,
+        "unchanged": False,
     }
+
+
+def _refresh_token_channels(provider: str, creds: dict) -> dict:
+    """Re-resolve every token channel's WireGuard params after a token change.
+
+    A token channel's ``wg`` is *derived* from (provider, token, location), so a
+    new token means the previously-picked servers were selected with a credential
+    that may no longer be valid. Resolve each channel afresh through the new
+    token, in one pass, reusing the shared resolver (account key derived once).
+
+    A per-channel resolve failure is non-fatal: the channel keeps its existing
+    ``wg`` (so it stays usable) and the daemon's probe + auto-reconnect refresh it
+    later — the same healing path the bundle apply relies on. Returns
+    ``{"resolved": [ids…], "failed": [ids…]}`` (channel ids, provider implied).
+    """
+    store = Store.load()
+    channels = store.provider_channels(provider)
+    resolved: list[str] = []
+    failed: list[str] = []
+    if not channels:
+        return {"resolved": resolved, "failed": failed}
+    try:
+        resolve = provider_resolver(provider, creds)
+    except ProviderError:
+        # The token just validated, so a resolver-build failure here is unusual;
+        # treat every channel as "couldn't refresh" rather than crash the update.
+        return {"resolved": resolved, "failed": [ch.id for ch in channels]}
+    for ch in channels:
+        try:
+            wg = resolve(ch.country or "", ch.city or "")
+        except ProviderError:
+            failed.append(ch.id)
+            continue
+        store.update_channel_wg(provider, ch.id, wg)
+        resolved.append(ch.id)
+    return {"resolved": resolved, "failed": failed}
+
+
+def provider_update_token(provider: str, creds: dict) -> dict:
+    """Replace an already-added token provider's credential, then refresh its
+    channels.
+
+    The new token is validated **before** anything is written, so a bad token
+    leaves the old one in place (the failure surfaces as a ``ProviderError``).
+    After the credential is stored, every dependent token channel is re-resolved
+    through the new token (see :func:`_refresh_token_channels`). Config providers
+    have no token and are rejected.
+    """
+    store = Store.load()
+    if not store.has_provider(provider):
+        raise ServiceError(
+            f"{display_name(provider)} is not added — run `alle providers add {provider}` first."
+        )
+    if kind(provider) == "config":
+        raise ServiceError(
+            f"{display_name(provider)} imports channels from a WireGuard .conf; "
+            "it has no token to replace."
+        )
+    # Re-entering the identical token is a no-op: don't rewrite the file or churn
+    # every channel through a needless re-resolve — just report "unchanged".
+    if _same_credential(provider, creds):
+        return {
+            "provider": provider,
+            "display_name": display_name(provider),
+            "credential_preview": preview(provider, creds),
+            "functional": is_functional(provider),
+            "updated": False,
+            "unchanged": True,
+            "channels": {"resolved": [], "failed": []},
+        }
+    if is_functional(provider):
+        validate_provider_credentials(provider, creds)  # raises → old token kept
+    credentials.set_(provider, creds)
+    channels = _refresh_token_channels(provider, creds)
+    daemon.ensure_running()
+    applog.log(
+        f"updated provider {provider} token "
+        f"({len(channels['resolved'])} channel(s) re-resolved, "
+        f"{len(channels['failed'])} unchanged)"
+    )
+    return {
+        "provider": provider,
+        "display_name": display_name(provider),
+        "credential_preview": preview(provider, creds),
+        "functional": is_functional(provider),
+        "updated": True,
+        "unchanged": False,
+        "channels": channels,
+    }
+
+
+def _same_credential(provider: str, creds: dict) -> bool:
+    """True when ``creds`` matches what's already stored for ``provider`` (after the
+    same whitespace-stripping :func:`credentials.set_` applies), so replacing it
+    would change nothing."""
+    stored = credentials.get(provider)
+    return bool(stored) and credentials.clean(creds) == stored
+
+
+def provider_add_or_update_token(provider: str, creds: dict) -> dict:
+    """One entry point for both surfaces: add the provider if new, or replace its
+    token (and refresh channels) if it already exists. Returns the same shape as
+    the underlying primitive, with ``updated`` telling the two cases apart."""
+    if Store.load().has_provider(provider):
+        return provider_update_token(provider, creds)
+    return provider_add_token(provider, creds)
 
 
 def provider_catalog() -> dict:
@@ -162,6 +271,7 @@ def provider_list() -> dict:
                 "display_name": display_name(provider),
                 "kind": kind(provider),
                 "credential": detail,
+                "has_token": kind(provider) == "token" and bool(creds),
                 "channel_count": len(store.provider_channels(provider)),
             }
         )
@@ -342,9 +452,15 @@ def _import_conf(
     stem = Path(filename).stem
     country, city = geo.from_filename(stem)
     # Identity is the file name: re-importing the same .conf updates it in place
-    # (keys may have rotated) rather than creating wg_..._2.
+    # (keys may have rotated) rather than creating wg_..._2. Snapshot the existing
+    # channel first (by the same slugged id upsert will use) so we can tell a real
+    # update from a byte-identical no-op.
+    existing = store.get_channel(provider, channel_id_from_filename(stem))
+    unchanged = existing is not None and _conf_channel_unchanged(
+        existing, country, city, wg, label
+    )
     channel, created = store.upsert_channel(provider, stem, country, city, wg, label)
-    action = "imported" if created else "updated"
+    action = "imported" if created else ("unchanged" if unchanged else "updated")
     applog.log(
         f"{action} channel {provider}/{channel.id} from {filename} on :{channel.port}"
     )
@@ -354,8 +470,23 @@ def _import_conf(
         "display_name": display_name(provider),
         "channel": channel,
         "imported_from": filename,
-        "updated": not created,
+        "updated": not created and not unchanged,
+        "unchanged": unchanged,
     }
+
+
+def _conf_channel_unchanged(
+    existing, country: str, city: str, wg: dict, label: str
+) -> bool:
+    """True when re-importing a ``.conf`` would change nothing about the channel —
+    same parsed location and WireGuard params, and no new label. Used to warn that
+    the channel already exists instead of reporting a silent 'updated' no-op."""
+    if (existing.country, existing.city) != (country, city):
+        return False
+    if existing.wg != wg:
+        return False
+    # A label is only applied when non-empty; an empty label never changes state.
+    return not (label and label != existing.label)
 
 
 def channel_list() -> dict:

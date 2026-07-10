@@ -1306,6 +1306,11 @@ input.relabel {
   background: var(--panel-2);
 }
 
+.prov-tile-wrap {
+  position: relative;
+  width: 100%;
+}
+
 .prov-tile {
   width: 100%;
   min-height: 124px;
@@ -1320,6 +1325,34 @@ input.relabel {
   color: var(--text);
   cursor: pointer;
   transition: border-color .15s, background .15s;
+}
+
+/* Gear in the tile corner: manage an added token provider's credential. */
+.prov-gear {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+
+.prov-gear:hover {
+  color: var(--text);
+  border-color: var(--line-2);
+}
+
+.prov-gear:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
 }
 
 .prov-tile:hover {
@@ -1814,6 +1847,10 @@ select option {
 
 .toast.err {
   border-left: 3px solid var(--down);
+}
+
+.toast.warn {
+  border-left: 3px solid var(--warn);
 }
 
 .grid {

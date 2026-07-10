@@ -120,6 +120,25 @@ def providers_list(data: dict) -> str:
     return "\n".join(_table(headers, rows))
 
 
+def provider_token_refresh(channels: dict) -> list[str]:
+    """Indented lines summarizing the channel re-resolve after a token replace:
+    which channels were re-resolved with the new token, and which couldn't be
+    (kept their old server, and will refresh on the next reconnect)."""
+    resolved = channels.get("resolved") or []
+    failed = channels.get("failed") or []
+    lines = []
+    if resolved:
+        lines.append(f"  Re-resolved {len(resolved)} channel(s): {', '.join(resolved)}")
+    if failed:
+        lines.append(
+            f"  {len(failed)} channel(s) couldn't be re-resolved "
+            f"(kept the old server, will retry on reconnect): {', '.join(failed)}"
+        )
+    if not resolved and not failed:
+        lines.append("  No channels to re-resolve.")
+    return lines
+
+
 def channels_list(data: dict) -> str:
     if not data["providers"]:
         return "No providers added yet. Add one:  alle providers add nordvpn"

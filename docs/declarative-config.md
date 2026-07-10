@@ -61,7 +61,7 @@ state, not something you write.
 providers:
   nordvpn:
     credential:
-      token: "nordvpn-access-token"        # from my.nordaccount.com (see below)
+      token: "nordvpn-access-token"        # from https://my.nordaccount.com/dashboard/nordvpn/access-tokens (see below)
     channels:
       united_states_new_york_1:            # id — follow alle's convention (below)
         country: United States             # required — the resolver needs it
@@ -113,7 +113,7 @@ two ways:
    copied from the site doesn't resolve, cross-check it with
    `alle locations nordvpn` — the CLI is authoritative.
 
-Getting the token: my.nordaccount.com → Services → NordVPN → Manual setup →
+Getting the token: https://my.nordaccount.com/dashboard/nordvpn/access-tokens →
 generate an access token. It is a secret — see
 [the security note](#applying-it).
 

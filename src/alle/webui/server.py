@@ -432,6 +432,17 @@ class _Handler(BaseHTTPRequestHandler):
 
         if method == "POST" and seg == ["providers"]:
             return self._call(_add_provider, body)
+        if (
+            method == "POST"
+            and len(seg) == 3
+            and seg[0] == "providers"
+            and seg[2] == "token"
+        ):
+            # Replace an added token provider's credential (write-only: the token
+            # is never returned). Config providers raise ServiceError → 400.
+            return self._call(
+                service.provider_update_token, seg[1], body.get("creds") or {}
+            )
         if method == "DELETE" and len(seg) == 2 and seg[0] == "providers":
             return self._call(lambda: service.provider_remove_many([seg[1]]))
         if method == "POST" and seg == ["channels"]:
@@ -529,7 +540,9 @@ def _add_provider(body: dict) -> dict:
     provider = service.resolve_provider(body.get("provider", ""))
     if service.kind(provider) == "config":
         return service.provider_add_config(provider)
-    return service.provider_add_token(provider, body.get("creds") or {})
+    # Posting an already-added token provider replaces its credential (and
+    # refreshes its channels) rather than erroring — the idempotent-add contract.
+    return service.provider_add_or_update_token(provider, body.get("creds") or {})
 
 
 def _locations(path: str) -> dict:

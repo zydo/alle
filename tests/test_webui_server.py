@@ -225,6 +225,129 @@ def test_add_config_provider_then_channel_via_upload(live):
     assert ch["label"] == "West" and ch["id"] == "wg_us_ca_9"
 
 
+def test_reupload_identical_conf_reports_unchanged(live):
+    base, secret = live
+    origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    _req(
+        base + "/api/v1/providers",
+        method="POST",
+        headers=origin,
+        data={"provider": "protonvpn"},
+    )
+    body = {
+        "provider": "protonvpn",
+        "conf_name": "wg-US-CA-9.conf",
+        "conf_text": _conf(),
+    }
+    st, first, _ = _req(
+        base + "/api/v1/channels", method="POST", headers=origin, data=body
+    )
+    assert st == 200 and json.loads(first)["unchanged"] is False
+
+    st, again, _ = _req(
+        base + "/api/v1/channels", method="POST", headers=origin, data=body
+    )
+    assert st == 200 and json.loads(again)["unchanged"] is True
+
+
+def test_replace_token_endpoint_reresolves_and_hides_token(live, monkeypatch):
+    from alle import service
+
+    base, secret = live
+    origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    monkeypatch.setattr(service, "validate_provider_credentials", lambda p, c: None)
+    monkeypatch.setattr(
+        service,
+        "provider_resolver",
+        lambda p, c: lambda a, b: {"private_key": "z", "peer": {}},
+    )
+    # add nordvpn with an initial token, then a channel to re-resolve
+    _req(
+        base + "/api/v1/providers",
+        method="POST",
+        headers=origin,
+        data={"provider": "nordvpn", "creds": {"token": "first"}},
+    )
+    service.Store.load().add_channel(
+        "nordvpn", "Japan", "", {"private_key": "old", "peer": {}}
+    )
+
+    st, body, _ = _req(
+        base + "/api/v1/providers/nordvpn/token",
+        method="POST",
+        headers=origin,
+        data={"creds": {"token": "SUPER-SECRET-NEW"}},
+    )
+    assert st == 200
+    data = json.loads(body)
+    assert data["updated"] is True
+    assert data["channels"]["resolved"] == ["japan_1"]
+    assert b"SUPER-SECRET-NEW" not in body  # the raw token is never echoed back
+    assert service.credentials.get("nordvpn") == {"token": "SUPER-SECRET-NEW"}
+
+    # Re-posting the identical token is a no-op: unchanged, no re-resolve.
+    monkeypatch.setattr(
+        service,
+        "provider_resolver",
+        lambda p, c: (_ for _ in ()).throw(AssertionError("must not re-resolve")),
+    )
+    st, body, _ = _req(
+        base + "/api/v1/providers/nordvpn/token",
+        method="POST",
+        headers=origin,
+        data={"creds": {"token": "SUPER-SECRET-NEW"}},
+    )
+    again = json.loads(body)
+    assert st == 200 and again["unchanged"] is True and again["updated"] is False
+    assert again["channels"] == {"resolved": [], "failed": []}
+
+
+def test_replace_token_on_config_provider_is_400(live):
+    base, secret = live
+    origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    _req(
+        base + "/api/v1/providers",
+        method="POST",
+        headers=origin,
+        data={"provider": "protonvpn"},
+    )
+    st, body, _ = _req(
+        base + "/api/v1/providers/protonvpn/token",
+        method="POST",
+        headers=origin,
+        data={"creds": {"token": "x"}},
+    )
+    assert st == 400 and "no token to replace" in json.loads(body)["error"]
+
+
+def test_post_existing_token_provider_updates(live, monkeypatch):
+    from alle import service
+
+    base, secret = live
+    origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    monkeypatch.setattr(service, "validate_provider_credentials", lambda p, c: None)
+    monkeypatch.setattr(
+        service,
+        "provider_resolver",
+        lambda p, c: lambda a, b: {"private_key": "z", "peer": {}},
+    )
+    _req(
+        base + "/api/v1/providers",
+        method="POST",
+        headers=origin,
+        data={"provider": "nordvpn", "creds": {"token": "one"}},
+    )
+
+    st, body, _ = _req(
+        base + "/api/v1/providers",
+        method="POST",
+        headers=origin,
+        data={"provider": "nordvpn", "creds": {"token": "two"}},
+    )
+    assert st == 200 and json.loads(body)["updated"] is True
+    assert service.credentials.get("nordvpn") == {"token": "two"}
+
+
 def test_relabel_channel(live):
     base, secret = live
     origin = {"Origin": base, "Authorization": f"Bearer {secret}"}

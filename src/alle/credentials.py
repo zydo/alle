@@ -70,11 +70,17 @@ def get(provider: str) -> dict | None:
     return _load_all().get(provider)
 
 
+def clean(creds: dict) -> dict:
+    """A credential dict with surrounding whitespace stripped from string values —
+    the normalization applied before storing (and for comparing against what's
+    stored)."""
+    return {k: (v.strip() if isinstance(v, str) else v) for k, v in creds.items()}
+
+
 def set_(provider: str, creds: dict) -> None:
     """Store (or replace) a provider's credentials, stripping surrounding space."""
-    cleaned = {k: (v.strip() if isinstance(v, str) else v) for k, v in creds.items()}
     data = _load_all()
-    data[provider] = cleaned
+    data[provider] = clean(creds)
     _save_all(data)
 
 
@@ -84,13 +90,7 @@ def replace_all(providers: dict[str, dict]) -> None:
     The bundle-restore path: a restore is declarative, so providers absent
     from ``providers`` lose their stored credential.
     """
-    cleaned = {
-        provider: {
-            k: (v.strip() if isinstance(v, str) else v) for k, v in creds.items()
-        }
-        for provider, creds in providers.items()
-    }
-    _save_all(cleaned)
+    _save_all({provider: clean(creds) for provider, creds in providers.items()})
 
 
 def remove(provider: str) -> bool:

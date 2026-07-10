@@ -6,6 +6,7 @@ const GAUGE = `<svg class="ico" width="15" height="15" viewBox="0 0 24 24" fill=
 const GRIP = `<svg class="ico" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>`;
 const GRAB = `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 11V6a2 2 0 0 0-4 0"/><path d="M14 10V4a2 2 0 0 0-4 0v2"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg>`;
 const COPY = `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+const GEAR = `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
 const PEN = `<svg class="pen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>`;
 const PROVIDER_ICONS = {
   nordvpn: "/nordvpn.svg",
@@ -565,7 +566,23 @@ function providerGuide(p) {
 
 function providerCard(p) {
   const logo = providerIcon(p.provider) ? `<img src="${providerIcon(p.provider)}" alt="">` : `<span class="prov-fallback">${esc(p.display_name[0])}</span>`;
-  return `<button class="prov-tile" data-provider="${esc(p.provider)}" title="${esc(p.display_name)}" aria-label="${esc(p.display_name)}">${logo}</button>`;
+  const tile = `<button class="prov-tile" data-provider="${esc(p.provider)}" title="${esc(p.display_name)}" aria-label="${esc(p.display_name)}">${logo}</button>`;
+  // Token providers get a gear to manage (replace) their stored credential; a
+  // sibling button, since it can't nest inside the tile button.
+  const gear = p.kind === "token"
+    ? `<button class="prov-gear" data-settings="${esc(p.provider)}" title="Provider settings" aria-label="${esc(p.display_name)} settings">${GEAR}</button>`
+    : "";
+  return `<div class="prov-tile-wrap">${tile}${gear}</div>`;
+}
+
+// Summarize a token replacement for a toast: how many channels were re-resolved
+// with the new credential (and how many kept their old server pending reconnect).
+function tokenReplaceToast(data) {
+  const ch = data?.channels || { resolved: [], failed: [] };
+  const parts = [`Updated ${data?.display_name || "provider"}.`];
+  if (ch.resolved?.length) parts.push(`Re-resolved ${ch.resolved.length} channel(s).`);
+  if (ch.failed?.length) parts.push(`${ch.failed.length} will retry on reconnect.`);
+  return parts.join(" ");
 }
 
 async function openAddChannel() {
@@ -582,9 +599,46 @@ async function openAddChannel() {
     const addTile = `<button class="prov-tile add" data-add-provider title="Add provider" aria-label="Add provider"><span class="prov-add">+</span></button>`;
     wiz.innerHTML = `<div class="provider-row">${cards}${addTile}</div>`;
     wiz.onclick = (e) => {
+      const gear = e.target.closest("[data-settings]");
+      if (gear) { e.stopPropagation(); return renderProviderSettings(added.find((p) => p.provider === gear.dataset.settings)); }
       const card = e.target.closest("[data-provider]");
       if (card) { st.provider = card.dataset.provider; return renderForProvider(); }
       if (e.target.closest("[data-add-provider]")) return renderAddProvider();
+    };
+  }
+
+  // Provider settings: manage an already-added token provider's credential. The
+  // token is write-only — never fetched or pre-filled, only its presence/mask is
+  // shown — and the field is dropped from the DOM on every re-render.
+  function renderProviderSettings(p) {
+    if (!p) return renderProviders();
+    const cat = catalog.find((x) => x.provider === p.provider) || {};
+    const g = providerGuide(cat);
+    const status = p.has_token
+      ? `Token stored (<code>${esc(p.credential || "present")}</code>).`
+      : "No token stored.";
+    wiz.innerHTML = `<form id="ps">
+      <p class="field-guide"><b>${esc(p.display_name)}</b> — ${status}${g.url ? ` <a href="${esc(g.url)}" target="_blank" rel="noopener">Open portal ↗</a>` : ""}</p>
+      <label class="field"><span>Replace token</span><input name="token" type="password" autocomplete="off" spellcheck="false" placeholder="paste a new token"></label>
+      <p class="hint">Replacing the token re-resolves this provider's channels with the new credential. The token is never shown back.</p>
+      <p class="form-err" id="pserr"></p>
+      <div class="confirm-actions"><button class="btn ghost" type="button" data-back>Back</button><button class="btn primary" type="submit">Replace token</button></div>
+    </form>`;
+    wiz.onclick = null;
+    wiz.querySelector("[data-back]").onclick = renderProviders;
+    wiz.querySelector("#ps").onsubmit = async (e) => {
+      e.preventDefault();
+      const err = wiz.querySelector("#pserr"); err.textContent = "";
+      const input = wiz.querySelector('[name="token"]');
+      const token = input.value.trim();
+      if (!token) { err.textContent = "Enter a token."; return; }
+      const res = await api.post(`/api/v1/providers/${p.provider}/token`, { creds: { token } });
+      input.value = "";  // never keep the token in the DOM after submit
+      if (!res.ok) { err.textContent = res.error; return; }
+      if (res.data?.unchanged) toast(`${res.data.display_name} already has that token.`, "warn");
+      else toast(tokenReplaceToast(res.data));
+      refreshStatus();
+      renderProviders();
     };
   }
 
@@ -659,7 +713,13 @@ async function openAddChannel() {
       const body = { provider: st.provider, label: wiz.querySelector("#label").value.trim(), conf_name: file.name, conf_text: await file.text() };
       const res = await api.post("/api/v1/channels", body);
       if (!res.ok) { err.textContent = res.error; return; }
-      m.close(); toast(`Added ${res.data?.channel?.label || res.data?.channel?.id || "channel"}.`); refreshStatus();
+      const name = res.data?.channel?.label || res.data?.channel?.id || "channel";
+      m.close();
+      // A byte-identical re-upload of an existing .conf is a no-op — tell the
+      // user the channel already exists instead of a misleading "Added".
+      if (res.data?.unchanged) toast(`${name} already exists with identical settings.`, "warn");
+      else toast(`${res.data?.updated ? "Updated" : "Added"} ${name}.`);
+      refreshStatus();
     };
   }
 

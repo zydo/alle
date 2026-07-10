@@ -43,6 +43,13 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_") or "channel"
 
 
+def channel_id_from_filename(filename: str) -> str:
+    """The channel id a ``.conf`` filename resolves to (the same slug
+    :meth:`Store.upsert_channel` keys on). Public so callers can look a config
+    channel up by name before importing it."""
+    return _slug(filename)
+
+
 def _next_free_port(data: dict) -> int:
     """Ask the OS for an available loopback port that no channel already claims.
 

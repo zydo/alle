@@ -207,6 +207,69 @@ def test_config_import_stores_channel(capsys, no_background, tmp_path):
     assert ch.country == "United States" and ch.city == "California"
 
 
+def test_reimport_identical_conf_warns_already_exists(capsys, no_background, tmp_path):
+    conf = tmp_path / "wg-US-CA-842.conf"
+    conf.write_text(SAMPLE_CONF)
+    cli.main(["providers", "add", "protonvpn"])
+    capsys.readouterr()
+    cli.main(["channels", "add", "protonvpn", "--config", str(conf)])
+    capsys.readouterr()
+
+    out = run_cli(["channels", "add", "protonvpn", "--config", str(conf)], capsys)
+    assert "already exists" in out and "nothing to do" in out
+    assert "Applying" not in out  # no reconcile message on a no-op
+
+
+def test_providers_add_token_replace_reresolves(capsys, no_background, monkeypatch):
+    monkeypatch.setattr(service, "validate_provider_credentials", lambda p, c: None)
+    monkeypatch.setattr(
+        service,
+        "provider_resolver",
+        lambda p, c: lambda a, b: {"private_key": "z", "peer": {}},
+    )
+    cli.main(["providers", "add", "nordvpn", "--token", "first-token"])
+    service.Store.load().add_channel(
+        "nordvpn", "Japan", "", {"private_key": "old", "peer": {}}
+    )
+    capsys.readouterr()
+
+    # --token + --yes is the scriptable replace path (no prompt)
+    out = run_cli(
+        ["providers", "add", "nordvpn", "--token", "second-token", "--yes"], capsys
+    )
+    assert "Updated NordVPN credential" in out
+    assert "Re-resolved 1 channel(s): japan_1" in out
+    assert service.credentials.get("nordvpn") == {"token": "second-token"}
+
+
+def test_providers_add_same_token_is_noop(capsys, no_background, monkeypatch):
+    monkeypatch.setattr(service, "validate_provider_credentials", lambda p, c: None)
+
+    def must_not_resolve(p, c):
+        raise AssertionError("re-resolve must not run for an identical token")
+
+    monkeypatch.setattr(service, "provider_resolver", must_not_resolve)
+    cli.main(["providers", "add", "nordvpn", "--token", "keep-token"])
+    service.Store.load().add_channel(
+        "nordvpn", "Japan", "", {"private_key": "old", "peer": {}}
+    )
+    capsys.readouterr()
+
+    out = run_cli(
+        ["providers", "add", "nordvpn", "--token", "keep-token", "--yes"], capsys
+    )
+    assert "already has that token" in out and "nothing to do" in out
+    assert "Re-resolved" not in out
+
+
+def test_providers_add_token_on_config_provider_errors(capsys, no_background):
+    cli.main(["providers", "add", "protonvpn"])
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["providers", "add", "protonvpn", "--token", "x"])
+    assert "has no token to set" in str(exc.value)
+
+
 def test_unparseable_config_shows_unknown(capsys, no_background, tmp_path):
     conf = tmp_path / "myserver.conf"  # no ISO codes in the name
     conf.write_text(SAMPLE_CONF)
