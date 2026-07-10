@@ -253,6 +253,36 @@ def test_start_stop_restart_and_logs_tail(monkeypatch):
     ]
 
 
+def test_restart_uses_atomic_manager_restart_when_supervised(monkeypatch):
+    """With a login service installed, restart is one supervisor operation —
+    never stop+start, whose failure window leaves the daemon down."""
+    events = []
+
+    class Runner:
+        def is_running(self):
+            return True
+
+        def stop(self):
+            events.append("singbox-stop")
+
+    monkeypatch.setattr(service.singbox, "Runner", Runner)
+    monkeypatch.setattr(service.daemonctl, "is_installed", lambda: True)
+    monkeypatch.setattr(
+        service.daemonctl,
+        "restart_service",
+        lambda: events.append("manager-restart") or True,
+    )
+    monkeypatch.setattr(
+        service.daemon, "ensure_running", lambda: events.append("ensure")
+    )
+    monkeypatch.setattr(
+        service.daemon, "stop", lambda: events.append("daemon-stop") or True
+    )
+
+    assert service.restart() == {"reconnect_cleared": 0}
+    assert events == ["singbox-stop", "manager-restart"]
+
+
 def test_web_ui_restart_schedules_external_lifecycle(monkeypatch):
     events = []
     store = service.Store.load()
@@ -291,12 +321,16 @@ def test_channel_set_label_sets_clears_and_resolves():
     result = service.channel_set_label(ch.id, "  Streaming US  ")
     assert result["label"] == "Streaming US"  # stripped
     assert result["cleared"] is False
-    assert service.Store.load().get_channel("nordvpn", ch.id).label == "Streaming US"
+    ch = service.Store.load().get_channel("nordvpn", ch.id)
+    assert ch is not None
+    assert ch.label == "Streaming US"
 
     # qualified ref also works, and empty clears back to the id
     cleared = service.channel_set_label(f"nordvpn/{ch.id}", "")
     assert cleared["cleared"] is True
-    assert service.Store.load().get_channel("nordvpn", ch.id).label == ""
+    ch = service.Store.load().get_channel("nordvpn", ch.id)
+    assert ch is not None
+    assert ch.label == ""
 
 
 def test_channel_set_label_rejects_glob_and_unknown():
@@ -356,7 +390,9 @@ def test_provider_update_token_replaces_and_reresolves(monkeypatch):
     assert result["channels"]["failed"] == []
     # every channel got the freshly-resolved params
     reloaded = service.Store.load()
-    assert reloaded.get_channel("nordvpn", "japan_1").wg["private_key"] == "fresh"
+    ch = reloaded.get_channel("nordvpn", "japan_1")
+    assert ch is not None
+    assert ch.wg["private_key"] == "fresh"
 
 
 def test_provider_update_token_same_token_is_noop(monkeypatch):
@@ -378,10 +414,9 @@ def test_provider_update_token_same_token_is_noop(monkeypatch):
     assert result["unchanged"] is True
     assert result["channels"] == {"resolved": [], "failed": []}
     # the channel's params were left untouched
-    assert (
-        service.Store.load().get_channel("nordvpn", "japan_1").wg["private_key"]
-        == "keep"
-    )
+    ch = service.Store.load().get_channel("nordvpn", "japan_1")
+    assert ch is not None
+    assert ch.wg["private_key"] == "keep"
 
 
 def test_provider_update_token_bad_token_keeps_old(monkeypatch):
@@ -418,10 +453,9 @@ def test_provider_update_token_per_channel_failure_keeps_old_wg(monkeypatch):
 
     assert result["channels"] == {"resolved": [], "failed": ["japan_1"]}
     # the channel kept its old params (auto-reconnect will refresh it)
-    assert (
-        service.Store.load().get_channel("nordvpn", "japan_1").wg["private_key"]
-        == "keep"
-    )
+    ch = service.Store.load().get_channel("nordvpn", "japan_1")
+    assert ch is not None
+    assert ch.wg["private_key"] == "keep"
 
 
 def test_provider_update_token_rejects_config_provider():

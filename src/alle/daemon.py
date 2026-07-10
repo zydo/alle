@@ -40,6 +40,12 @@ SUPERVISE_INTERVAL = 2.0  # how often sing-box liveness is checked (sans probes)
 CRASH_BACKOFF_MAX = 60.0  # cap between supervised restart attempts
 CRASH_RESET = 60.0  # this long alive after a crash forgets the crash history
 
+# Exit code for the intentional self-restart-on-upgrade exit. Non-zero on
+# purpose: new units use Restart=always, but units installed before that were
+# Restart=on-failure — a clean exit under those left the daemon down after
+# every upgrade until the next login.
+UPGRADE_EXIT_CODE = 3
+
 # What the applier's command line looks like: ensure_running() spawns
 # ``<python> -m alle applier``; a supervised or hand-run ``alle applier`` shows
 # as ``.../bin/alle applier``. Used to reject recycled PIDs.
@@ -347,7 +353,10 @@ def run_applier() -> None:
                         f"applier: package upgraded {__version__} -> "
                         f"{installed_version()}; exiting for supervisor respawn"
                     )
-                    break
+                    # non-zero so even a Restart=on-failure unit (pre-
+                    # Restart=always installs) respawns onto the new code;
+                    # the finally block below still cleans up the pidfile
+                    raise SystemExit(UPGRADE_EXIT_CODE)
             stamp = _state_stamp()
             if stamp != last_stamp:
                 # An unreadable state file must not kill the loop (or be

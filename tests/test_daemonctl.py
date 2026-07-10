@@ -90,7 +90,8 @@ def test_systemd_unit_execs_shim_with_service_env_and_restart(fake_home):
     text = daemonctl.SystemdManager()._unit_text()
     assert "ExecStart=" in text and "applier" in text
     assert "Environment=ALLE_SERVICE=1" in text
-    assert "Restart=on-failure" in text
+    # always, not on-failure: the self-restart-on-upgrade exit must respawn
+    assert "Restart=always" in text
     assert "WantedBy=default.target" in text
     assert "StandardOutput=journal" in text
 
@@ -108,6 +109,125 @@ def test_systemd_install_linger_enables_linger(fake_home, recorded_run, monkeypa
     monkeypatch.setattr(daemonctl.shutil, "which", lambda name: f"/usr/bin/{name}")
     daemonctl.SystemdManager().install(linger=True)
     assert ["loginctl", "enable-linger"] in recorded_run
+
+
+# ---- failure propagation + atomic restart ---------------------------------------
+
+
+def _failing_run(monkeypatch, fail: dict[str, str]):
+    """_run stub failing commands whose joined form contains a key of ``fail``
+    (value = stderr); everything else succeeds. Returns the call log."""
+    calls: list[list[str]] = []
+
+    def fake(cmd):
+        calls.append(cmd)
+
+        class _R:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        joined = " ".join(cmd)
+        for marker, err in fail.items():
+            if marker in joined:
+                _R.returncode = 1
+                _R.stderr = err
+        return _R()
+
+    monkeypatch.setattr(daemonctl, "_run", fake)
+    return calls
+
+
+def test_systemd_start_failure_is_raised(monkeypatch, fake_home):
+    _failing_run(monkeypatch, {"start": "Failed to start alle.service"})
+    with pytest.raises(daemonctl.DaemonCtlError, match="systemctl start failed"):
+        daemonctl.SystemdManager().start()
+
+
+def test_systemd_stop_failure_raises_only_when_still_active(monkeypatch, fake_home):
+    m = daemonctl.SystemdManager()
+    # stop fails and the unit is still active → a real, surfaced failure
+    _failing_run(monkeypatch, {"stop": "boom"})
+    monkeypatch.setattr(m, "is_active", lambda: True)
+    with pytest.raises(daemonctl.DaemonCtlError, match="systemctl stop failed"):
+        m.stop()
+    # stop "fails" but nothing is running (not-loaded noise) → tolerated
+    monkeypatch.setattr(m, "is_active", lambda: False)
+    m.stop()
+
+
+def test_systemd_restart_is_one_noblock_job(monkeypatch, fake_home):
+    calls = _failing_run(monkeypatch, {})
+    daemonctl.SystemdManager().restart()
+    assert calls == [["systemctl", "--user", "restart", "--no-block", "alle.service"]]
+
+
+def test_systemd_restart_failure_is_raised(monkeypatch, fake_home):
+    _failing_run(monkeypatch, {"restart": "no such unit"})
+    with pytest.raises(daemonctl.DaemonCtlError, match="systemctl restart failed"):
+        daemonctl.SystemdManager().restart()
+
+
+def test_systemd_linger_failure_fails_the_install(monkeypatch, fake_home):
+    monkeypatch.setattr(daemonctl.shutil, "which", lambda name: f"/usr/bin/{name}")
+    _failing_run(monkeypatch, {"enable-linger": "access denied"})
+    with pytest.raises(daemonctl.DaemonCtlError, match="enable-linger failed"):
+        daemonctl.SystemdManager().install(linger=True)
+
+
+def test_systemd_linger_requires_loginctl(monkeypatch, fake_home, recorded_run):
+    monkeypatch.setattr(
+        daemonctl.shutil,
+        "which",
+        lambda name: None if name == "loginctl" else f"/usr/bin/{name}",
+    )
+    with pytest.raises(daemonctl.DaemonCtlError, match="loginctl not found"):
+        daemonctl.SystemdManager().install(linger=True)
+
+
+def test_launchd_start_failure_is_raised(monkeypatch, fake_home):
+    m = daemonctl.LaunchdManager()
+    _failing_run(monkeypatch, {"load": "nope", "list": "not running"})
+    with pytest.raises(daemonctl.DaemonCtlError, match="launchctl load failed"):
+        m.start()
+
+
+def test_launchd_start_tolerates_already_loaded(monkeypatch, fake_home):
+    m = daemonctl.LaunchdManager()
+    # load exits non-zero ("already loaded") but the job IS active → fine
+    _failing_run(monkeypatch, {"load": "already loaded"})
+    m.start()
+
+
+def test_launchd_stop_failure_raises_only_when_still_active(monkeypatch, fake_home):
+    m = daemonctl.LaunchdManager()
+    _failing_run(monkeypatch, {"unload": "boom"})
+    monkeypatch.setattr(m, "is_active", lambda: True)
+    with pytest.raises(daemonctl.DaemonCtlError, match="launchctl unload failed"):
+        m.stop()
+    monkeypatch.setattr(m, "is_active", lambda: False)
+    m.stop()  # not-loaded noise is tolerated
+
+
+def test_launchd_restart_kickstarts_atomically(monkeypatch, fake_home):
+    calls = _failing_run(monkeypatch, {})
+    daemonctl.LaunchdManager().restart()
+    assert len(calls) == 1
+    assert calls[0][:3] == ["launchctl", "kickstart", "-k"]
+    assert calls[0][3].endswith(daemonctl.LAUNCHD_LABEL)
+
+
+def test_launchd_restart_falls_back_to_unload_load(monkeypatch, fake_home):
+    calls = _failing_run(monkeypatch, {"kickstart": "Unknown subcommand"})
+    daemonctl.LaunchdManager().restart()
+    joined = [" ".join(c[:2]) for c in calls]
+    assert joined[0] == "launchctl kickstart"
+    assert "launchctl unload" in joined and "launchctl load" in joined
+
+
+def test_restart_service_requires_an_installed_unit(monkeypatch, fake_home):
+    monkeypatch.setattr(daemonctl.platform, "system", lambda: "Linux")
+    assert daemonctl.restart_service() is False  # no unit file → nothing to ask
 
 
 # ---- ALLE_HOME carry-through ---------------------------------------------------

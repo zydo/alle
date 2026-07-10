@@ -1431,11 +1431,21 @@ def restart() -> dict:
             f"restart requested from web ui (cleared reconnect state for {cleared} channel(s))"
         )
         return {"reconnect_cleared": cleared, "restarting": True}
-    _stop_all()
     # A manual restart is the user's cue that they've dealt with whatever broke,
     # so clear any give-up flags and let dead channels be retried from scratch.
     cleared = Store.load().clear_reconnect_all()
-    daemon.ensure_running()
+    if daemonctl.is_installed():
+        # One atomic manager restart instead of stop+start: no window where
+        # the stop landed but the start was lost, and nothing for KeepAlive/
+        # Restart= to resurrect mid-sequence. sing-box is stopped explicitly
+        # first so the tunnels bounce deterministically on every platform
+        # (launchd kickstart only recycles the daemon job itself).
+        singbox.Runner().stop()
+        if not daemonctl.restart_service():  # unit vanished behind our back
+            daemon.ensure_running()
+    else:
+        _stop_all()
+        daemon.ensure_running()
     applog.log(f"restart (cleared reconnect state for {cleared} channel(s))")
     return {"reconnect_cleared": cleared}
 

@@ -327,12 +327,15 @@ def _drive_once(monkeypatch, now=daemon.VERSION_CHECK + 1):
         signal.signal(signal.SIGINT, old[1])
 
 
-def test_supervised_daemon_exits_on_version_change(monkeypatch):
+def test_supervised_daemon_exits_nonzero_on_version_change(monkeypatch):
     monkeypatch.setenv("ALLE_SERVICE", "1")
     monkeypatch.setattr(daemon, "installed_version", lambda: "99.0.0")
-    # version mismatch under a supervisor: run_applier breaks cleanly (no sleep,
-    # so no KeyboardInterrupt) for the supervisor to respawn on new code
-    _drive_once(monkeypatch)
+    # version mismatch under a supervisor: exit *non-zero* so even a legacy
+    # Restart=on-failure unit respawns onto the new code (a clean exit left
+    # the daemon down after every upgrade until the next login)
+    with pytest.raises(SystemExit) as ei:
+        _drive_once(monkeypatch)
+    assert ei.value.code == daemon.UPGRADE_EXIT_CODE
     assert "package upgraded" in _read_log()
 
 

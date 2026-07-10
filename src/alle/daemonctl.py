@@ -96,6 +96,9 @@ class _Manager:
     def stop(self) -> None:  # pragma: no cover
         raise NotImplementedError
 
+    def restart(self) -> None:  # pragma: no cover
+        raise NotImplementedError
+
 
 class LaunchdManager(_Manager):
     name = "launchd"
@@ -142,12 +145,34 @@ class LaunchdManager(_Manager):
         return _run(["launchctl", "list", LAUNCHD_LABEL]).returncode == 0
 
     def start(self) -> None:
-        _run(["launchctl", "load", str(self.unit_path())])
+        r = _run(["launchctl", "load", str(self.unit_path())])
+        # `load` of an already-loaded job exits non-zero; only a job that is
+        # genuinely not running afterwards is a real failure worth surfacing.
+        if r.returncode != 0 and not self.is_active():
+            raise DaemonCtlError(
+                f"launchctl load failed: {r.stderr.strip() or r.stdout.strip()}"
+            )
 
     def stop(self) -> None:
         # Unload removes the job so KeepAlive can't resurrect it this session;
         # the plist stays in LaunchAgents, so it reloads at next login.
-        _run(["launchctl", "unload", str(self.unit_path())])
+        r = _run(["launchctl", "unload", str(self.unit_path())])
+        # `unload` of a not-loaded job exits non-zero too — a failure only
+        # counts when the job is in fact still running ("stopped" must never
+        # be reported over a live daemon).
+        if r.returncode != 0 and self.is_active():
+            raise DaemonCtlError(
+                f"launchctl unload failed: {r.stderr.strip() or r.stdout.strip()}"
+            )
+
+    def restart(self) -> None:
+        # One atomic operation inside launchd (kill + respawn of the job), so
+        # there is no window where a stop succeeded but the start was lost.
+        r = _run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"])
+        if r.returncode != 0:
+            # older macOS / job not currently loaded — fall back to the two-step
+            self.stop()
+            self.start()
 
 
 class SystemdManager(_Manager):
@@ -168,7 +193,12 @@ class SystemdManager(_Manager):
             "Type=simple\n"
             f"ExecStart={exec_line}\n"
             f"{env_lines}\n"
-            "Restart=on-failure\n"
+            # `always`, not `on-failure`: the self-restart-on-upgrade exit must
+            # be respawned no matter its code, and a clean-exiting daemon that
+            # stays down is never what a supervised install wants. An explicit
+            # `systemctl stop` still stops it (manual stop jobs suppress
+            # Restart=).
+            "Restart=always\n"
             "RestartSec=3\n"
             "StandardOutput=journal\n"
             "StandardError=journal\n"
@@ -190,8 +220,18 @@ class SystemdManager(_Manager):
         r = self._systemctl("enable", "--now", SYSTEMD_UNIT)
         if r.returncode != 0:
             raise DaemonCtlError(f"systemctl enable failed: {r.stderr.strip()}")
-        if linger and shutil.which("loginctl"):
-            _run(["loginctl", "enable-linger"])
+        if linger:
+            # An ignored linger failure would silently break the "survives
+            # logout" promise the flag exists for — fail the install instead.
+            if not shutil.which("loginctl"):
+                raise DaemonCtlError(
+                    "loginctl not found — cannot enable logout survival (--linger)"
+                )
+            lr = _run(["loginctl", "enable-linger"])
+            if lr.returncode != 0:
+                raise DaemonCtlError(
+                    f"loginctl enable-linger failed: {lr.stderr.strip()}"
+                )
 
     def uninstall(self) -> None:
         self._systemctl("disable", "--now", SYSTEMD_UNIT)
@@ -202,10 +242,25 @@ class SystemdManager(_Manager):
         return self._systemctl("is-active", "--quiet", SYSTEMD_UNIT).returncode == 0
 
     def start(self) -> None:
-        self._systemctl("start", SYSTEMD_UNIT)
+        r = self._systemctl("start", SYSTEMD_UNIT)
+        if r.returncode != 0:
+            raise DaemonCtlError(f"systemctl start failed: {r.stderr.strip()}")
 
     def stop(self) -> None:
-        self._systemctl("stop", SYSTEMD_UNIT)
+        r = self._systemctl("stop", SYSTEMD_UNIT)
+        # tolerate "not loaded" noise, but never report "stopped" over a
+        # daemon that is in fact still running
+        if r.returncode != 0 and self.is_active():
+            raise DaemonCtlError(f"systemctl stop failed: {r.stderr.strip()}")
+
+    def restart(self) -> None:
+        # --no-block: a Web-requested restart runs *inside* the service cgroup,
+        # so the requester is killed during the stop phase — the queued job
+        # must complete without it. One atomic job also closes the window
+        # where a stop succeeded but the follow-up start was lost.
+        r = self._systemctl("restart", "--no-block", SYSTEMD_UNIT)
+        if r.returncode != 0:
+            raise DaemonCtlError(f"systemctl restart failed: {r.stderr.strip()}")
 
 
 def manager() -> _Manager | None:
@@ -299,4 +354,17 @@ def stop_service() -> bool:
     if m is None or not m.is_installed():
         return False
     m.stop()
+    return True
+
+
+def restart_service() -> bool:
+    """Ask the supervisor for one atomic restart. True if one is installed.
+
+    Preferred over stop+start whenever a unit exists: no window where the stop
+    landed but the start was lost, and safe to issue from inside the service's
+    own cgroup (Web-requested restart)."""
+    m = manager()
+    if m is None or not m.is_installed():
+        return False
+    m.restart()
     return True
