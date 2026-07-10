@@ -210,3 +210,73 @@ def test_config_provider_restarts_singbox(channel, monkeypatch):
         )
     assert runner.restarts == 1
     assert _rc(channel)["attempts"] == 1
+
+
+def test_config_channels_coalesce_into_one_restart(monkeypatch):
+    """However many config channels come due in one pass, sing-box restarts
+    at most once — a restart is process-wide, so per-channel restarts would
+    bounce every healthy tunnel N times for no benefit."""
+    monkeypatch.setattr(reconnect, "is_functional", lambda p: False)
+    monkeypatch.setattr(reconnect, "kind", lambda p: "config")
+    store = Store.load()
+    store.add_provider("protonvpn")
+    a, _ = store.upsert_channel("protonvpn", "us_1", "", "", dict(WG))
+    b, _ = store.upsert_channel("protonvpn", "us_2", "", "", dict(WG))
+    c, _ = store.upsert_channel("protonvpn", "us_3", "", "", dict(WG))
+    runner = _Runner()
+    # Advance every channel to the threshold together: FAIL_THRESHOLD passes,
+    # each setting all three to FAIL before one run_pass. On the final pass all
+    # three cross at once — the coalesced case.
+    for i in range(reconnect.FAIL_THRESHOLD):
+        for cid in (a.id, b.id, c.id):
+            store.set_probe("protonvpn", cid, dict(FAIL))
+        reconnect.run_pass(Store.load(), cast(singbox.Runner, runner), now=1000 + i)
+    assert runner.restarts == 1  # one restart for three due channels
+    reloaded = Store.load()
+    for cid in (a.id, b.id, c.id):
+        ch = reloaded.get_channel("protonvpn", cid)
+        assert ch is not None
+        assert ch.reconnect["attempts"] == 1  # bookkeeping advanced for each
+
+
+def test_attempt_bookkeeping_persists_when_resolve_raises(channel):
+    """A crash or error mid-attempt must not lose the backoff state — otherwise
+    the next pass would treat the attempt as never-made and retry immediately,
+    a storm under repeated failure."""
+
+    def boom(*_a, **_k):
+        raise ProviderError("api exploded")
+
+    store = Store.load()
+    runner = _Runner()
+    for i in range(reconnect.FAIL_THRESHOLD):
+        store.set_probe("nordvpn", channel, dict(FAIL))
+        reconnect.run_pass(
+            Store.load(), cast(singbox.Runner, runner), now=1000 + i, resolve=boom
+        )
+    rc = _rc(channel)
+    # the attempt was counted and the backoff scheduled even though resolve raised
+    assert rc["attempts"] == 1
+    assert rc["next_at"] > 1000  # backoff set, so the next pass won't retry at once
+    assert "api exploded" in rc["error"]
+
+
+def test_bookkeeping_persists_when_a_config_restart_fails(monkeypatch, channel):
+    """A restart failure is reported but does not lose attempt bookkeeping — the
+    next due pass retries (config archetype, so restart is the recovery)."""
+    monkeypatch.setattr(reconnect, "is_functional", lambda p: False)
+    monkeypatch.setattr(reconnect, "kind", lambda p: "config")
+
+    class _BoomRunner(_Runner):
+        def restart(self):
+            raise RuntimeError("sing-box refused")
+
+    store = Store.load()
+    for i in range(reconnect.FAIL_THRESHOLD):
+        store.set_probe("nordvpn", channel, dict(FAIL))
+        reconnect.run_pass(
+            Store.load(), cast(singbox.Runner, _BoomRunner()), now=1000 + i
+        )
+    rc = _rc(channel)
+    assert rc["attempts"] == 1  # persisted despite the restart raising
+    assert "restart failed" in applog.tail()

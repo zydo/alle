@@ -276,6 +276,89 @@ def test_rejected_config_is_not_retried_on_the_timer(monkeypatch):
     assert "frobnicate" in info["runtime"]["detail"]
 
 
+def test_a_stuck_probe_pass_does_not_block_reconciles(monkeypatch):
+    """The probe + reconnect pass runs on its own thread, so a probe that hangs
+    (a fleet of dead channels under slow echo sources) can't delay a config
+    reconcile. In the old inline code the loop body blocked on probe_all and
+    the reconcile cadence stalled; now the main loop keeps applying state."""
+    import threading
+
+    store = Store.load()
+    store.add_provider("nordvpn")
+    store.add_channel("nordvpn", "US", "", dict(WG))
+
+    release = threading.Event()
+    reconciled = {"n": 0}
+    from alle import singbox
+
+    class _Eng:
+        def __init__(self, inner_store):
+            self.store = inner_store
+            self.runner = _Runner()
+
+        def reconcile(self):
+            reconciled["n"] += 1
+            return {}
+
+        def probe_all(self):
+            release.wait(5)  # block until the test releases us
+
+    class _Runner:
+        def is_running(self):
+            return True
+
+        def connections(self):
+            return []
+
+        def generation(self):
+            return None
+
+    class _Clock:
+        """Steps past PROBE_INTERVAL each sleep and toggles killswitch so a
+        reconcile is due every tick — proving the reconcile path runs freely
+        while the probe worker is stuck."""
+
+        def __init__(self):
+            self.t = 0.0
+            self.sleeps = 0
+
+        def monotonic(self):
+            return self.t
+
+        def time(self):
+            return 1000.0
+
+        def sleep(self, _s):
+            self.sleeps += 1
+            self.t += daemon.PROBE_INTERVAL + 1  # a probe pass is due every tick
+            # a real state change each tick so a reconcile fires each tick
+            Store.load().set_killswitch(self.sleeps % 2 == 0)
+            if self.sleeps >= 4:
+                raise KeyboardInterrupt
+
+    monkeypatch.setattr("alle.engine.Engine", _Eng)
+    monkeypatch.setattr(singbox, "Runner", _Runner)
+    monkeypatch.setattr(daemon, "time", _Clock())
+    old = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            daemon.run_applier()
+    finally:
+        release.set()  # unblock the probe worker so it can exit
+        # join the worker by name so any trailing state writes finish before
+        # the temp-dir fixture cleans up (no race on the state dir)
+        for th in threading.enumerate():
+            if th.name == "alle-probe":
+                th.join(5)
+        signal.signal(signal.SIGTERM, old[0])
+        signal.signal(signal.SIGINT, old[1])
+
+    # Reconciles fired repeatedly while the probe was stuck: the main loop was
+    # not blocked. (With the old inline probe_all, the loop stalled on the
+    # first blocked probe and reconciled once at most.)
+    assert reconciled["n"] >= 3
+
+
 # ---- version info file + skew --------------------------------------------------
 
 

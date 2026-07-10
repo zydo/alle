@@ -26,6 +26,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -335,6 +336,21 @@ def run_applier() -> None:
         _write_info({"singbox": status, "detail": detail})
 
     _set_runtime("starting")
+
+    def _probe_pass() -> None:
+        """One probe + reconnect pass. Runs on its own thread so a slow pass
+        (many dead channels) can never delay a reconcile — kill-switch and
+        config changes keep applying within one poll interval regardless."""
+        try:
+            eng = Engine(Store.load())
+            if eng.store.channels():
+                eng.probe_all()
+                reconnect.run_pass(Store.load(), eng.runner)
+        except Exception as e:  # noqa: BLE001 — a bad pass must not kill the worker
+            applog.log(f"probe cycle failed: {e}")
+
+    probe_worker: dict = {"thread": None}
+
     supervised = bool(os.environ.get("ALLE_SERVICE"))
     last_stamp: tuple[int, int] | None = None
     sig = None
@@ -467,13 +483,15 @@ def run_applier() -> None:
                 last_metrics = now
 
             if now - last_probe >= PROBE_INTERVAL:
-                try:
-                    eng = Engine(Store.load())
-                    if eng.store.channels():
-                        eng.probe_all()
-                        reconnect.run_pass(Store.load(), eng.runner)
-                except Exception as e:  # noqa: BLE001
-                    applog.log(f"probe cycle failed: {e}")
+                worker = probe_worker["thread"]
+                if worker is None or not worker.is_alive():
+                    worker = threading.Thread(
+                        target=_probe_pass, name="alle-probe", daemon=True
+                    )
+                    probe_worker["thread"] = worker
+                    worker.start()
+                # else: the previous pass is still running — skip this tick
+                # rather than stack passes (each pass is internally bounded).
                 last_probe = now
 
             time.sleep(POLL_SECONDS)

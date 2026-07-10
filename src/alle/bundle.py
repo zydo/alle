@@ -544,6 +544,12 @@ def _validate_wg(wg, path: str, errors: list) -> dict | None:
         errors.append(
             (f"{path}.address", "must be a non-empty list of interface addresses")
         )
+    else:
+        bad = wgconf.check_addresses(address)
+        if bad is not None:
+            errors.append(
+                (f"{path}.address", f"{bad!r} is not an IP interface address")
+            )
 
     peer = wg.get("peer")
     if not isinstance(peer, dict):
@@ -557,7 +563,7 @@ def _validate_wg(wg, path: str, errors: list) -> dict | None:
         preshared = _check_wg_key(f"{path}.peer.preshared_key", preshared, errors)
 
     host = peer.get("endpoint_host")
-    if not (isinstance(host, str) and host.strip()):
+    if not (isinstance(host, str) and host.strip() and wgconf.valid_host(host.strip())):
         errors.append(
             (f"{path}.peer.endpoint_host", "must be the server host (IP or DNS name)")
         )
@@ -577,6 +583,10 @@ def _validate_wg(wg, path: str, errors: list) -> dict | None:
             errors.append(
                 (f"{path}.peer.allowed_ips", "must be a non-empty list of CIDRs")
             )
+        else:
+            bad = wgconf.check_cidrs(allowed)
+            if bad is not None:
+                errors.append((f"{path}.peer.allowed_ips", f"{bad!r} is not a CIDR"))
     keepalive = peer.get("keepalive", wgconf.WG_KEEPALIVE)
     if isinstance(keepalive, str) and keepalive.isdigit():
         keepalive = int(keepalive)

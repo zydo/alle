@@ -18,8 +18,8 @@ class _FakeResponse:
     def __init__(self, body: bytes):
         self._body = body
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, n: int = -1) -> bytes:
+        return self._body if n < 0 else self._body[:n]
 
     def __enter__(self):
         return self
@@ -145,3 +145,41 @@ def test_ipv6_exit_address_is_accepted(monkeypatch):
 )
 def test_valid_public_ip(text, expected):
     assert probe._valid_public_ip(text) == expected
+
+
+def test_response_body_is_bounded(monkeypatch):
+    # An oversized body (a real echo is a few dozen bytes) is not an IP echo we
+    # should parse — and we never slurp an unbounded body on the hot path.
+    big = b"x" * (probe.MAX_BODY_BYTES + 100)
+    opener = _patch_opener(monkeypatch, [big])
+    r = probe.probe_channel(8888)
+    assert r["ok"] is False
+    assert len(opener.requested) == len(probe.IP_ECHO_SOURCES)  # all tried
+
+
+def test_channel_deadline_stops_trying_remaining_sources(monkeypatch):
+    """The overall channel deadline caps the pass across all sources, so once
+    it's exhausted no further sources are tried — a dead channel can never cost
+    ``sources × per-request timeout`` wall clock."""
+    opener = _patch_opener(
+        monkeypatch,
+        [urllib.error.URLError("refused"), urllib.error.URLError("refused")],
+    )
+
+    # Controlled clock: time starts at 0; after the first source fails, the
+    # loop's monotonic read jumps past the deadline, so source 2 is never
+    # reached.
+    clock = {"t": 0.0}
+    real_monotonic = probe.time.monotonic
+
+    def fake_monotonic():
+        clock["t"] += 0.001
+        return clock["t"]
+
+    monkeypatch.setattr(probe.time, "monotonic", fake_monotonic)
+    r = probe.probe_channel(8888, deadline=0.001)
+    monkeypatch.setattr(probe.time, "monotonic", real_monotonic)
+    assert r["ok"] is False
+    assert "deadline" in r["error"]
+    # only the first source was attempted before the deadline ran out
+    assert len(opener.requested) < len(probe.IP_ECHO_SOURCES)

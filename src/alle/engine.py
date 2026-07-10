@@ -21,6 +21,13 @@ from alle.constants import OUTBOUND_PREFIX, ROUTER_INBOUND_TAG
 from alle.providers import ProviderError
 from alle.state import Channel, Store
 
+# Probe concurrency: enough parallelism that a fleet of dead channels stays
+# bounded, small enough not to burst-load every tunnel at once.
+PROBE_POOL_SIZE = 8
+# Wall-clock bound for one whole probe pass; anything still unfinished is
+# recorded as failed so the pass can never stall the daemon's probe cadence.
+PROBE_PASS_DEADLINE = 60.0
+
 # What a sing-box startup failure over a stolen port looks like in its log:
 # "start inbound/mixed[in-…]: listen tcp 127.0.0.1:<port>: bind: address already in use"
 _LOOPBACK_PORT = re.compile(r"127\.0\.0\.1:(\d+)")
@@ -291,23 +298,62 @@ class Engine:
 
         Returns ``{"<provider>/<id>": probe_dict}``. Only meaningful while
         sing-box is running; if it isn't, every channel records a failure.
+
+        Channels are probed concurrently on a capped worker pool, and the
+        whole pass carries a wall-clock deadline: each channel already bounds
+        itself (``probe.CHANNEL_DEADLINE``), so with the pool the pass costs
+        ``ceil(n / pool) × deadline`` at worst — never ``n × sources ×
+        timeout`` serially. Work that hasn't started when the pass deadline
+        hits is cancelled and recorded as a failure, not left running.
         """
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
+
         channels = self.store.channels() if channels is None else channels
         running = self.runner.is_running()
         out: dict[str, dict] = {}
-        for ch in channels:
-            ref = f"{ch.provider}/{ch.id}"
-            if not running:
-                result = {
+        if not running:
+            for ch in channels:
+                out[f"{ch.provider}/{ch.id}"] = {
                     "ok": False,
                     "at": int(time.time()),
                     "latency_ms": None,
                     "ip": None,
                     "error": "stopped",
                 }
-            else:
-                result = probe.probe_channel(ch.port)
-            self.store.set_probe(ch.provider, ch.id, result)
-            out[ref] = result
+        elif channels:
+            with ThreadPoolExecutor(
+                max_workers=min(PROBE_POOL_SIZE, len(channels))
+            ) as pool:
+                futures = {
+                    pool.submit(probe.probe_channel, ch.port): ch for ch in channels
+                }
+                try:
+                    for fut in as_completed(futures, timeout=PROBE_PASS_DEADLINE):
+                        ch = futures[fut]
+                        out[f"{ch.provider}/{ch.id}"] = fut.result()
+                except TimeoutError:
+                    for fut, ch in futures.items():
+                        ref = f"{ch.provider}/{ch.id}"
+                        if ref in out:
+                            continue
+                        if fut.done() and not fut.cancelled():
+                            out[ref] = fut.result()  # finished during the sweep
+                            continue
+                        fut.cancel()  # unstarted work is dropped, not orphaned
+                        out[ref] = {
+                            "ok": False,
+                            "at": int(time.time()),
+                            "latency_ms": None,
+                            "ip": None,
+                            "error": (
+                                "probe pass deadline "
+                                f"({PROBE_PASS_DEADLINE:g}s) exceeded"
+                            ),
+                        }
+        # Persist sequentially from this thread: results land in stable
+        # channel order and the store transactions never contend.
+        for ch in channels:
+            ref = f"{ch.provider}/{ch.id}"
+            self.store.set_probe(ch.provider, ch.id, out[ref])
         applog.log(_probe_log(channels, out))
         return out

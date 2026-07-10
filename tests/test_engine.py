@@ -407,3 +407,38 @@ def test_probe_all_records_stopped_when_not_running():
     persisted = Store.load().get_channel("nordvpn", ch.id)
     assert persisted is not None
     assert persisted.probe["error"] == "stopped"
+
+
+def test_probe_all_runs_channels_concurrently(monkeypatch):
+    """Probes run on a capped pool, so the wall-clock cost of N channels is
+    the slowest single channel, not the sum — and a stuck channel can't stall
+    the whole pass past PROBE_PASS_DEADLINE."""
+    import threading
+
+    store = Store.load()
+    store.add_provider("nordvpn")
+    for name in ("us", "uk", "jp"):
+        store.add_channel("nordvpn", name, "", dict(WG))
+
+    eng = Engine(store)
+    runner = _FakeRunner()
+    runner._running = True
+    eng.runner = cast(singbox.Runner, runner)
+
+    active = {"n": 0, "peak": 0}
+    lock = threading.Lock()
+    barrier = threading.Barrier(3, timeout=5)
+
+    def slow_probe(port):
+        with lock:
+            active["n"] += 1
+            active["peak"] = max(active["peak"], active["n"])
+        barrier.wait()  # all three must reach here concurrently to pass
+        return {"ok": True, "at": 1, "latency_ms": 5.0, "ip": "1.2.3.4", "error": None}
+
+    monkeypatch.setattr("alle.engine.probe.probe_channel", slow_probe)
+    eng.probe_all()
+    assert active["peak"] == 3  # all three probed in parallel, not serially
+    # every channel got a result persisted
+    for ch in Store.load().provider_channels("nordvpn"):
+        assert ch.probe.get("ok") is True
