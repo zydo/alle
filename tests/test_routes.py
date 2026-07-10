@@ -43,6 +43,39 @@ def test_match_all_needs_no_value():
     assert routes.normalize_value("all", "") == ""
 
 
+# ---- inferred matchers default to suffix (Phase 5.6) --------------------------
+
+
+def test_inferred_domains_default_to_suffix_regardless_of_label_count():
+    # The old two-label heuristic made a registrable domain like example.co.uk
+    # (3 labels) an exact match — so its subdomains bypassed the rule. Every
+    # inferred domain is now a suffix match.
+    assert routes.infer_matcher("netflix.com") == ("domain_suffix", "netflix.com")
+    assert routes.infer_matcher("example.co.uk") == ("domain_suffix", "example.co.uk")
+    assert routes.infer_matcher("api.openai.com") == ("domain_suffix", "api.openai.com")
+    assert routes.infer_matcher("a.b.c.d.example.com") == (
+        "domain_suffix",
+        "a.b.c.d.example.com",
+    )
+
+
+def test_explicit_domain_type_opts_into_exact_matching():
+    # An explicit matcher_type is honored — the rare host-only exact case.
+    assert routes.infer_matcher("api.openai.com", "domain") == (
+        "domain",
+        "api.openai.com",
+    )
+    assert routes.infer_matcher("netflix.com", "domain_suffix") == (
+        "domain_suffix",
+        "netflix.com",
+    )
+
+
+def test_inferred_cidr_and_all_still_classified():
+    assert routes.infer_matcher("10.8.0.0/16") == ("ip_cidr", "10.8.0.0/16")
+    assert routes.infer_matcher("all") == ("all", "")
+
+
 # ---- target parsing ------------------------------------------------------------
 
 
@@ -119,3 +152,31 @@ def test_earliest_covering_rule_is_reported():
         _rule("r3", "domain", "api.google.com"),
     ]
     assert routes.shadowed_by(rules) == {"r2": "r1", "r3": "r1"}
+
+
+# ---- built-in LAN-direct shadowing (Phase 5.6) --------------------------------
+
+
+def test_lan_direct_shadows_a_private_cidr_user_rule():
+    # A user rule targeting a private range the built-in LAN-direct block
+    # already sends direct can never match while lan_direct is on.
+    assert routes.shadowed_by_lan_direct(_rule("r1", "ip_cidr", "10.8.0.0/16"))
+    assert routes.shadowed_by_lan_direct(_rule("r2", "ip_cidr", "192.168.1.0/24"))
+    assert routes.shadowed_by_lan_direct(_rule("r3", "ip_cidr", "172.16.5.0/28"))
+
+
+def test_lan_direct_does_not_shadow_a_public_cidr_or_a_domain_rule():
+    assert not routes.shadowed_by_lan_direct(_rule("r1", "ip_cidr", "8.8.8.0/24"))
+    assert not routes.shadowed_by_lan_direct(
+        _rule("r2", "domain_suffix", "netflix.com")
+    )
+    assert not routes.shadowed_by_lan_direct(_rule("r3", "domain", "10.0.0.1"))
+    # a CIDR wider than the LAN range (not a subnet) is not shadowed
+    assert not routes.shadowed_by_lan_direct(_rule("r4", "ip_cidr", "10.0.0.0/7"))
+
+
+def test_lan_direct_shadow_marker_renders_with_a_human_label():
+    assert (
+        routes.shadow_label(routes.LAN_DIRECT_SHADOW) == "the built-in LAN-direct rule"
+    )
+    assert routes.shadow_label("r3") == "earlier rule r3"

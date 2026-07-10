@@ -10,6 +10,8 @@ import json
 import time
 from typing import Any
 
+from alle import routes
+
 
 def json_text(data: Any) -> str:
     return json.dumps(data, indent=2, ensure_ascii=False, default=_json_default)
@@ -221,7 +223,7 @@ def routes_list(data: dict) -> str:
                 r.get("ruleset", ""),
                 r["match"],
                 r["target"],
-                f"shadowed by {r['shadowed_by']} — never matches"
+                f"shadowed by {routes.shadow_label(r['shadowed_by'])} — never matches"
                 if r.get("shadowed_by")
                 else "",
             ]
@@ -245,7 +247,7 @@ def routes_list(data: dict) -> str:
         )
         for rule in rs["rules"]:
             note = (
-                f"  [shadowed by {rule['shadowed_by']} — never matches]"
+                f"  [shadowed by {routes.shadow_label(rule['shadowed_by'])} — never matches]"
                 if rule.get("shadowed_by")
                 else ""
             )

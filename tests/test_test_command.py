@@ -108,6 +108,59 @@ def test_test_default_probes_without_speed(two_channels, stub_probe, stub_throug
     assert stub_throughput == []
 
 
+@pytest.fixture
+def same_id_under_two_providers():
+    """Two providers each carrying a channel with the SAME id — the ambiguous
+    case a bare id must not silently operate across."""
+    store = service.Store.load()
+    store.add_provider("nordvpn")
+    store.add_channel("nordvpn", "United States", "", dict(WG))  # united_states_1
+    store.add_provider("protonvpn")
+    store.upsert_channel("protonvpn", "united_states_1", "", "", dict(WG))
+
+
+def test_test_rejects_an_ambiguous_bare_channel_id(
+    same_id_under_two_providers, stub_probe
+):
+    with pytest.raises(service.ServiceError, match="multiple providers"):
+        service.test(channel="united_states_1")
+
+
+def test_test_accepts_a_qualified_provider_channel_ref(
+    same_id_under_two_providers, stub_probe, stub_throughput
+):
+    data = service.test(channel="nordvpn/united_states_1")
+    assert [r["name"] for r in data["channels"]] == ["united_states_1"]
+    assert data["channels"][0]["provider"] == "nordvpn"
+
+
+def test_test_unambiguous_bare_id_still_works(two_channels, stub_probe):
+    # only nordvpn carries japan_1 → a bare id is fine
+    data = service.test(channel="japan_1")
+    assert [r["name"] for r in data["channels"]] == ["japan_1"]
+
+
+def test_metrics_rejects_an_ambiguous_bare_channel_id(
+    same_id_under_two_providers, monkeypatch
+):
+    # metrics_snapshot reads totals(); stub a non-empty total so the path runs
+    monkeypatch.setattr(service.metrics, "totals", lambda: {})
+    with pytest.raises(service.ServiceError, match="multiple providers"):
+        service.metrics_snapshot("united_states_1")
+
+
+def test_metrics_accepts_a_qualified_ref(same_id_under_two_providers, monkeypatch):
+    monkeypatch.setattr(
+        service.metrics,
+        "totals",
+        lambda: {("nordvpn", "united_states_1"): {"sent": 10, "received": 20}},
+    )
+    data = service.metrics_snapshot("nordvpn/united_states_1")
+    names = [r["name"] for r in data["channels"]]
+    assert names == ["united_states_1"]
+    assert data["channels"][0]["provider"] == "nordvpn"
+
+
 def test_test_speed_runs_only_healthy_channels(
     two_channels, stub_probe_one_failed, stub_throughput
 ):

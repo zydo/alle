@@ -303,6 +303,21 @@ Before any user rule, a **built-in LAN block** (on by default — see
 multicast destinations direct, so a catch-all VPN rule never cuts off printers,
 NAS boxes, router admin pages, or LAN discovery.
 
+**Domain matchers default to suffix matching.** A domain you add (`netflix.com`,
+`api.openai.com`) matches that domain *and all of its subdomains* — the usual
+intent. Use the explicit `--domain` (exact) matcher for the rare host-only case.
+`routes ls` flags any rule that can never match because an earlier rule (or the
+built-in LAN block, when on) already covers it.
+
+**DNS is not routed for you — mind DNS leakage.** alle routes by destination
+(IP/CIDR/domain), it does not intercept the system resolver. An app that
+resolves a hostname *locally* and then connects by IP can leak which host it is
+contacting through the local DNS query, and a hostname resolved to a sinkhole
+address by a system-wide TUN VPN on the same host can defeat a domain rule. To
+keep name resolution inside the tunnel, point apps at the proxy with **remote
+DNS** — `socks5h://` (not `socks5://`) or an HTTP proxy that resolves remotely —
+so sing-box resolves the destination through the tunnel, not the host.
+
 The entrypoint's port is shown by `alle status` and by `routes ls`; it is
 allocated on the first daemon start and then never changes.
 

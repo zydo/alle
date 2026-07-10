@@ -31,7 +31,7 @@ import threading
 import time
 from pathlib import Path
 
-from alle import __version__, applog, credentials, daemon, output, service
+from alle import __version__, applog, credentials, daemon, output, routes, service
 from alle.providers import (
     ProviderError,
     auth_fields,
@@ -412,8 +412,8 @@ def _print_ruleset_added(result: dict, verb: str = "Added") -> None:
     for rule in rs["rules"]:
         if rule.get("shadowed_by"):
             print(
-                f"  WARNING: {rule['id']} {rule['match']} is shadowed by earlier rule "
-                f"{rule['shadowed_by']} — it will never match."
+                f"  WARNING: {rule['id']} {rule['match']} is shadowed by "
+                f"{routes.shadow_label(rule['shadowed_by'])} — it will never match."
             )
 
 
@@ -480,8 +480,8 @@ def cmd_routes_reorder(args):
     for rule in result.get("rules", []):
         if rule.get("shadowed_by"):
             print(
-                f"  WARNING: {rule['id']} is shadowed by earlier rule "
-                f"{rule['shadowed_by']} — it will never match."
+                f"  WARNING: {rule['id']} is shadowed by "
+                f"{routes.shadow_label(rule['shadowed_by'])} — it will never match."
             )
 
 
@@ -1180,12 +1180,17 @@ def build_parser() -> argparse.ArgumentParser:
     te.add_argument(
         "--speed", action="store_true", help="also run download/upload tests"
     )
-    te.add_argument("--channel", help="test only this channel (default: every channel)")
+    te.add_argument(
+        "--channel",
+        help="test only this channel (id or provider/id; default: every channel)",
+    )
     te.add_argument("--json", action="store_true", help="print machine-readable JSON")
     te.set_defaults(func=cmd_test)
     me = sub.add_parser("metrics", help="show per-channel cumulative traffic totals")
     me.add_argument(
-        "channel", nargs="?", help="filter to one channel by name (default: all)"
+        "channel",
+        nargs="?",
+        help="filter to one channel (id or provider/id; default: all)",
     )
     me.add_argument("--json", action="store_true", help="print machine-readable JSON")
     me.set_defaults(func=cmd_metrics)

@@ -549,7 +549,8 @@ def test_wgless_channel_resolves_via_token_and_matchers_infer(monkeypatch):
     assert types == [
         ("domain_suffix", "netflix.com"),
         ("ip_cidr", "10.8.0.0/16"),
-        ("domain", "api.example.com"),
+        # inferred domains default to suffix now (was: exact for ≥3 labels)
+        ("domain_suffix", "api.example.com"),
     ]
 
 

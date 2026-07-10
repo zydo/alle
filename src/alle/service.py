@@ -533,13 +533,15 @@ def metrics_snapshot(channel: str | None = None) -> dict:
 
     Rows are the currently-configured channels (totals for removed channels are
     dropped at removal time), each joined with its stored counters. ``channel``
-    filters to channels whose id matches, across every provider.
+    filters to one channel by bare id or ``provider/channel`` ref; a bare id
+    matching channels under more than one provider is rejected.
     """
     store = Store.load()
     stored = metrics.totals()
+    wanted = _resolve_channel_filter(store, channel)
     rows = []
     for ch in store.channels():
-        if channel and ch.id != channel:
+        if wanted and (ch.provider, ch.id) not in wanted:
             continue
         t = stored.get((ch.provider, ch.id), {})
         sent = int(t.get("sent", 0))
@@ -582,6 +584,21 @@ def _channel_row(provider: str, channel_id: str) -> dict:
         "channel": channel_id,
         "ref": f"{provider}/{channel_id}",
     }
+
+
+def _resolve_channel_filter(store: Store, channel: str | None) -> set[tuple[str, str]]:
+    """Resolve a ``--channel`` filter to the ``(provider, id)`` set it names.
+
+    Accepts a bare id or a qualified ``provider/channel`` ref. A bare id that
+    matches channels under more than one provider is rejected — channel ids are
+    unique only within a provider, so a bare id operating across providers would
+    silently touch the wrong channel. An explicit glob may span providers
+    (the pattern makes the intent unambiguous). Empty/None → every channel.
+    """
+    if not channel:
+        return set()
+    rows = _resolve_channel_ref(store, channel, None)
+    return {(r["provider"], r["channel"]) for r in rows}
 
 
 def _resolve_channel_ref(store: Store, ref: str, provider: str | None) -> list[dict]:
@@ -846,6 +863,12 @@ def _routes_payload(
 ) -> dict:
     rules_ = store.rules()
     shadows = routes.shadowed_by(rules_)
+    # The built-in LAN-direct block sits ahead of every user rule; flag any user
+    # CIDR rule it covers (only relevant when lan_direct is on).
+    if store.router.get("lan_direct", True):
+        for rule in rules_:
+            if rule["id"] not in shadows and routes.shadowed_by_lan_direct(rule):
+                shadows[rule["id"]] = routes.LAN_DIRECT_SHADOW
     rows = []
     for rule in rules_:
         if channel is not None:
@@ -1341,9 +1364,11 @@ def test(
     store = Store.load()
     channels = store.channels()
     if channel is not None:
-        channels = [c for c in channels if c.id == channel]
-        if not channels:
-            raise ServiceError(f"no channel named {channel!r} (see: alle channels ls).")
+        # Resolve a bare id or provider/channel ref, rejecting an id that
+        # matches channels under more than one provider (channel ids are only
+        # unique within a provider).
+        wanted = _resolve_channel_filter(store, channel)
+        channels = [c for c in channels if (c.provider, c.id) in wanted]
     if not channels:
         return {
             "probed": False,

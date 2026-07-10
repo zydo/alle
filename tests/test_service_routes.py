@@ -46,7 +46,9 @@ def test_ruleset_create_returns_decorated_block(channel):
     assert [r["id"] for r in rs["rules"]] == ["r1", "r2"]
     assert [r["match"] for r in rs["rules"]] == [
         "domain_suffix netflix.com",
-        "domain api.netflix.com",
+        # default is suffix for every inferred domain (the two-label heuristic
+        # that made api.netflix.com exact is gone); an explicit type opts into exact
+        "domain_suffix api.netflix.com",
     ]
 
 

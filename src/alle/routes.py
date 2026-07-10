@@ -84,8 +84,12 @@ def infer_matcher(value: str, matcher_type: str | None = None) -> tuple[str, str
     """Infer and normalize a ruleset matcher from one user-facing entry.
 
     Explicit ``matcher_type`` remains available for advanced overrides. Without
-    it, CIDR/IP-looking entries become ``ip_cidr``; domains with two labels are
-    suffix matches; domains with a meaningful subdomain are exact matches.
+    it, CIDR/IP-looking entries become ``ip_cidr``; every domain defaults to
+    ``domain_suffix`` — "netflix.com" routes the domain *and* its subdomains,
+    the common intent. (The old two-label heuristic made a registrable domain
+    like ``example.co.uk`` — three labels — an *exact* match, so its subdomains
+    silently bypassed the rule.) Pass an explicit ``domain`` type for the rare
+    host-only case where suffix matching would be too broad.
     """
     raw = value.strip()
     if matcher_type:
@@ -96,9 +100,7 @@ def infer_matcher(value: str, matcher_type: str | None = None) -> tuple[str, str
         return "ip_cidr", str(ipaddress.ip_network(raw, strict=False))
     except ValueError:
         pass
-    domain = normalize_domain(raw)
-    labels = domain.split(".")
-    return ("domain_suffix" if len(labels) <= 2 else "domain"), domain
+    return "domain_suffix", normalize_domain(raw)
 
 
 def parse_target(target: str) -> tuple[str, tuple[str, str] | None]:
@@ -170,3 +172,52 @@ def shadowed_by(rules: list[dict]) -> dict[str, str]:
                 out[rule["id"]] = earlier["id"]
                 break
     return out
+
+
+# The marker placed in a rule's ``shadowed_by`` when it is covered by the
+# built-in priority-zero LAN-direct block (not a user rule id). Distinct from
+# any real id (``r…``/``rs…``) so the renderer can name the built-in block.
+LAN_DIRECT_SHADOW = "lan-direct"
+
+
+def shadowed_by_lan_direct(rule: dict) -> bool:
+    """True if an ``ip_cidr`` rule is wholly inside a built-in LAN-direct range.
+
+    The LAN-direct block sits at priority zero (ahead of every user rule), so a
+    user rule targeting a private/link-local/multicast range it covers can never
+    match while ``lan_direct`` is on — its traffic already went direct. Domain
+    rules are never affected (a domain never resolves into a fixed private
+    range the lint could see). Returns False for anything but a covered CIDR.
+    """
+    if rule.get("type") != "ip_cidr":
+        return False
+    try:
+        net = ipaddress.ip_network(rule["value"])
+    except ValueError:
+        return False
+    for cidr in LAN_DIRECT_CIDRS:
+        lan = ipaddress.ip_network(cidr)
+        # Paired isinstance (not a version compare) so type checkers narrow the
+        # IPv4Network | IPv6Network union that subnet_of() won't accept mixed;
+        # the two families are checked separately, each returning on a match.
+        if (
+            isinstance(net, ipaddress.IPv4Network)
+            and isinstance(lan, ipaddress.IPv4Network)
+            and net.subnet_of(lan)
+        ):
+            return True
+        if (
+            isinstance(net, ipaddress.IPv6Network)
+            and isinstance(lan, ipaddress.IPv6Network)
+            and net.subnet_of(lan)
+        ):
+            return True
+    return False
+
+
+def shadow_label(shadowed_by: str) -> str:
+    """Human wording for a ``shadowed_by`` marker — names the built-in LAN-direct
+    block specially, otherwise the covering user rule's id."""
+    if shadowed_by == LAN_DIRECT_SHADOW:
+        return "the built-in LAN-direct rule"
+    return f"earlier rule {shadowed_by}"
