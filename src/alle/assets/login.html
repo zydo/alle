@@ -29,28 +29,7 @@
     </form>
   </div>
 
-  <script type="module">
-    const form = document.getElementById("form");
-    const err = document.getElementById("err");
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      err.classList.remove("show");
-      const token = document.getElementById("token").value.trim();
-      try {
-        const res = await fetch("/api/v1/login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token }),
-        });
-        if (res.ok) { location.href = "/"; return; }
-        err.textContent = "That token wasn't accepted. Check it and try again.";
-      } catch (error_) {
-        const detail = error_ instanceof Error ? error_.message : String(error_);
-        err.textContent = `Couldn't reach the dashboard: ${detail}`;
-      }
-      err.classList.add("show");
-    });
-  </script>
+  <script type="module" src="/login.js"></script>
 </body>
 
 </html>

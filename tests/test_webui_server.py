@@ -587,7 +587,8 @@ def test_routes_api_create_reorder_killswitch_delete(live):
         headers=origin,
         data={"type": "domain", "value": "api.example.com", "target": "nordvpn/us_1"},
     )
-    assert st == 404  # flat per-rule authoring is no longer user-facing
+    assert st == 405  # flat per-rule authoring is gone: /routes is a known
+    # resource, but POST /api/v1/routes has no handler (rulesets is the path)
 
     st, body, _ = _req(
         base + "/api/v1/routes/rulesets",
@@ -1037,6 +1038,64 @@ def test_control_api_rejects_a_shape_wrong_file():
     assert isinstance(api["address"], str)
     assert isinstance(api["secret"], str)
     assert isinstance(api["host"], str)
+
+
+def test_every_response_carries_security_headers(live):
+    base, secret = live
+    # an API response, an error, and a static asset all carry the same set
+    for path in ["/api/v1/status", "/api/v1/no-such", "/style.css"]:
+        st, _, headers = _req(
+            base + path, headers={"Host": _canon(), "Authorization": f"Bearer {secret}"}
+        )
+        assert "Content-Security-Policy" in headers
+        assert "frame-ancestors 'none'" in headers["Content-Security-Policy"]
+        assert headers["X-Frame-Options"] == "DENY"
+        assert headers["Permissions-Policy"]
+        assert headers["X-Content-Type-Options"] == "nosniff"
+        assert headers["Referrer-Policy"] == "no-referrer"
+    # and HEAD too
+    st, _, headers = _req(base + "/health", method="HEAD", headers={"Host": _canon()})
+    assert "Content-Security-Policy" in headers
+
+
+def test_server_banner_does_not_leak_the_python_version(live):
+    base, _ = live
+    _, _, headers = _req(base + "/", headers={"Host": _canon()})
+    assert headers["Server"] == "alle-webui"
+    assert "Python" not in headers["Server"]
+
+
+def test_known_api_path_wrong_method_is_405_with_allow(live):
+    base, secret = live
+    # Origin must match the (literal) Host for the CSRF check; Bearer works on
+    # any loopback host.
+    auth_ = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    # status is GET-only; POST names a known resource under the wrong method
+    st, body, headers = _req(base + "/api/v1/status", method="POST", headers=auth_)
+    assert st == 405
+    assert "Allow" in headers and "GET" in headers["Allow"]
+    # import is POST-only; GET is the wrong method for it
+    st, _, headers = _req(base + "/api/v1/import", headers=auth_)
+    assert st == 405 and headers["Allow"] == "POST"
+
+
+def test_unknown_api_path_is_still_404(live):
+    base, secret = live
+    st, _, _ = _req(
+        base + "/api/v1/bogus-resource",
+        headers={"Host": _canon(), "Authorization": f"Bearer {secret}"},
+    )
+    assert st == 404  # not a known resource at all
+
+
+def test_login_page_uses_an_external_script(live):
+    # the inline script moved to /login.js so CSP can drop 'unsafe-inline'
+    base, _ = live
+    _, body, _ = _req(base + "/", headers={"Host": _canon()})
+    assert b"<script" in body and b"login.js" in body
+    assert b"addEventListener" not in body  # no inline script body remains
+    st, js_body, _ = _req(base + "/login.js", headers={"Host": _canon()})
+    assert st == 200 and b"addEventListener" in js_body
 
 
 def test_logs_endpoint_returns_tail_and_clamps_lines(live, monkeypatch):

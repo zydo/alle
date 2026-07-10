@@ -54,6 +54,61 @@ _ASSET_TYPES = {
 # hostile local client from making the daemon buffer arbitrary amounts.
 MAX_BODY = 1 << 20
 
+# A uniform security-header set attached to EVERY response (see the
+# send_response override). The UI loads only same-origin external module
+# scripts and one stylesheet, posts forms/fetches to its own origin, and is
+# never framed — so the policy is tight: no inline scripts, no inline styles,
+# no plugins, no embedding, no <base>. login.html's script is an external
+# module (assets/login.js) precisely so script-src can drop 'unsafe-inline'.
+_CSP = "; ".join(
+    [
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self'",
+        "img-src 'self'",
+        "connect-src 'self'",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+    ]
+)
+_PERMISSIONS_POLICY = ", ".join(
+    [
+        "camera=()",
+        "microphone=()",
+        "geolocation=()",
+        "interest-cohort=()",
+        "browsing-topics=()",
+    ]
+)
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": _CSP,
+    "X-Frame-Options": "DENY",
+    "Permissions-Policy": _PERMISSIONS_POLICY,
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+# The HTTP methods each top-level /api/v1/<resource> accepts. A request whose
+# path names one of these resources but whose method isn't listed is a 405
+# (with an Allow header); a path whose first segment isn't here is a 404.
+_API_RESOURCE_METHODS = {
+    "status": {"GET"},
+    "providers": {"GET", "POST", "DELETE"},
+    "channels": {"GET", "POST", "DELETE"},
+    "routes": {"GET", "POST", "DELETE"},
+    "locations": {"GET"},
+    "metrics": {"GET"},
+    "logs": {"GET"},
+    "export": {"GET"},
+    "import": {"POST"},
+    "validate": {"POST"},
+    "login": {"POST"},
+    "logout": {"POST"},
+    "lifecycle": {"POST"},
+}
+
 
 class _BadRequest(Exception):
     """A request the transport layer refuses — carries the HTTP status.
@@ -337,6 +392,19 @@ class _Handler(BaseHTTPRequestHandler):
     # client that connects and stalls cannot pin a worker thread forever.
     timeout = 30
 
+    def version_string(self) -> str:
+        # Hide the default "<server_version> Python/<version>" banner: the
+        # Server header names alle only, not the interpreter revision.
+        return self.server_version
+
+    def send_response(self, code, message=None):
+        # Every response — JSON, errors, assets, the ndjson stream, HEAD — gets
+        # the same security-header set, attached once right after the status
+        # line (before per-route headers and end_headers).
+        super().send_response(code, message)
+        for header, value in _SECURITY_HEADERS.items():
+            self.send_header(header, value)
+
     def log_message(self, *args):  # quiet: the app log is the record, not stderr
         pass
 
@@ -389,11 +457,11 @@ class _Handler(BaseHTTPRequestHandler):
         return True
 
     def _send(self, code: int, body: bytes, ctype: str, extra: dict | None = None):
+        # Security headers (CSP/XFO/Permissions-Policy/nosniff/no-referrer) are
+        # attached uniformly by the send_response override.
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "no-referrer")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         refresh = getattr(self, "_refresh_cookie", None)
@@ -663,7 +731,6 @@ class _Handler(BaseHTTPRequestHandler):
 
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson")
-        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.end_headers()
@@ -712,10 +779,24 @@ class _Handler(BaseHTTPRequestHandler):
             }
         )
 
+    def _api_no_match(self, seg: list[str]):
+        """405 (with an Allow header) when ``seg`` names a known API resource
+        reached under the wrong method; 404 only for a path that is no resource
+        at all."""
+        methods = _API_RESOURCE_METHODS.get(seg[0]) if seg else None
+        if methods:
+            return self._json(
+                405,
+                {"error": "method not allowed"},
+                {"Allow": ", ".join(sorted(methods))},
+            )
+        return self._json(404, {"error": "not found"})
+
     def _api_get(self, path: str):
         from alle import service
 
         seg = path.strip("/").split("/")[2:]  # drop "api/v1"
+
         if seg == ["export"]:
             return self._export_get()
         routes_ = {
@@ -732,7 +813,7 @@ class _Handler(BaseHTTPRequestHandler):
         }
         fn = routes_.get(tuple(seg))
         if fn is None:
-            return self._json(404, {"error": "not found"})
+            return self._api_no_match(seg)
         self._call(fn)  # same ServiceError -> 400 mapping as mutations
 
     def _export_get(self):
@@ -927,7 +1008,7 @@ class _Handler(BaseHTTPRequestHandler):
         if method == "POST" and seg == ["lifecycle", "restart"]:
             _fields(body)
             return self._call(service.restart)
-        self._json(404, {"error": "not found"})
+        return self._api_no_match(seg)
 
 
 def _add_provider(body: dict) -> dict:
