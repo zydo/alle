@@ -434,14 +434,34 @@ def test_metrics_endpoint_returns_snapshot(live):
     assert data["channels"][0]["name"] == "us_1"
 
 
-def test_test_endpoint_calls_service_with_speed_and_channel(live, monkeypatch):
+def test_test_endpoint_streams_speed_test(live, monkeypatch):
+    """speed=true streams NDJSON — one row per channel as it completes, then a
+    done summary — while still forwarding speed + channel to service.test."""
     base, secret = live
     origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
     seen = {}
 
-    def fake_test(*, speed=False, channel=None, progress=None):
-        seen.update({"speed": speed, "channel": channel, "progress": progress})
-        return {"speed": speed, "filter": channel, "channels": []}
+    def fake_test(
+        *, speed=False, channel=None, progress=None, on_row=None, on_begin=None
+    ):
+        seen.update({"speed": speed, "channel": channel})
+        if on_row:
+            on_row(
+                {
+                    "provider": "nordvpn",
+                    "name": "us_1",
+                    "speed_result": {"download_bps": 1e6},
+                }
+            )
+        return {
+            "probed": True,
+            "filter": channel,
+            "running": True,
+            "channel_count": 1,
+            "healthy_count": 1,
+            "failed_count": 0,
+            "channels": [],
+        }
 
     monkeypatch.setattr(service, "test", fake_test)
 
@@ -452,8 +472,38 @@ def test_test_endpoint_calls_service_with_speed_and_channel(live, monkeypatch):
         data={"speed": True, "channel": "us_1"},
     )
 
-    assert st == 200 and json.loads(body)["filter"] == "us_1"
-    assert seen == {"speed": True, "channel": "us_1", "progress": None}
+    events = [json.loads(line) for line in body.splitlines() if line.strip()]
+    assert st == 200
+    assert seen == {"speed": True, "channel": "us_1"}
+    assert [e["type"] for e in events] == ["row", "done"]
+    assert events[0]["data"]["name"] == "us_1"
+    assert (
+        events[-1]["data"]["filter"] == "us_1"
+    )  # done carries the summary, not channels
+
+
+def test_test_endpoint_probe_returns_json(live, monkeypatch):
+    """speed=false stays on the single-shot JSON path (not streamed)."""
+    base, secret = live
+    origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
+
+    monkeypatch.setattr(
+        service,
+        "test",
+        lambda *, speed=False, channel=None, progress=None: {
+            "filter": channel,
+            "channels": [],
+        },
+    )
+
+    st, body, _ = _req(
+        base + "/api/v1/test",
+        method="POST",
+        headers=origin,
+        data={"speed": False, "channel": "us_1"},
+    )
+    assert st == 200
+    assert json.loads(body)["filter"] == "us_1"  # one JSON object, not NDJSON
 
 
 def test_lifecycle_endpoints_call_service(live, monkeypatch):

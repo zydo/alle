@@ -467,24 +467,116 @@ def cmd_status(args):
 
 
 def cmd_test(args):
-    spinner = _Spinner("testing…") if args.speed and not args.json else None
+    # An interactive speed test streams: the header prints up front, each
+    # channel's row appears the moment its test completes, a progress line tracks
+    # the channel under test, and a summary prints at the end. Everything else
+    # (--json, non-TTY, plain probe) uses the single-shot path below.
+    if args.speed and not args.json and sys.stderr.isatty():
+        _run_streaming_test(args)
+        return
 
-    def progress(row, phase):
-        if spinner is not None:
-            spinner.label = f"{row['provider']}/{row['name']}  {phase}…"
-
-    if spinner is not None:
-        with spinner:
-            result = service.test(
-                speed=args.speed, channel=args.channel, progress=progress
-            )
-    else:
-        result = service.test(speed=args.speed, channel=args.channel)
+    result = service.test(speed=args.speed, channel=args.channel)
 
     if args.json:
         print(output.json_text(result))
         return
     print(output.test_result(result))
+
+
+def _run_streaming_test(args):
+    """Live, per-channel speed-test output (TTY only). See :func:`cmd_test`."""
+    state = {"renderer": None}
+
+    def on_begin(chans):
+        if chans:  # no header when there are no channels — test() returns the reason
+            state["renderer"] = _SpeedStream(output.test_stream_widths(chans))
+            state["renderer"].begin()
+
+    def on_row(row):
+        if state["renderer"] is not None:
+            state["renderer"].row(row)
+
+    def progress(row, phase):
+        if state["renderer"] is not None:
+            state["renderer"].progress(row, phase)
+
+    result = service.test(
+        speed=True,
+        channel=args.channel,
+        progress=progress,
+        on_row=on_row,
+        on_begin=on_begin,
+    )
+
+    if state["renderer"] is None:
+        print(output.test_result(result))  # "No channels configured." etc.
+        return
+    state["renderer"].end()
+    healthy = result.get("healthy_count", 0)
+    failed = result.get("failed_count", 0)
+    print(f"{healthy} healthy · {failed} failed")
+
+
+class _SpeedStream:
+    """Live renderer for a streamed speed test.
+
+    Prints the table header to stdout up front, then one row to stdout as each
+    channel finishes, with a single reusable, *animated* progress line on stderr
+    tracking the channel/phase under test. The progress line is wiped before
+    every stdout row so the table stays clean.
+
+    A background thread cycles the braille spinner frames so the indicator
+    actually moves during the multi-second transfers; a lock serializes its
+    writes against the main thread's row writes, since both share one terminal
+    cursor (without it the spinner could redraw mid-row and garble the table).
+    """
+
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, widths):
+        self.widths = widths
+        self.label = "probing channels…"  # read by the spinner thread each frame
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = None
+
+    def _spin(self):
+        for frame in itertools.cycle(self._FRAMES):
+            if self._stop.is_set():
+                break
+            with self._lock:
+                if self._stop.is_set():
+                    break
+                sys.stderr.write(f"\r  {frame} {self.label}\033[K")
+                sys.stderr.flush()
+            time.sleep(0.1)
+
+    def begin(self):
+        sys.stdout.write(output.test_stream_header(self.widths) + "\n")
+        sys.stdout.flush()
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+
+    def progress(self, row, phase):
+        # Reassigned atomically (GIL); the spinner re-reads it next frame, so no
+        # lock is needed just to update the label.
+        self.label = f"{row['provider']}/{row['name']}  {phase}…"
+
+    def row(self, row):
+        with self._lock:  # hold the spinner still while we wipe + print the row
+            sys.stderr.write("\r\033[K")
+            sys.stderr.flush()
+            sys.stdout.write(output.test_stream_row(row, self.widths) + "\n")
+            sys.stdout.flush()
+        self.label = "next…"
+
+    def end(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join()
+        with self._lock:
+            sys.stderr.write("\r\033[K")
+            sys.stderr.flush()
 
 
 def cmd_metrics(args):
@@ -621,44 +713,6 @@ def cmd_validate(args):
     )
     for note in result["notes"]:
         print(f"  note: {note}")
-
-
-class _Spinner:
-    """A tiny stderr spinner for long, one-at-a-time work (the speed test).
-
-    Animates only on a real TTY; when stderr is redirected (pipe, CI) it stays
-    silent so captured output isn't polluted. ``label`` may be updated live to
-    reflect the current phase.
-    """
-
-    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-
-    def __init__(self, label: str):
-        self.label = label
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def __enter__(self):
-        if sys.stderr.isatty():
-            self._thread = threading.Thread(target=self._spin, daemon=True)
-            self._thread.start()
-        return self
-
-    def _spin(self):
-        for frame in itertools.cycle(self._FRAMES):
-            if self._stop.is_set():
-                break
-            sys.stderr.write(f"\r  {frame} {self.label}\033[K")
-            sys.stderr.flush()
-            time.sleep(0.1)
-
-    def __exit__(self, *exc):
-        self._stop.set()
-        if self._thread:
-            self._thread.join()
-        if sys.stderr.isatty():
-            sys.stderr.write("\r\033[K")  # wipe the spinner line
-            sys.stderr.flush()
 
 
 # ---- start / stop / restart ------------------------------------------------

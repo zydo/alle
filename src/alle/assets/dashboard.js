@@ -113,6 +113,15 @@ async function copy(text) {
 function chanKey(c) { return `${c.provider}/${c.name}`; }
 function loc(c) { return c.city && !["(Unknown)", "(Any City)"].includes(c.city) ? `${c.city}, ${c.country}` : c.country; }
 function spin(key, kind, icon) { return busy.has(key) || busy.has(`${key}:${kind}`) ? '<span class="spinner small"></span>' : icon; }
+// A channel's action buttons are locked while it's being tested (either kind) or
+// while a batch run is in flight — so e.g. a channel's Probe is greyed while its
+// own Speed Test is running, and no per-channel test can fire mid "Test All".
+function chanBusy(key) {
+  return (
+    busy.has(key) || busy.has(`${key}:probe`) || busy.has(`${key}:speed`)
+    || busy.has("all:probe") || busy.has("all:speed")
+  );
+}
 function isSet(value) { return value !== null && value !== undefined; }
 function syncHeaderBusy() {
   el.probeAll = el.channels?.querySelector("#probe-all");
@@ -133,15 +142,15 @@ function chanRow(c) {
       <div class="ref">${esc(key)}</div></span>
     <span class="loc" title="${esc(loc(c))}">${esc(loc(c))}</span>
     <span class="port copyable" data-copy="http://127.0.0.1:${esc(c.port_number)}" title="Click to copy">${esc(c.port)}</span>
-    <span class="ip">${esc(m.ip || "")}</span>
+    <span class="ip${m.ip ? " copyable" : ""}"${m.ip ? ` data-copy="${esc(m.ip)}" title="Click to copy"` : ""}>${esc(m.ip || "")}</span>
     <span class="lat">${isSet(m.latency_ms) ? `${esc(m.latency_ms)} ms` : ""}</span>
     <span class="mono">${m.metrics ? bytes(m.metrics.sent) : ""}</span>
     <span class="mono">${m.metrics ? bytes(m.metrics.received) : ""}</span>
     <span class="mono">${speed.download_bps ? mbps(speed.download_bps) : ""}</span>
     <span class="mono">${speed.upload_bps ? mbps(speed.upload_bps) : ""}</span>
     <span class="row-actions channel-actions">
-      <button class="icon-btn" title="Probe" aria-label="Probe" data-probe>${spin(key, "probe", "◉")}</button>
-      <button class="icon-btn" title="Speed Test" aria-label="Speed Test" data-speed>${spin(key, "speed", GAUGE)}</button>
+      <button class="icon-btn" title="Probe" aria-label="Probe" data-probe${chanBusy(key) ? " disabled" : ""}>${spin(key, "probe", "◉")}</button>
+      <button class="icon-btn" title="Speed Test" aria-label="Speed Test" data-speed${chanBusy(key) ? " disabled" : ""}>${spin(key, "speed", GAUGE)}</button>
       <button class="icon-btn danger" title="Remove" aria-label="Remove" data-remove>×</button>
     </span>
   </div>`;
@@ -159,25 +168,128 @@ function renderChannels() {
   syncHeaderBusy();
 }
 
+// Per-row speed-button busy keys: each channel's gauge spins until its own
+// result arrives, so the user sees which channels are still pending during an
+// all-channels run. Cleared per row as it lands and again in runTest's finally.
+function speedBusyKeys(channel) {
+  if (channel) return [`${chanKey(channel)}:speed`];
+  return (status?.channels || []).map((c) => `${chanKey(c)}:speed`);
+}
+
 async function runTest(channel, speed) {
   const key = channel ? chanKey(channel) : "all";
   const testKind = speed ? "speed" : "probe";
   const busyKey = channel ? `${key}:${testKind}` : `all:${testKind}`;
   busy.add(key); busy.add(busyKey);
+  const speedKeys = speed ? speedBusyKeys(channel) : [];
+  speedKeys.forEach((k) => busy.add(k));
   syncHeaderBusy();
   renderChannels();
-  const res = await api.post("/api/v1/test", { speed, channel: channel ? channel.name : null });
-  const metrics = await api.get("/api/v1/metrics");
-  busy.delete(key); busy.delete(busyKey);
-  syncHeaderBusy();
-  if (!res.ok) { toast(res.error, "err"); renderChannels(); return; }
-  const metricMap = new Map((metrics.ok ? metrics.data.channels : []).map((c) => [`${c.provider}/${c.name}`, c]));
-  for (const row of res.data.channels || []) {
-    measured.set(`${row.provider}/${row.name}`, { ...row, metrics: metricMap.get(`${row.provider}/${row.name}`) });
+  try {
+    if (speed) {
+      await runSpeedStream(channel);
+    } else {
+      const res = await api.post("/api/v1/test", { speed: false, channel: channel ? channel.name : null });
+      const metrics = await api.get("/api/v1/metrics");
+      if (!res.ok) { toast(res.error, "err"); return; }
+      const metricMap = new Map((metrics.ok ? metrics.data.channels : []).map((c) => [`${c.provider}/${c.name}`, c]));
+      for (const row of res.data.channels || []) {
+        measured.set(`${row.provider}/${row.name}`, { ...row, metrics: metricMap.get(`${row.provider}/${row.name}`) });
+      }
+      renderChannels();
+      toast("Probe complete.");
+      refreshStatus();
+    }
+  } finally {
+    busy.delete(key); busy.delete(busyKey);
+    speedKeys.forEach((k) => busy.delete(k));
+    syncHeaderBusy();
+    renderChannels();
   }
-  renderChannels();
-  toast(speed ? "Speed test complete." : "Probe complete.");
+}
+
+// A speed test streams one result row per channel as it finishes (NDJSON), so
+// each row's IP/latency/download/upload fills in live instead of all at once at
+// the end. Probe-all stays on the single-shot api.post path above.
+async function runSpeedStream(channel) {
+  const res = await startSpeedStream(channel);
+  if (!res) return;                 // network/401/non-stream error already toasted
+  if (await consumeSpeedStream(res.body)) return;  // mid-stream error already toasted
+  await mergeMetrics();
+  toast("Speed test complete.");
   refreshStatus();
+}
+
+async function startSpeedStream(channel) {
+  let res;
+  try {
+    res = await fetch("/api/v1/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ speed: true, channel: channel ? channel.name : null }),
+    });
+  } catch (err) {
+    toast(`Can't reach the daemon: ${err instanceof Error ? err.message : String(err)}`, "err");
+    return null;
+  }
+  if (res.status === 401) { location.href = "/"; return null; }
+  if (!res.ok || !res.body) {
+    toast(await streamErrorMsg(res), "err");
+    return null;
+  }
+  return res;
+}
+
+async function streamErrorMsg(res) {
+  try { const t = await res.text(); if (t) return JSON.parse(t).error || `Request failed (${res.status})`; } catch { /* keep default */ }
+  return `Request failed (${res.status})`;
+}
+
+// Read the NDJSON body line by line, applying each row as it lands. Returns true
+// if an error event was seen (so the caller skips the success toast/refresh).
+async function consumeSpeedStream(body) {
+  const reader = body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let errored = false;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (line && applySpeedEvent(line)) errored = true;
+    }
+  }
+  return errored;
+}
+
+function applySpeedEvent(line) {
+  let evt;
+  try { evt = JSON.parse(line); } catch { return false; }
+  if (evt.type === "row" && evt.data) {
+    const r = evt.data;
+    const k = `${r.provider}/${r.name}`;
+    measured.set(k, { ...r, metrics: measured.get(k)?.metrics });
+    busy.delete(`${k}:speed`);
+    renderChannels();
+  } else if (evt.type === "error" && evt.data) {
+    toast(evt.data.error || "Speed test failed.", "err");
+    return true;
+  }
+  // "done" carries only summary counts; nothing to render.
+  return false;
+}
+
+// Refresh byte counters (sent/received) for the rows just measured.
+async function mergeMetrics() {
+  const metrics = await api.get("/api/v1/metrics");
+  if (!metrics.ok) return;
+  const mm = new Map(metrics.data.channels.map((c) => [`${c.provider}/${c.name}`, c]));
+  for (const [k, v] of measured) if (mm.has(k)) measured.set(k, { ...v, metrics: mm.get(k) });
+  renderChannels();
 }
 
 async function onChannelClick(e) {

@@ -1159,11 +1159,27 @@ def _skipped_speed(reason: str) -> dict:
     }
 
 
-def test(speed: bool = False, channel: str | None = None, progress=None) -> dict:
+def test(
+    speed: bool = False,
+    channel: str | None = None,
+    progress=None,
+    on_row=None,
+    on_begin=None,
+) -> dict:
     """Actively probe channels, optionally speed-test the healthy ones.
 
     ``channel`` filters by channel id across providers. Speed testing is gated by
     the fresh probe result from this invocation, not by stale status state.
+
+    Two optional streaming callbacks let a caller reveal results as each channel
+    finishes instead of only in the final aggregate:
+
+    - ``on_begin(chans)`` fires once, right after the to-test channel list is
+      resolved (before probing), with ``[{"provider","name","label","port",
+      "port_number"}, …]`` — enough to size/preview output before any result.
+    - ``on_row(row)`` fires after each channel is fully done (probe, and — when
+      ``speed`` — its download/upload test), with that channel's completed row,
+      the same dict that ends up in the returned ``channels`` list.
     """
     store = Store.load()
     channels = store.channels()
@@ -1184,6 +1200,22 @@ def test(speed: bool = False, channel: str | None = None, progress=None) -> dict
             "channels": [],
         }
 
+    if on_begin is not None:
+        on_begin(
+            [
+                {
+                    "provider": c.provider,
+                    "name": c.id,
+                    "label": c.label,
+                    "port": f":{c.port}",
+                    "port_number": c.port,
+                    "country": _country_display(c),
+                    "city": _city_display(c),
+                }
+                for c in channels
+            ]
+        )
+
     results = Engine(store).probe_all(channels)
     rows = [_test_row(ch, results[f"{ch.provider}/{ch.id}"]) for ch in channels]
     running = not rows or any(
@@ -1194,19 +1226,25 @@ def test(speed: bool = False, channel: str | None = None, progress=None) -> dict
         for row in rows:
             if not row["healthy"]:
                 row["speed_result"] = _skipped_speed("unhealthy")
-                continue
+            else:
 
-            def _progress(phase, row=row):
-                if progress is not None:
-                    progress(row, phase)
+                def _progress(phase, row=row):
+                    if progress is not None:
+                        progress(row, phase)
 
-            # The probe above already measured latency through this tunnel, so
-            # skip throughput.run's own latency phase and reuse that value.
-            result = speedtest_run_one(
-                row["port_number"], progress=_progress, measure_latency=False
-            )
-            result["latency_ms"] = row["latency_ms"]
-            row["speed_result"] = {"tested": True, "skip_reason": None, **result}
+                # The probe above already measured latency through this tunnel, so
+                # skip throughput.run's own latency phase and reuse that value.
+                result = speedtest_run_one(
+                    row["port_number"], progress=_progress, measure_latency=False
+                )
+                result["latency_ms"] = row["latency_ms"]
+                row["speed_result"] = {"tested": True, "skip_reason": None, **result}
+
+            if on_row is not None:
+                on_row(row)
+    elif on_row is not None:
+        for row in rows:
+            on_row(row)
 
     healthy_count = sum(1 for row in rows if row["healthy"])
     return {

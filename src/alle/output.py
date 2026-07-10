@@ -308,6 +308,57 @@ def test_result(data: dict) -> str:
     return "\n".join(_table(headers, rows))
 
 
+# The speed-test result columns appended after BASE_HEADERS, and fixed minimum
+# widths for them. Their values aren't known until each channel finishes, so the
+# streamed table can't size them from the data; these floors fit typical
+# "Healthy" / "23ms" / "45.2 Mbps" cells and keep rows aligned as they appear.
+_SPEED_RESULT_HEADERS = ["STATE", "LATENCY", "IP", "DOWNLOAD", "UPLOAD"]
+_SPEED_RESULT_WIDTHS = [7, 7, 15, 10, 10]
+_SPEED_HEADERS = [*BASE_HEADERS, *_SPEED_RESULT_HEADERS]
+
+
+def test_stream_widths(chans: list[dict]) -> list[int]:
+    """Column widths for the live speed-test table.
+
+    Base columns are sized from the channels that will be tested (known up front
+    via ``on_begin``), so LABEL/ID/PORT/COUNTRY/CITY line up; the result columns
+    use the fixed floors above (their values arrive later).
+    """
+    widths = [len(h) for h in BASE_HEADERS]
+    for c in chans:
+        for i, cell in enumerate(_base_cells(c)):
+            widths[i] = max(widths[i], len(cell))
+    return widths + list(_SPEED_RESULT_WIDTHS)
+
+
+def _stream_line(cells: list[str], widths: list[int]) -> str:
+    return "  ".join(
+        str(cells[i]).ljust(widths[i]) for i in range(len(widths))
+    ).rstrip()
+
+
+def test_stream_header(widths: list[int]) -> str:
+    """The header + dash separator for the live table (printed once, up front)."""
+    return (
+        _stream_line(_SPEED_HEADERS, widths) + "\n" + "  ".join("-" * w for w in widths)
+    )
+
+
+def test_stream_row(row: dict, widths: list[int]) -> str:
+    """One aligned row for a just-completed channel (same columns as the final
+    table from :func:`test_result`)."""
+    speed = row.get("speed_result") or {}
+    cells = [
+        *_base_cells(row),
+        _state_cell(row),
+        _latency(row.get("latency_ms")),
+        row.get("ip") or "-",
+        _mbps(speed.get("download_bps")),
+        _mbps(speed.get("upload_bps")),
+    ]
+    return _stream_line(cells, widths)
+
+
 def daemon_status(data: dict) -> str:
     svc = data["service"]
     d = data["daemon"]

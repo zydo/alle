@@ -915,6 +915,10 @@ input.relabel {
   color: var(--brand);
 }
 
+.ip.copyable:hover {
+  color: var(--brand);
+}
+
 .field-guide {
   margin: 0 0 14px;
   border: 1px solid var(--line);

@@ -504,6 +504,12 @@ Add `--speed` to run the slower download/upload test after the fresh connectivit
 probe. Speed tests run only for channels that were healthy in that same probe;
 unhealthy channels are shown with skipped speed columns.
 
+In an interactive terminal `alle test --speed` **streams**: the table header
+prints up front and each channel's row appears the moment its own test completes
+(with a live progress indicator on the channel under test), instead of waiting
+for the whole batch to finish. Piped / non-TTY output and `--json` still produce
+the complete table / a single JSON object at the end.
+
 ```bash
 alle test
 alle test --channel wg_us_ca_842

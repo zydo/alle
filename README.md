@@ -327,8 +327,11 @@ page:
   Sent / Received / Down Speed / Up Speed columns. The measured columns stay
   blank until you run a **Probe** (latency + IP + traffic totals) or **Speed
   Test** (adds download/upload) from the row or the column header, with a
-  spinner while it runs. Rename a channel inline, remove one, and add channels
-  through a provider-guided wizard.
+  spinner while it runs. **Speed Test All** streams — each channel's row fills
+  in the moment its own test completes, instead of all at once at the end. While
+  a channel is being tested (or a batch run is in flight) that row's Probe and
+  Speed Test buttons are disabled, so a test can't be fired twice at once.
+  Rename a channel inline, remove one, and add channels through a provider-guided wizard.
 - **Add channel wizard** — pick a provider (an icon-only row of providers plus
   an always-present "+" to add NordVPN or Proton VPN). For token providers like
   NordVPN, choose a **country and city from a searchable list** (no typing); for

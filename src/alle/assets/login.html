@@ -14,19 +14,17 @@
   <div class="login-wrap">
     <form class="login" id="form">
       <div class="wordmark">
-        <img class="mark" src="/icon.svg" alt="" width="30" height="30">
-        <b>alle</b>
+        <img class="wordmark-img" src="/wordmark.svg" alt="alle">
       </div>
-      <p class="lead">Control panel</p>
+      <p class="lead">Control Panel</p>
       <label class="eyebrow" for="token">Access token</label>
       <input id="token" name="token" type="password" autocomplete="off" spellcheck="false"
         placeholder="paste your token" autofocus>
       <button type="submit">Open dashboard</button>
       <p class="err" id="err">That token wasn't accepted. Check it and try again.</p>
       <p class="hint">
-        Easiest: run <code>alle ui</code> in a terminal to open the dashboard
-        automatically. To sign in by hand, paste the <code>secret</code> from
-        <code>~/.alle/control_api.json</code>.
+        Run <code>alle ui</code> in a terminal to open the dashboard automatically.<br>
+        Or paste the <code>secret</code> from <code>~/.alle/control_api.json</code>.
       </p>
     </form>
   </div>

@@ -302,6 +302,70 @@ class _Handler(BaseHTTPRequestHandler):
         except (service.ServiceError, ProviderError) as e:
             return self._json(400, {"error": str(e)})
 
+    def _stream_test(self, body: dict):
+        """Stream a speed test as newline-delimited JSON.
+
+        Emits one ``{"type":"row","data":<row>}`` per channel as it completes,
+        then a final ``{"type":"done",…}`` summary (or ``{"type":"error",…}`` if
+        the run fails mid-stream). Each line is flushed immediately so the client
+        can render incrementally instead of waiting for the whole batch. The body
+        is delimited by connection close (no Content-Length) — fine for this
+        loopback, single-user server.
+        """
+        from alle import service
+        from alle.providers import ProviderError
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        def write(obj):
+            self.wfile.write(
+                (
+                    json.dumps(
+                        obj, default=lambda o: getattr(o, "__dict__", None) or str(o)
+                    )
+                    + "\n"
+                ).encode()
+            )
+            self.wfile.flush()
+
+        def on_row(row):
+            write({"type": "row", "data": row})
+
+        try:
+            result = service.test(
+                speed=True,
+                channel=body.get("channel") or None,
+                on_row=on_row,
+            )
+        except (service.ServiceError, ProviderError) as e:
+            write({"type": "error", "data": {"error": str(e)}})
+            return
+        except Exception as e:  # surface any failure on the stream
+            write({"type": "error", "data": {"error": str(e)}})
+            return
+
+        # Summary only: the client already collected the rows above, so the full
+        # channels list isn't resent on the wire.
+        write(
+            {
+                "type": "done",
+                "data": {
+                    "probed": result.get("probed"),
+                    "reason": result.get("reason"),
+                    "filter": result.get("filter"),
+                    "running": result.get("running"),
+                    "channel_count": result.get("channel_count"),
+                    "healthy_count": result.get("healthy_count"),
+                    "failed_count": result.get("failed_count"),
+                },
+            }
+        )
+
     def _api_get(self, path: str):
         from alle import service
 
@@ -440,9 +504,14 @@ class _Handler(BaseHTTPRequestHandler):
         if method == "DELETE" and len(seg) == 2 and seg[0] == "routes":
             return self._call(service.routes_remove, [seg[1]])
         if method == "POST" and seg == ["test"]:
+            # A speed test streams one row per channel as each finishes
+            # (application/x-ndjson), so the UI isn't blind until the whole batch
+            # completes. Plain probes stay on the single-shot JSON path.
+            if body.get("speed"):
+                return self._stream_test(body)
             return self._call(
                 service.test,
-                speed=bool(body.get("speed")),
+                speed=False,
                 channel=body.get("channel") or None,
             )
         if method == "POST" and seg == ["lifecycle", "start"]:
