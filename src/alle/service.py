@@ -1345,6 +1345,7 @@ def test(
     progress=None,
     on_row=None,
     on_begin=None,
+    cancel=None,
 ) -> dict:
     """Actively probe channels, optionally speed-test the healthy ones.
 
@@ -1406,6 +1407,13 @@ def test(
 
     if speed:
         for row in rows:
+            # A streaming caller that disconnected sets cancel(); stop starting
+            # new per-channel transfers rather than driving the dead socket.
+            if cancel and cancel():
+                row["speed_result"] = _skipped_speed("cancelled")
+                if on_row is not None:
+                    on_row(row)
+                continue
             if not row["healthy"]:
                 row["speed_result"] = _skipped_speed("unhealthy")
             else:
@@ -1417,7 +1425,10 @@ def test(
                 # The probe above already measured latency through this tunnel, so
                 # skip throughput.run's own latency phase and reuse that value.
                 result = speedtest_run_one(
-                    row["port_number"], progress=_progress, measure_latency=False
+                    row["port_number"],
+                    progress=_progress,
+                    measure_latency=False,
+                    cancel=cancel,
                 )
                 result["latency_ms"] = row["latency_ms"]
                 row["speed_result"] = {"tested": True, "skip_reason": None, **result}
@@ -1441,9 +1452,13 @@ def test(
     }
 
 
-def speedtest_run_one(port: int, progress=None, measure_latency: bool = True) -> dict:
+def speedtest_run_one(
+    port: int, progress=None, measure_latency: bool = True, cancel=None
+) -> dict:
     """Drive one channel's proxy and return its latency/download/upload."""
-    return throughput.run(port, progress=progress, measure_latency=measure_latency)
+    return throughput.run(
+        port, progress=progress, measure_latency=measure_latency, cancel=cancel
+    )
 
 
 def _stop_all() -> bool:

@@ -98,3 +98,25 @@ def test_all_endpoints_dead_returns_none():
     assert throughput._latency_ms(opener, timeout=1) is None
     assert throughput._download_bps(opener, timeout=1) is None
     assert throughput._upload_bps(opener, timeout=1) is None
+
+
+def test_cancel_aborts_the_download_loop_early():
+    # A streaming client that disconnects should not keep driving transfers:
+    # once cancel() is true the download loop stops reading (raising Cancelled,
+    # which run() catches) — well before the DOWNLOAD_SECONDS time cap.
+    import time
+
+    endless = _Opener(
+        {throughput.DOWNLOAD_URLS[0]: b"\x00" * (20 * 65536)}  # large but finite
+    )
+    calls = {"n": 0}
+
+    def cancel():
+        calls["n"] += 1
+        return calls["n"] > 1  # flip true after the first poll
+
+    start = time.monotonic()
+    with pytest.raises(throughput.Cancelled):
+        throughput._download_bps(endless, timeout=2, cancel=cancel)
+    assert time.monotonic() - start < throughput.DOWNLOAD_SECONDS  # bailed early
+    assert calls["n"] >= 2  # cancel was actually polled

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import time
 import urllib.request
+from collections.abc import Callable
 
 # 50 MB per fetch — Cloudflare rejects much larger single requests, so the
 # download test loops fetches until DOWNLOAD_SECONDS is up rather than asking
@@ -37,11 +38,11 @@ import urllib.request
 DOWNLOAD_URLS = [
     "https://speed.cloudflare.com/__down?bytes=50000000",
     "https://proof.ovh.net/files/100Mb.dat",
-    "http://speedtest.tele2.net/100MB.zip",
+    "http://speedtest.tele2.net/100MB.zip",  # noqa: S5332
 ]
 # Endpoints that accept and discard a POST body.
 UPLOAD_URLS = [
-    "http://speedtest.tele2.net/upload.php",
+    "http://speedtest.tele2.net/upload.php",  # noqa: S5332
     "https://librespeed.org/backend/empty.php",
     "https://speed.cloudflare.com/__up",  # throttles proxied POSTs; last resort
 ]
@@ -49,7 +50,7 @@ UPLOAD_URLS = [
 LATENCY_URLS = [
     "https://speed.cloudflare.com/__down?bytes=1",
     "https://www.gstatic.com/generate_204",
-    "http://detectportal.firefox.com/success.txt",
+    "http://detectportal.firefox.com/success.txt",  # noqa: S5332
 ]
 
 DOWNLOAD_SECONDS = 5.0  # read the download stream for at most this long
@@ -65,7 +66,14 @@ def _opener(port: int):
     return urllib.request.build_opener(handler)
 
 
-def _latency_ms(opener, timeout: int) -> float | None:
+class Cancelled(Exception):
+    """Raised to abort a throughput run mid-transfer (e.g. the streaming client
+    disconnected). Caught by :func:`run`, which returns what it has so far."""
+
+
+def _latency_ms(
+    opener, timeout: int, cancel: Callable[[], bool] | None = None
+) -> float | None:
     """Min round trip against the first latency endpoint that answers.
 
     A failed sample abandons that endpoint for the next one (rather than
@@ -73,6 +81,8 @@ def _latency_ms(opener, timeout: int) -> float | None:
     one timeout, not five.
     """
     for url in LATENCY_URLS:
+        if cancel and cancel():
+            raise Cancelled
         best: float | None = None
         for _ in range(LATENCY_SAMPLES):
             req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
@@ -89,8 +99,12 @@ def _latency_ms(opener, timeout: int) -> float | None:
     return None
 
 
-def _download_bps(opener, timeout: int) -> float | None:
+def _download_bps(
+    opener, timeout: int, cancel: Callable[[], bool] | None = None
+) -> float | None:
     for url in DOWNLOAD_URLS:
+        if cancel and cancel():
+            raise Cancelled
         total = 0
         start = time.monotonic()
         try:
@@ -98,10 +112,14 @@ def _download_bps(opener, timeout: int) -> float | None:
                 req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
                 with opener.open(req, timeout=timeout) as r:  # noqa: S310 (loopback proxy)
                     while time.monotonic() - start < DOWNLOAD_SECONDS:
+                        if cancel and cancel():
+                            raise Cancelled
                         chunk = r.read(_CHUNK)
                         if not chunk:
                             break  # object exhausted; loop fetches another
                         total += len(chunk)
+        except Cancelled:
+            raise
         except Exception:  # noqa: BLE001
             if total == 0:
                 continue  # nothing flowed from this endpoint — try the next
@@ -112,9 +130,13 @@ def _download_bps(opener, timeout: int) -> float | None:
     return None
 
 
-def _upload_bps(opener, timeout: int) -> float | None:
+def _upload_bps(
+    opener, timeout: int, cancel: Callable[[], bool] | None = None
+) -> float | None:
     payload = b"\0" * UPLOAD_BYTES
     for url in UPLOAD_URLS:
+        if cancel and cancel():
+            raise Cancelled
         req = urllib.request.Request(
             url,
             data=payload,
@@ -136,7 +158,11 @@ def _upload_bps(opener, timeout: int) -> float | None:
 
 
 def run(
-    port: int, timeout: int = 60, progress=None, measure_latency: bool = True
+    port: int,
+    timeout: int = 60,
+    progress=None,
+    measure_latency: bool = True,
+    cancel: Callable[[], bool] | None = None,
 ) -> dict:
     """Measure latency + download + upload through the proxy on ``port``.
 
@@ -151,6 +177,10 @@ def run(
     fresher probe latency (``alle test --speed`` probes first) — the returned
     ``latency_ms`` is then ``None`` for the caller to fill in, avoiding a redundant
     round of tiny requests.
+
+    ``cancel`` is an optional predicate polled between and within phases; when it
+    returns true the run aborts (a streaming client that disconnected should not
+    keep driving transfers). A cancelled phase yields ``None`` for that metric.
     """
     opener = _opener(port)
 
@@ -158,13 +188,15 @@ def run(
         if progress is not None:
             progress(name)
 
-    if measure_latency:
-        _phase("latency")
-        latency = _latency_ms(opener, timeout)
-    else:
-        latency = None
-    _phase("download")
-    download = _download_bps(opener, timeout)
-    _phase("upload")
-    upload = _upload_bps(opener, timeout)
+    latency = download = upload = None
+    try:
+        if measure_latency:
+            _phase("latency")
+            latency = _latency_ms(opener, timeout, cancel)
+        _phase("download")
+        download = _download_bps(opener, timeout, cancel)
+        _phase("upload")
+        upload = _upload_bps(opener, timeout, cancel)
+    except Cancelled:
+        pass  # return whatever phases completed before the cancel
     return {"latency_ms": latency, "download_bps": download, "upload_bps": upload}

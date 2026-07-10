@@ -38,7 +38,7 @@ def stub_running(monkeypatch):
 def stub_throughput(monkeypatch):
     calls = []
 
-    def fake_run(port, timeout=60, progress=None, measure_latency=True):
+    def fake_run(port, timeout=60, progress=None, measure_latency=True, cancel=None):
         if progress:  # exercise the phase callback the CLI spinner relies on
             phases = (
                 ("latency", "download", "upload")
@@ -159,6 +159,18 @@ def test_metrics_accepts_a_qualified_ref(same_id_under_two_providers, monkeypatc
     names = [r["name"] for r in data["channels"]]
     assert names == ["united_states_1"]
     assert data["channels"][0]["provider"] == "nordvpn"
+
+
+def test_test_speed_is_cancelled_skips_remaining_channels(
+    two_channels, stub_probe, stub_throughput
+):
+    # A cancelled run (e.g. the streaming client disconnected) must not keep
+    # driving per-channel transfers: every channel skips with "cancelled" and
+    # throughput.run is never called.
+    data = service.test(speed=True, cancel=lambda: True)
+    assert len(stub_throughput) == 0
+    for row in data["channels"]:
+        assert row["speed_result"]["skip_reason"] == "cancelled"
 
 
 def test_test_speed_runs_only_healthy_channels(

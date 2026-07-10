@@ -701,7 +701,13 @@ def test_test_endpoint_streams_speed_test(live, monkeypatch):
     seen = {}
 
     def fake_test(
-        *, speed=False, channel=None, progress=None, on_row=None, on_begin=None
+        *,
+        speed=False,
+        channel=None,
+        progress=None,
+        on_row=None,
+        on_begin=None,
+        cancel=None,
     ):
         seen.update({"speed": speed, "channel": channel})
         if on_row:
@@ -763,6 +769,65 @@ def test_test_endpoint_probe_returns_json(live, monkeypatch):
     )
     assert st == 200
     assert json.loads(body)["filter"] == "us_1"  # one JSON object, not NDJSON
+
+
+def test_stream_emits_exactly_one_terminal_on_failure(live, monkeypatch):
+    """A mid-stream failure produces exactly one terminal ``error`` record — the
+    framed decoder relies on a single terminal to stop, and a follow-up write
+    must not re-fail into the dead protocol."""
+    base, secret = live
+    origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
+
+    def failing_test(*, speed=True, channel=None, on_row=None, cancel=None, **_):
+        if on_row:
+            on_row({"provider": "nordvpn", "name": "us_1"})
+        raise service.ServiceError("boom mid-stream")
+
+    monkeypatch.setattr(service, "test", failing_test)
+    st, body, _ = _req(
+        base + "/api/v1/test", method="POST", headers=origin, data={"speed": True}
+    )
+    events = [json.loads(line) for line in body.splitlines() if line.strip()]
+    assert st == 200
+    terminals = [e for e in events if e["type"] in ("done", "error")]
+    assert len(terminals) == 1  # exactly one terminal, and it's the error
+    assert terminals[0]["type"] == "error" and "boom" in terminals[0]["data"]["error"]
+
+
+def test_a_second_concurrent_speed_test_is_refused(live, monkeypatch):
+    """The job limiter serializes speed tests: while one is in flight, a second
+    POST /api/v1/test?speed=true gets 503 (not a second overlapping run)."""
+    import threading
+
+    base, secret = live
+    origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    release = threading.Event()
+
+    def blocking_test(*, speed=True, channel=None, on_row=None, cancel=None, **_):
+        if on_row:
+            on_row({"provider": "nordvpn", "name": "us_1"})
+        release.wait(5)  # hold the job open until the test releases it
+        return {"probed": True, "channel_count": 1, "channels": []}
+
+    monkeypatch.setattr(service, "test", blocking_test)
+
+    first = threading.Thread(
+        target=lambda: _req(
+            base + "/api/v1/test", method="POST", headers=origin, data={"speed": True}
+        )
+    )
+    first.start()
+    # give the first request a moment to acquire the "test" job
+    import time
+
+    time.sleep(0.2)
+    st, body, _ = _req(
+        base + "/api/v1/test", method="POST", headers=origin, data={"speed": True}
+    )
+    assert st == 503  # a second concurrent run is refused
+    assert "already running" in json.loads(body)["error"]
+    release.set()
+    first.join(5)
 
 
 def test_lifecycle_endpoints_call_service(live, monkeypatch):

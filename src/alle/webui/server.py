@@ -33,6 +33,7 @@ import json
 import secrets
 import socket
 import threading
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path
@@ -110,6 +111,55 @@ _API_RESOURCE_METHODS = {
 }
 
 
+class _JobLimiter:
+    """Per-kind size-1 semaphores bounding expensive operations.
+
+    A single-user loopback server should never run two of the *same* expensive
+    job at once — a second speed test, bundle import, token refresh, or locations
+    refresh while one is in flight conflicts with the first (shared state, the
+    one sing-box process, the same network resolver). The limiter serializes
+    each kind: a second concurrent request of that kind is rejected (503) rather
+    than queued, so a UI double-click or a stuck tab cannot pile up work.
+    Different kinds run independently (a speed test does not block an import).
+    """
+
+    def __init__(self):
+        self._sems: dict[str, threading.BoundedSemaphore] = {}
+        self._lock = threading.Lock()
+
+    def try_acquire(self, kind: str) -> bool:
+        with self._lock:
+            sem = self._sems.get(kind)
+            if sem is None:
+                sem = threading.BoundedSemaphore(1)
+                self._sems[kind] = sem
+        return sem.acquire(blocking=False)
+
+    def release(self, kind: str) -> None:
+        with self._lock:
+            sem = self._sems.get(kind)
+        if sem is not None:
+            try:
+                sem.release()
+            except ValueError:
+                pass  # never acquired (e.g. an early return path) — ignore
+
+
+_jobs = _JobLimiter()
+
+
+@contextmanager
+def _guarded(kind: str):
+    """Serialize one expensive job ``kind``. Yields ``acquired``: False means a
+    job of this kind is already running and the handler should answer 503."""
+    acquired = _jobs.try_acquire(kind)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            _jobs.release(kind)
+
+
 class _BadRequest(Exception):
     """A request the transport layer refuses — carries the HTTP status.
 
@@ -121,6 +171,10 @@ class _BadRequest(Exception):
         self.status = status
         self.message = message
         super().__init__(message)
+
+
+class _StreamClosed(Exception):
+    """The streaming client disconnected mid-response — abort, write no more."""
 
 
 def _config_path() -> Path:
@@ -717,15 +771,27 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": str(e)})
 
     def _stream_test(self, channel: str | None):
-        """Stream a speed test as newline-delimited JSON.
+        """Stream a speed test as newline-delimited JSON — a framed protocol.
 
         Emits one ``{"type":"row","data":<row>}`` per channel as it completes,
-        then a final ``{"type":"done",…}`` summary (or ``{"type":"error",…}`` if
-        the run fails mid-stream). Each line is flushed immediately so the client
-        can render incrementally instead of waiting for the whole batch. The body
-        is delimited by connection close (no Content-Length) — fine for this
-        loopback, single-user server.
+        then exactly one terminal record: ``{"type":"done",…}`` on success or
+        ``{"type":"error",…}`` on failure. Each line is flushed immediately so the
+        client renders incrementally; the body is delimited by connection close
+        (no Content-Length) — fine for this loopback, single-user server.
+
+        Framing guarantees: at most one terminal record is ever written (a
+        second ``write`` after done/error/gone is suppressed), and a client that
+        disconnects mid-stream is detected on the next flush — the run is told to
+        cancel (no more per-channel transfers) and the handler exits cleanly
+        instead of raising a BrokenPipe traceback or trying to write an ``error``
+        line into the dead socket.
         """
+        with _guarded("test") as acquired:
+            if not acquired:
+                return self._json(503, {"error": "a speed test is already running"})
+            self._run_stream(channel)
+
+    def _run_stream(self, channel: str | None):
         from alle import service
         from alle.providers import ProviderError
 
@@ -735,16 +801,32 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
 
+        state = {"terminal": False, "gone": False}
+
         def write(obj):
-            self.wfile.write(
-                (
-                    json.dumps(
-                        obj, default=lambda o: getattr(o, "__dict__", None) or str(o)
-                    )
-                    + "\n"
-                ).encode()
-            )
-            self.wfile.flush()
+            # Exactly-one terminal: once done/error has been sent (or the socket
+            # is gone), drop every further write. The client's framed decoder
+            # relies on a single terminal record to stop.
+            if state["terminal"] or state["gone"]:
+                return
+            typ = obj.get("type")
+            try:
+                self.wfile.write(
+                    (
+                        json.dumps(
+                            obj,
+                            default=lambda o: getattr(o, "__dict__", None) or str(o),
+                        )
+                        + "\n"
+                    ).encode()
+                )
+                self.wfile.flush()
+            except OSError:
+                # client went away — abort the run, write nothing more.
+                state["gone"] = True
+                raise _StreamClosed()
+            if typ in ("done", "error"):
+                state["terminal"] = True
 
         def on_row(row):
             write({"type": "row", "data": row})
@@ -754,7 +836,10 @@ class _Handler(BaseHTTPRequestHandler):
                 speed=True,
                 channel=channel or None,
                 on_row=on_row,
+                cancel=lambda: state["gone"],
             )
+        except _StreamClosed:
+            return  # client disconnected — nothing more to write, work cancelled
         except (service.ServiceError, ProviderError) as e:
             write({"type": "error", "data": {"error": str(e)}})
             return
@@ -882,7 +967,12 @@ class _Handler(BaseHTTPRequestHandler):
                 if _bool_field(body, "replace")
                 else service.setup_import
             )
-            return self._call(fn, _str_field(body, "text"))
+            with _guarded("import") as acquired:
+                if not acquired:
+                    return self._json(
+                        503, {"error": "a bundle import/restore is already running"}
+                    )
+                return self._call(fn, _str_field(body, "text"))
 
         if method == "POST" and seg == ["providers"]:
             _fields(body, "provider", "creds")
@@ -896,9 +986,14 @@ class _Handler(BaseHTTPRequestHandler):
             # Replace an added token provider's credential (write-only: the token
             # is never returned). Config providers raise ServiceError → 400.
             _fields(body, "creds")
-            return self._call(
-                service.provider_update_token, seg[1], _dict_field(body, "creds")
-            )
+            with _guarded("refresh") as acquired:
+                if not acquired:
+                    return self._json(
+                        503, {"error": "a provider refresh is already running"}
+                    )
+                return self._call(
+                    service.provider_update_token, seg[1], _dict_field(body, "creds")
+                )
         if method == "DELETE" and len(seg) == 2 and seg[0] == "providers":
             return self._call(lambda: service.provider_remove_many([seg[1]]))
         if method == "POST" and seg == ["channels"]:
