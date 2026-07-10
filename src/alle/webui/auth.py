@@ -9,7 +9,10 @@ Three credentials, all keyed off one generated per-installation secret
 * **Login token** — a short-lived, single-use HMAC minted by ``alle ui`` (which
   can read the secret) and handed to the browser in the URL exactly once. The
   server exchanges it for a session cookie and refuses to accept it twice, so a
-  copy left in shell history / browser history is inert.
+  copy left in shell history / browser history is inert. Consumption is
+  persisted (:class:`LoginTokenStore`) so a token spent before a daemon restart
+  still cannot be replayed within its TTL, and only the token's *digest* is
+  stored — never the raw bearer string.
 * **Session cookie** — an HMAC over an issue time + expiry, issued after
   login. Stateless (validated with the secret alone, so it survives a daemon
   restart) and set ``HttpOnly; SameSite=Strict`` by the server. Sessions are
@@ -24,9 +27,14 @@ HMACs are compared with ``hmac.compare_digest`` (constant time).
 from __future__ import annotations
 
 import base64
+import hashlib
 import hmac
+import json
 import time
 from hashlib import sha256
+from pathlib import Path
+
+from alle import fsio
 
 LOGIN_TTL = 120  # seconds a one-time login token is valid
 SESSION_IDLE = 30 * 60  # a session ends after this much inactivity
@@ -57,45 +65,108 @@ def mint_login_token(secret: str, *, now: int | None = None) -> str:
     return f"{_b64(payload)}.{_sign(secret, payload)}"
 
 
-def verify_login_token(
-    secret: str, token: str, consumed: set[str], *, now=None
-) -> bool:
-    """True iff ``token`` is authentic, unexpired, and not already used.
+def _check_login_token(secret: str, token: str, now: int) -> tuple[str, int] | None:
+    """Validate one login token, returning ``(canonical_token, issued)`` if it is
+    authentic, unexpired, and *canonically* encoded; otherwise ``None``.
 
-    Records the token in ``consumed`` on success so a replay fails.
+    Canonical form is required (not just decodable): the received token must
+    byte-match the re-derived ``_b64(payload).sig``. A non-canonical encoding
+    (``+`` instead of ``-``, stray padding, altered case) decodes to the same
+    payload but is rejected — otherwise the canonical and non-canonical spellings
+    would be two distinct "valid" tokens, defeating single-use consumption. The
+    same comparison also covers the signature, so a bad signature falls out of
+    the canonical-token mismatch for free.
+    """
+    try:
+        body, _sig = token.split(".", 1)
+        payload = _unb64(body)
+    except Exception:  # noqa: BLE001 — any malformed token is invalid
+        return None
+    parts = payload.split(":")
+    if len(parts) != 3 or parts[0] != "login":
+        return None
+    try:
+        issued = int(parts[1])
+    except ValueError:
+        return None
+    canonical = f"{_b64(payload)}.{_sign(secret, payload)}"
+    if not hmac.compare_digest(token, canonical):
+        return None
+    if abs(now - issued) > LOGIN_TTL:
+        return None
+    return canonical, issued
+
+
+def verify_login_token(secret: str, token: str, *, now: int | None = None) -> bool:
+    """True iff ``token`` is authentic, unexpired, and canonically encoded.
+
+    Pure — does not record consumption. Use :meth:`LoginTokenStore.verify_and_consume`
+    for the single-use guarantee (which is what login flows need).
     """
     now = int(time.time()) if now is None else now
-    try:
-        body, sig = token.split(".", 1)
-        payload = _unb64(body)
-        kind, issued, _nonce = payload.split(":", 2)
-    except Exception:  # noqa: BLE001 — any malformed token is invalid
-        return False
-    if kind != "login":
-        return False
-    if not hmac.compare_digest(sig, _sign(secret, payload)):
-        return False
-    if now - int(issued) > LOGIN_TTL or int(issued) - now > LOGIN_TTL:
-        return False
-    if token in consumed:
-        return False
-    consumed.add(token)
-    _expire_consumed(consumed, now)
-    return True
+    return _check_login_token(secret, token, now) is not None
 
 
-def _expire_consumed(consumed: set[str], now: int) -> None:
-    """Drop consumed tokens whose validity window has passed (bounded memory)."""
-    expired = set()
-    for tok in consumed:
+class LoginTokenStore:
+    """Persists consumed one-time login-token digests so a token spent before a
+    daemon restart cannot be replayed within its TTL.
+
+    Stores only the SHA-256 digest of the canonical token (never the raw bearer
+    string), mapped to its expiry epoch. All access is under an interprocess
+    lock, so two concurrent login attempts with the same token cannot both
+    succeed, and entries past their TTL are pruned to keep the store bounded.
+    """
+
+    def __init__(self, path: Path):
+        self._path = path
+        self._lock = path.with_name(path.name + ".lock")
+        self._consumed: dict[str, int] = self._load()
+
+    def _load(self) -> dict[str, int]:
         try:
-            issued = int(_unb64(tok.split(".", 1)[0]).split(":")[1])
-        except Exception:  # noqa: BLE001
-            expired.add(tok)
-            continue
-        if now - issued > LOGIN_TTL:
-            expired.add(tok)
-    consumed -= expired
+            data = json.loads(self._path.read_text())
+        except (ValueError, OSError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {
+            k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, int)
+        }
+
+    def _persist(self) -> None:
+        fsio.write_durably(
+            self._path,
+            lambda f: json.dump(self._consumed, f),
+            prefix=".web_consumed-",
+            suffix=".json",
+            mode=0o600,
+        )
+
+    def _prune(self, now: int) -> None:
+        for digest in [d for d, exp in self._consumed.items() if exp <= now]:
+            del self._consumed[digest]
+
+    def verify_and_consume(
+        self, secret: str, token: str, *, now: int | None = None
+    ) -> bool:
+        """Validate ``token`` and, if good, record its digest as consumed —
+        atomically, so a concurrent replay of the same token fails. Returns
+        False for an already-consumed, expired, non-canonical, or badly-signed
+        token."""
+        now = int(time.time()) if now is None else now
+        checked = _check_login_token(secret, token, now)
+        if checked is None:
+            return False
+        canonical, issued = checked
+        digest = hashlib.sha256(canonical.encode()).hexdigest()
+        expiry = issued + LOGIN_TTL + 1
+        with fsio.locked(self._lock):
+            self._prune(now)
+            if digest in self._consumed:
+                return False
+            self._consumed[digest] = expiry
+            self._persist()
+            return True
 
 
 # ---- session cookie ------------------------------------------------------------

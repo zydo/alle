@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import hmac
 import json
-import os
 import secrets
 import socket
 import threading
@@ -40,7 +39,7 @@ from pathlib import Path
 from threading import Thread
 from urllib.parse import parse_qs, urlparse
 
-from alle import applog, paths
+from alle import applog, fsio, paths
 from alle.webui import auth
 
 _ASSET_TYPES = {
@@ -85,34 +84,48 @@ def _mint_host() -> str:
     return f"alle-{secrets.token_hex(4)}.localhost"
 
 
+def _valid_control_api(cfg) -> dict | None:
+    """The validated endpoint dict, or None if ``cfg`` is missing/malformed."""
+    if not isinstance(cfg, dict):
+        return None
+    address = cfg.get("address")
+    secret = cfg.get("secret")
+    host = cfg.get("host")
+    if (
+        isinstance(address, str)
+        and address
+        and isinstance(secret, str)
+        and secret
+        and isinstance(host, str)
+        and host
+    ):
+        return {"address": address, "secret": secret, "host": host}
+    return None
+
+
 def control_api() -> dict:
     """The Web UI endpoint ``{"address": "127.0.0.1:<port>", "secret", "host"}``.
 
     Generated once (0600) and kept — the port is a *contract* so the UI URL is
     stable and bookmarkable, and a fixed value to pin Host/Origin against.
     ``host`` is the per-installation browser hostname (see :func:`_mint_host`);
-    a pre-existing file without one is upgraded in place.
+    a pre-existing file without one is upgraded.
+
+    Read, generate, and publish all happen under one lock, so two callers racing
+    to first-generate agree on one endpoint (both return it) instead of each
+    minting a different port and clobbering the file. Publishing goes through a
+    private temp file that is fsynced and atomically renamed — a reader never
+    sees a half-written file, and a crash mid-write keeps the previous one.
     """
     p = _config_path()
-    while True:
+    with fsio.locked(p.with_name(p.name + ".lock")):
+        cfg = None
         try:
-            cfg = json.loads(p.read_text())
-            if cfg.get("address") and cfg.get("secret"):
-                if not cfg.get("host"):  # pre-hostname install: upgrade in place
-                    cfg["host"] = _mint_host()
-                    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                    with os.fdopen(fd, "w") as f:
-                        json.dump(cfg, f, indent=2)
-                return {
-                    "address": cfg["address"],
-                    "secret": cfg["secret"],
-                    "host": cfg["host"],
-                }
-            p.unlink(missing_ok=True)
-        except FileNotFoundError:
+            cfg = _valid_control_api(json.loads(p.read_text()))
+        except (ValueError, OSError):
             pass
-        except (OSError, ValueError, AttributeError):
-            p.unlink(missing_ok=True)
+        if cfg is not None:
+            return cfg
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
@@ -121,12 +134,13 @@ def control_api() -> dict:
             "secret": secrets.token_hex(32),
             "host": _mint_host(),
         }
-        try:
-            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            continue
-        with os.fdopen(fd, "w") as f:
-            json.dump(fresh, f, indent=2)
+        fsio.write_durably(
+            p,
+            lambda f: (json.dump(fresh, f, indent=2), f.write("\n")),
+            prefix=".control_api-",
+            suffix=".json",
+            mode=0o600,
+        )
         return fresh
 
 
@@ -318,7 +332,7 @@ class _Handler(BaseHTTPRequestHandler):
     secret = ""
     address = ""
     canonical = ""  # "<per-install-hostname>:<port>" — the browser-facing host
-    consumed: set[str] = set()
+    logins: auth.LoginTokenStore  # persisted one-time login-token consumption
     # Socket deadline for reading the request line, headers, and body — a
     # client that connects and stalls cannot pin a worker thread forever.
     timeout = 30
@@ -458,7 +472,27 @@ class _Handler(BaseHTTPRequestHandler):
             {"Cache-Control": "no-store"},
         )
 
-    do_HEAD = do_GET
+    def do_HEAD(self):
+        # HEAD is non-mutating: it never consumes a one-time login token, sets a
+        # session cookie, or otherwise changes state, and writes headers only
+        # (no body), per RFC 9110. Aliasing it to GET would let a HEAD carrying
+        # ``?token=`` spend a login token. The UI does not rely on HEAD; this
+        # only lets a liveness probe ask "is the server there" safely.
+        try:
+            if not self._host_ok():
+                code = 403
+            else:
+                path = urlparse(self.path).path
+                code = 200 if path in ("/", "/health") else 404
+            self.send_response(code)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        except Exception:  # noqa: BLE001 — a probe must never raise to the client
+            try:
+                self.send_response(500)
+                self.end_headers()
+            except Exception:  # noqa: BLE001
+                pass
 
     def do_POST(self):
         self._mutate("POST")
@@ -552,7 +586,7 @@ class _Handler(BaseHTTPRequestHandler):
         # `alle ui` lands here with a one-time token: consume it, set the session
         # cookie, and redirect to a clean URL so the token leaves the address bar.
         token = (query.get("token") or [None])[0]
-        if token and auth.verify_login_token(self.secret, token, self.consumed):
+        if token and self.logins.verify_and_consume(self.secret, token):
             return self._send(
                 302, b"", "text/plain", {"Location": "/", **self._set_session_cookie()}
             )
@@ -595,9 +629,9 @@ class _Handler(BaseHTTPRequestHandler):
         _fields(body, "token")
         token = _str_field(body, "token")
         # accept either a one-time login token or the raw secret (manual paste)
-        if auth.verify_login_token(
-            self.secret, token, self.consumed
-        ) or auth.secret_matches(self.secret, token):
+        if self.logins.verify_and_consume(self.secret, token) or auth.secret_matches(
+            self.secret, token
+        ):
             return self._json(200, {"ok": True}, self._set_session_cookie())
         self._json(401, {"error": "invalid or expired token"})
 
@@ -992,7 +1026,7 @@ def build_server() -> ThreadingHTTPServer:
     _Handler.secret = api["secret"]
     _Handler.address = api["address"]
     _Handler.canonical = _canonical_host(api)
-    _Handler.consumed = set()
+    _Handler.logins = auth.LoginTokenStore(paths.state_dir() / "web_consumed.json")
     return _BoundedServer((host, int(port)), _Handler)
 
 

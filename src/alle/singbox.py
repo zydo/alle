@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from alle import applog, paths, proc
+from alle import applog, fsio, paths, proc
 from alle.constants import SINGBOX_SHA256, SINGBOX_VERSION
 
 
@@ -178,32 +178,38 @@ def clash_api() -> dict:
     without it, any local process or user could read or disturb the tunnels.
     The port is allocated from the OS instead of hard-coded so two users (or
     two ``ALLE_HOME``\\ s) on one machine don't fight over the same port.
+
+    Read, generate, and publish happen under one lock, so concurrent callers
+    agree on one endpoint; publishing uses a fsynced temp file + atomic rename
+    (via :func:`alle.fsio.write_durably`), so a reader never sees a half-written
+    file.
     """
     p = _clash_api_path()
-    while True:
+    with fsio.locked(p.with_name(p.name + ".lock")):
         try:
             cfg = json.loads(p.read_text())
-            address, secret_ = cfg.get("address"), cfg.get("secret")
-            if address and secret_:
-                return {"address": address, "secret": secret_}
-            p.unlink(missing_ok=True)  # incomplete — regenerate
-        except FileNotFoundError:
+            if isinstance(cfg, dict):
+                address, secret_ = cfg.get("address"), cfg.get("secret")
+                if (
+                    isinstance(address, str)
+                    and address
+                    and isinstance(secret_, str)
+                    and secret_
+                ):
+                    return {"address": address, "secret": secret_}
+        except (OSError, ValueError):
             pass
-        except (OSError, ValueError, AttributeError):
-            p.unlink(missing_ok=True)  # corrupt, but fully regenerable — rebuild
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
         fresh = {"address": f"127.0.0.1:{port}", "secret": secrets.token_hex(16)}
-        try:
-            # O_EXCL: if two processes race to generate, exactly one wins and
-            # the loser re-reads the winner's file on the next pass.
-            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            continue
-        with os.fdopen(fd, "w") as f:
-            json.dump(fresh, f, indent=2)
-            f.write("\n")
+        fsio.write_durably(
+            p,
+            lambda f: (json.dump(fresh, f, indent=2), f.write("\n")),
+            prefix=".clash_api-",
+            suffix=".json",
+            mode=0o600,
+        )
         return fresh
 
 

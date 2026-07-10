@@ -215,6 +215,30 @@ def test_clash_api_regenerates_after_corruption():
     assert singbox.clash_api() == a
 
 
+def test_clash_api_rejects_a_shape_wrong_file():
+    from alle import paths
+
+    # parses as JSON but the fields aren't usable strings — strict validation,
+    # not a loose truthiness check, decides whether to regenerate
+    (paths.state_dir() / "clash_api.json").write_text(
+        '{"address": 123, "secret": null}'
+    )
+    a = singbox.clash_api()
+    assert isinstance(a["address"], str) and isinstance(a["secret"], str)
+
+
+def test_clash_api_concurrent_callers_agree_on_one_endpoint():
+    # Two callers racing to first-generate are serialized by the lock: both
+    # return the SAME endpoint, not each their own port with one clobbering
+    # the file.
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: singbox.clash_api(), range(16)))
+    assert len({r["address"] for r in results}) == 1
+    assert len({r["secret"] for r in results}) == 1
+
+
 def test_connections_authenticates_with_the_clash_secret(monkeypatch):
     captured = {}
 

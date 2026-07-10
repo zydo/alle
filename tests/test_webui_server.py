@@ -86,6 +86,23 @@ def test_literal_host_page_load_redirects_to_canonical(live):
     assert "Set-Cookie" not in headers  # nothing minted on the literal host
 
 
+def test_head_does_not_consume_a_login_token(live):
+    # A HEAD carrying a one-time login token must not spend it (HEAD is
+    # non-mutating). The same token then still logs in via GET.
+    base, secret = live
+    token = auth.mint_login_token(secret)
+    status, _, headers = _req(
+        base + "/?token=" + token, method="HEAD", headers={"Host": _canon()}
+    )
+    assert status == 200
+    assert "Set-Cookie" not in headers  # no session minted
+    # the token is still good for a real GET login
+    status, headers = _get_no_redirect(
+        base + "/?token=" + token, headers={"Host": _canon()}
+    )
+    assert status == 302 and "Set-Cookie" in headers
+
+
 def test_api_requires_auth(live):
     base, _ = live
     status, _, _ = _req(base + "/api/v1/status")
@@ -990,8 +1007,36 @@ def test_health_proof_is_domain_separated():
     proof = auth.health_proof(secret, "n1")
     assert proof != auth.health_proof(secret, "n2")  # nonce-bound
     # the proof is not a usable credential anywhere else
-    assert auth.verify_login_token(secret, proof, set()) is False
+    assert auth.verify_login_token(secret, proof) is False
     assert auth.verify_session(secret, proof) is False
+
+
+def test_control_api_concurrent_callers_agree_on_one_endpoint():
+    # Two callers racing to first-generate the contract endpoint are serialized
+    # by the lock: both get the SAME port+secret+host, not each their own with
+    # one clobbering the file (which would desync the CLI's URL from the server).
+    import concurrent.futures
+
+    # fresh state dir ⇒ no control_api.json yet
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: server.control_api(), range(16)))
+    assert len({r["address"] for r in results}) == 1
+    assert len({r["secret"] for r in results}) == 1
+    assert len({r["host"] for r in results}) == 1
+
+
+def test_control_api_rejects_a_shape_wrong_file():
+    from alle import paths
+
+    # parses as JSON but the fields aren't usable strings → strict validation
+    # regenerates rather than returning a half-formed endpoint
+    (paths.state_dir() / "control_api.json").write_text(
+        '{"address": 123, "secret": null, "host": 5}'
+    )
+    api = server.control_api()
+    assert isinstance(api["address"], str)
+    assert isinstance(api["secret"], str)
+    assert isinstance(api["host"], str)
 
 
 def test_logs_endpoint_returns_tail_and_clamps_lines(live, monkeypatch):
