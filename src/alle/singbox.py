@@ -464,14 +464,19 @@ class Runner:
         return "\n".join(lines[-tail:]).strip() or "(no logs)"
 
     # ---- traffic stats via the Clash API -----------------------------------
-    def connections(self) -> list[dict]:
-        """Raw active connections from the Clash API, best effort.
+    def connections(self) -> list[dict] | None:
+        """Raw active connections from the Clash API.
 
         Each entry carries a stable ``id`` plus cumulative ``upload``/``download``
         byte counters for that connection's lifetime and a ``chains`` list naming
-        the outbound(s) it exits through. Returns ``[]`` if the Clash API is
-        unreachable (e.g. sing-box still starting). This is the raw feed the
-        metrics accumulator turns into durable per-channel totals.
+        the outbound(s) it exits through. This is the raw feed the metrics
+        accumulator turns into durable per-channel totals.
+
+        Returns ``None`` — never ``[]`` — when the Clash API is unreachable
+        (sing-box still starting) or the payload is malformed: "couldn't
+        sample" and "no live connections" must stay distinguishable, or a
+        failed sample would clear the accumulator's watermarks and the next
+        good one would re-bank whole lifetime counters.
         """
         api = clash_api()
         req = urllib.request.Request(
@@ -482,5 +487,29 @@ class Runner:
             with urllib.request.urlopen(req, timeout=2) as r:  # noqa: S310 (loopback)
                 data = json.load(r)
         except (OSError, ValueError):
-            return []
-        return data.get("connections") or []
+            return None
+        if not isinstance(data, dict):
+            return None
+        conns = data.get("connections")
+        if conns is None:
+            return []  # API healthy, zero connections
+        if not isinstance(conns, list):
+            return None
+        return [c for c in conns if isinstance(c, dict)]
+
+    def generation(self) -> str | None:
+        """Identity of the running sing-box instance (verified pid + kernel
+        start time), or ``None`` if it isn't provably running.
+
+        The metrics accumulator keys its counter watermarks on this: Clash
+        connection counters reset with the process, so a sample from a new
+        generation must re-baseline instead of being read as counter deltas.
+        """
+        try:
+            text = _pid_path().read_text()
+        except OSError:
+            return None
+        rec = proc.parse_record(text)
+        if rec is None or not proc.verify(rec, ("sing-box",)):
+            return None
+        return f"{rec['pid']}/{rec.get('start') or ''}"

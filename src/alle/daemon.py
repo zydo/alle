@@ -455,7 +455,13 @@ def run_applier() -> None:
                 try:
                     runner = singbox.Runner()
                     if runner.is_running():
-                        accumulator.observe(runner.connections())
+                        # generation keys the counter watermarks: a restarted
+                        # sing-box re-baselines instead of reading its fresh
+                        # counters as deltas; a failed sample (None) banks
+                        # nothing and keeps the watermarks.
+                        accumulator.observe(
+                            runner.connections(), generation=runner.generation()
+                        )
                 except Exception as e:  # noqa: BLE001
                     applog.log(f"metrics sample failed: {e}")
                 last_metrics = now

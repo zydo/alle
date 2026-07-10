@@ -47,10 +47,61 @@ class ProviderAuthError(ProviderError):
     """
 
 
+class ProviderUnreachableError(ProviderError):
+    """The provider API could not be reached at all — DNS failure, refused
+    connection, timeout. Environmental and retryable; never a credential or
+    payload problem."""
+
+
+class ProviderAPIError(ProviderError):
+    """The provider API answered, but unusably — an HTTP error status, an
+    oversized/undecodable body, or a payload whose shape doesn't match what
+    the API is documented to return. ``status`` carries the HTTP code when
+    one was involved (callers map auth codes to :class:`ProviderAuthError`
+    where they know the context)."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+# Provider payloads alle reads are small (the NordVPN country list is a few
+# hundred KB); anything past this bound is not a payload we should index.
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
 def _get_json(url: str, headers: dict | None = None, timeout: int = 30):
+    """Fetch and decode one JSON payload, normalizing every transport failure.
+
+    The single wrapping point for the provider boundary: network-level
+    failures raise :class:`ProviderUnreachableError`; HTTP error statuses,
+    oversized bodies, and undecodable JSON raise :class:`ProviderAPIError`
+    (with ``status`` set for HTTP errors). Callers therefore only ever see
+    typed ``ProviderError``\\ s — never a raw ``URLError``/``ValueError`` that
+    would put reconnect backoff, bundle fallback, or CLI reporting on the
+    wrong path.
+    """
     req = urllib.request.Request(url, headers=headers or {"User-Agent": "alle/1"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.load(r)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read(MAX_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as e:
+        raise ProviderAPIError(
+            f"provider API failed (HTTP {e.code}) for {url}", status=e.code
+        ) from e
+    except OSError as e:
+        reason = getattr(e, "reason", None) or e
+        raise ProviderUnreachableError(
+            f"could not reach the provider API: {reason}"
+        ) from e
+    if len(body) > MAX_RESPONSE_BYTES:
+        raise ProviderAPIError(
+            f"provider API response exceeds {MAX_RESPONSE_BYTES} bytes"
+        )
+    try:
+        return json.loads(body)
+    except ValueError as e:
+        raise ProviderAPIError(f"provider API returned invalid JSON: {e}") from e
 
 
 # ---- NordVPN ---------------------------------------------------------------
@@ -77,19 +128,46 @@ def nordvpn_derive_key(creds: dict) -> str:
             f"{NORD_API}/users/services/credentials",
             headers={"Authorization": f"Basic {auth}", "User-Agent": "alle/1"},
         )
-    except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
+    except ProviderAPIError as e:
+        if e.status in (401, 403):
             raise ProviderAuthError(
-                f"nordvpn token rejected by API (HTTP {e.code}). "
+                f"nordvpn token rejected by API (HTTP {e.status}). "
                 "Generate a fresh token at "
                 "https://my.nordaccount.com/dashboard/nordvpn/access-tokens."
             ) from e
-        # e.g. 5xx: the API is unhappy, not the credential — retryable
-        raise ProviderError(f"nordvpn credentials API failed (HTTP {e.code}).") from e
-    key = data.get("nordlynx_private_key")
-    if not key:
-        raise ProviderError("nordvpn API did not return nordlynx_private_key.")
+        # e.g. 5xx / bad payload: the API is unhappy, not the credential — retryable
+        raise
+    key = data.get("nordlynx_private_key") if isinstance(data, dict) else None
+    if not isinstance(key, str) or not key:
+        raise ProviderAPIError("nordvpn API did not return nordlynx_private_key.")
     return key
+
+
+def _check_nord_countries(data) -> list[dict]:
+    """The country list, validated to the shape the lookups below index —
+    ``[{id, name, cities: [{id, name}]}]`` — before anything touches it."""
+    if not isinstance(data, list):
+        raise ProviderAPIError("nordvpn country list is not a list.")
+    for c in data:
+        if not (
+            isinstance(c, dict)
+            and isinstance(c.get("name"), str)
+            and c["name"]
+            and isinstance(c.get("id"), int)
+            and isinstance(c.get("cities", []), list)
+            and all(
+                isinstance(ci, dict)
+                and isinstance(ci.get("name"), str)
+                and ci["name"]
+                and isinstance(ci.get("id"), int)
+                for ci in c.get("cities", [])
+            )
+        ):
+            raise ProviderAPIError(
+                "nordvpn country list has an unexpected shape "
+                f"(offending entry: {str(c)[:80]!r})."
+            )
+    return data
 
 
 def _nord_countries() -> list[dict]:
@@ -98,11 +176,12 @@ def _nord_countries() -> list[dict]:
     if cached is not None and time.monotonic() - cached[0] < NORD_CACHE_TTL:
         return cached[1]
     try:
-        countries = _get_json(f"{NORD_API}/servers/countries")
-    except (urllib.error.URLError, ValueError) as e:
+        countries = _check_nord_countries(_get_json(f"{NORD_API}/servers/countries"))
+    except ProviderError as e:
         if cached is not None:
             return cached[1]  # refresh failed: stale beats failing (reconnect path)
-        raise ProviderError(f"could not fetch nordvpn country list: {e}") from e
+        # same typed class, with the what-was-being-fetched context added
+        raise type(e)(f"could not fetch nordvpn country list: {e}") from e
     _nord_countries_cache = (time.monotonic(), countries)
     return countries
 
@@ -130,14 +209,28 @@ def _nord_ids(country: str, city: str) -> tuple[int, int | None]:
 
 
 def _nord_pubkey(server: dict) -> str:
-    for tech in server.get("technologies", []):
-        if tech.get("identifier") == "wireguard_udp":
-            for m in tech.get("metadata", []):
-                if m.get("name") == "public_key":
-                    return m["value"]
-    raise ProviderError(
+    for tech in server.get("technologies") or []:
+        if isinstance(tech, dict) and tech.get("identifier") == "wireguard_udp":
+            for m in tech.get("metadata") or []:
+                if isinstance(m, dict) and m.get("name") == "public_key":
+                    value = m.get("value")
+                    if isinstance(value, str) and value:
+                        return value
+    raise ProviderAPIError(
         f"nordvpn server {server.get('hostname')} has no WireGuard public key."
     )
+
+
+def _nord_server_host(server: dict) -> str | None:
+    """The server's connect address (first IP, falling back to ``station``),
+    tolerating shape drift in the nested ``ips`` structure."""
+    ips = server.get("ips")
+    if isinstance(ips, list) and ips and isinstance(ips[0], dict):
+        ip = ips[0].get("ip")
+        if isinstance(ip, dict) and isinstance(ip.get("ip"), str) and ip["ip"]:
+            return ip["ip"]
+    station = server.get("station")
+    return station if isinstance(station, str) and station else None
 
 
 def nordvpn_resolve(country: str, city: str) -> dict:
@@ -154,17 +247,20 @@ def nordvpn_resolve(country: str, city: str) -> dict:
     )
     try:
         servers = _get_json(url)
-    except (urllib.error.URLError, ValueError) as e:
-        raise ProviderError(
-            f"could not resolve a nordvpn server for {country}: {e}"
-        ) from e
+    except ProviderError as e:
+        # same typed class, with the what-was-being-resolved context added
+        raise type(e)(f"could not resolve a nordvpn server for {country}: {e}") from e
+    if not isinstance(servers, list) or not all(isinstance(s, dict) for s in servers):
+        raise ProviderAPIError(
+            "nordvpn server recommendations have an unexpected shape."
+        )
     if not servers:
         where = f"{city}, {country}" if city else country
         raise ProviderError(f"nordvpn has no WireGuard server available in {where}.")
     s = servers[0]
-    host = (s.get("ips") or [{}])[0].get("ip", {}).get("ip") or s.get("station")
+    host = _nord_server_host(s)
     if not host:
-        raise ProviderError(f"nordvpn server {s.get('hostname')} has no usable IP.")
+        raise ProviderAPIError(f"nordvpn server {s.get('hostname')} has no usable IP.")
     return {
         "host": host,
         "port": WG_PORT,

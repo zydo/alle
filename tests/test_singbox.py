@@ -238,3 +238,75 @@ def test_connections_authenticates_with_the_clash_secret(monkeypatch):
     api = singbox.clash_api()
     assert captured["auth"] == f"Bearer {api['secret']}"
     assert api["address"] in captured["url"]
+
+
+def _resp(body: bytes):
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return body
+
+    return lambda _req, timeout=None: _Resp()
+
+
+def test_connections_returns_none_when_the_sample_fails(monkeypatch):
+    """'Couldn't sample' must never read as 'no connections' — an empty list
+    clears the accumulator's watermarks and the next good sample would
+    re-bank whole lifetime counters."""
+    runner = singbox.Runner()
+
+    def unreachable(_req, timeout=None):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(singbox.urllib.request, "urlopen", unreachable)
+    assert runner.connections() is None
+
+    monkeypatch.setattr(singbox.urllib.request, "urlopen", _resp(b"{not json"))
+    assert runner.connections() is None
+
+    monkeypatch.setattr(singbox.urllib.request, "urlopen", _resp(b'["array root"]'))
+    assert runner.connections() is None
+
+    monkeypatch.setattr(
+        singbox.urllib.request, "urlopen", _resp(b'{"connections": "nope"}')
+    )
+    assert runner.connections() is None
+
+    # a healthy API with zero connections IS an empty list
+    monkeypatch.setattr(singbox.urllib.request, "urlopen", _resp(b"{}"))
+    assert runner.connections() == []
+
+    # non-dict entries are dropped, dict entries survive
+    monkeypatch.setattr(
+        singbox.urllib.request,
+        "urlopen",
+        _resp(b'{"connections": [{"id": "c1"}, "garbage", 7]}'),
+    )
+    assert runner.connections() == [{"id": "c1"}]
+
+
+def test_generation_identifies_the_verified_instance(monkeypatch):
+    import json as _json
+    import os
+
+    from alle import paths, proc
+
+    runner = singbox.Runner()
+    pid_path = paths.state_dir() / "singbox.pid"
+    assert runner.generation() is None  # no pidfile — nothing provably running
+
+    # a verified record (this test process stands in for sing-box)
+    rec = proc.record(os.getpid())
+    pid_path.write_text(_json.dumps(rec))
+    monkeypatch.setattr(singbox.proc, "verify", lambda r, markers: True)
+    gen = runner.generation()
+    assert gen == f"{os.getpid()}/{rec.get('start') or ''}"
+
+    # an unverifiable record (recycled PID / dead process) has no generation
+    monkeypatch.setattr(singbox.proc, "verify", lambda r, markers: False)
+    assert runner.generation() is None

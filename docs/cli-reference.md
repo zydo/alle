@@ -572,11 +572,13 @@ alle metrics japan_1
 alle metrics --json
 ```
 
-**Accuracy note:** totals are sampled from live connections a few times a minute.
-Transfers that open and finish entirely between two samples are under-counted — this
-is inherent to the data source, not a bug. Use `metrics` for cumulative usage trends,
-not exact accounting. (`--json` also includes `total_sent` / `total_received`
-aggregates.)
+**Accuracy note:** totals are sampled from live connections every couple of
+seconds. Transfers that open and finish entirely between two samples are
+under-counted, and up to one sample interval is skipped when sing-box or the
+daemon (re)starts (counters are re-baselined so nothing is ever counted
+twice) — both inherent to the data source, not bugs. Use `metrics` for
+cumulative usage trends, not exact accounting. (`--json` also includes
+`total_sent` / `total_received` aggregates.)
 
 ---
 

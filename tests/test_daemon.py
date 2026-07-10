@@ -167,6 +167,9 @@ def test_supervision_restarts_an_unexpected_exit(monkeypatch):
         def connections(self):
             return []
 
+        def generation(self):
+            return None
+
     _run_loop(monkeypatch, _Eng, _Runner, sleeps=4)
     assert world["reconciles"] >= 2  # initial apply + supervised restart
     assert world["running"] is True  # recovered
@@ -193,6 +196,9 @@ def test_supervision_backs_off_on_a_crash_loop(monkeypatch):
 
         def connections(self):
             return []
+
+        def generation(self):
+            return None
 
     clock = _run_loop(monkeypatch, _Eng, _Runner, step=2.0, sleeps=40)  # ~80 fake s
     # 1 initial + crashes at ~0,2,4,8,16,32,64 fake-seconds ≈ 8 total; a
@@ -225,6 +231,9 @@ def test_rejected_config_is_not_retried_on_the_timer(monkeypatch):
 
         def connections(self):
             return []
+
+        def generation(self):
+            return None
 
     info: dict = {}
 

@@ -96,6 +96,7 @@ def validate_provider_credentials(provider: str, creds: dict) -> None:
 def provider_add_config(provider: str) -> dict:
     store = Store.load()
     store.add_provider(provider)
+    metrics.revive_provider(provider)  # a re-add lifts any metrics tombstone
     applog.log(f"added provider {provider} (config-based)")
     return {
         "provider": provider,
@@ -114,6 +115,7 @@ def provider_add_token(provider: str, creds: dict) -> dict:
         credentials.set_(provider, creds)
         store.add_provider(provider)
         t.commit()
+    metrics.revive_provider(provider)  # a re-add lifts any metrics tombstone
     applog.log(f"added provider {provider}")
     return {
         "provider": provider,
@@ -398,6 +400,7 @@ def channel_add(
         raise ServiceError(msg) from e
 
     channel = store.add_channel(provider, country, city or "", wg, label)
+    metrics.revive_channel(provider, channel.id)  # same identity re-created
     applog.log(
         f"added channel {provider}/{channel.id} ({channel.location}) on :{channel.port}"
     )
@@ -477,6 +480,7 @@ def _import_conf(
         existing, country, city, wg, label
     )
     channel, created = store.upsert_channel(provider, stem, country, city, wg, label)
+    metrics.revive_channel(provider, channel.id)  # same identity re-created
     action = "imported" if created else ("unchanged" if unchanged else "updated")  # noqa: S3358
     applog.log(
         f"{action} channel {provider}/{channel.id} from {filename} on :{channel.port}"

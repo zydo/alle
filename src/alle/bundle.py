@@ -770,6 +770,14 @@ def apply_import(text: str) -> dict:
         )
         t.commit()
 
+    # Post-commit: re-created identities lift their metrics tombstones so
+    # their traffic counts again.
+    for provider in merged["providers_added"]:
+        metrics.revive_provider(provider)
+    for ref in merged["created"]:
+        provider, _, cid = ref.partition("/")
+        metrics.revive_channel(provider, cid)
+
     return {
         "mode": "import",
         "providers_added": merged["providers_added"],
@@ -869,8 +877,21 @@ def apply_restore(text: str) -> dict:
         for cid in entry["channels"]
     }
     removed_providers = sorted(old_providers - set(parsed["providers"]))
+    # Post-commit metrics reconciliation (best-effort): forget + tombstone
+    # everything the restore removed — including channels dropped from
+    # *retained* providers, not just removed providers — and lift tombstones
+    # for every identity the new setup contains.
     for provider in removed_providers:
         metrics.remove_provider(provider)
+    for ref in sorted(old_channels - new_channels):
+        provider, _, cid = ref.partition("/")
+        if provider in parsed["providers"]:  # retained provider, dropped channel
+            metrics.remove_channel(provider, cid)
+    for provider in parsed["providers"]:
+        metrics.revive_provider(provider)
+    for ref in new_channels:
+        provider, _, cid = ref.partition("/")
+        metrics.revive_channel(provider, cid)
 
     return {
         "mode": "restore",

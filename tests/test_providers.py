@@ -88,18 +88,31 @@ def test_nord_server_parsing():
 
 
 def test_nordvpn_derive_key_errors(monkeypatch):
-    with pytest.raises(providers.ProviderError, match="missing"):
+    with pytest.raises(providers.ProviderAuthError, match="missing"):
         providers.nordvpn_derive_key({})
 
     def rejected(*_args, **_kwargs):
-        raise urllib.error.HTTPError("url", 401, "Unauthorized", Message(), None)
+        raise providers.ProviderAPIError("HTTP 401", status=401)
 
     monkeypatch.setattr(providers, "_get_json", rejected)
-    with pytest.raises(providers.ProviderError, match="token rejected"):
+    with pytest.raises(providers.ProviderAuthError, match="token rejected"):
         providers.nordvpn_derive_key({"token": "bad"})
 
+    def server_error(*_args, **_kwargs):
+        raise providers.ProviderAPIError("HTTP 500", status=500)
+
+    # a 5xx is the API's problem, not the credential's: stays retryable
+    monkeypatch.setattr(providers, "_get_json", server_error)
+    with pytest.raises(providers.ProviderAPIError, match="HTTP 500"):
+        providers.nordvpn_derive_key({"token": "ok"})
+
     monkeypatch.setattr(providers, "_get_json", lambda *_a, **_k: {})
-    with pytest.raises(providers.ProviderError, match="nordlynx_private_key"):
+    with pytest.raises(providers.ProviderAPIError, match="nordlynx_private_key"):
+        providers.nordvpn_derive_key({"token": "ok"})
+
+    # a payload that isn't even a mapping must not crash with AttributeError
+    monkeypatch.setattr(providers, "_get_json", lambda *_a, **_k: ["nonsense"])
+    with pytest.raises(providers.ProviderAPIError, match="nordlynx_private_key"):
         providers.nordvpn_derive_key({"token": "ok"})
 
 
@@ -117,6 +130,52 @@ def test_nordvpn_derive_key_success_sets_basic_auth(monkeypatch):
     assert providers.nordvpn_derive_key({"token": "tok"}) == "PRIVATE="
     assert seen["url"].endswith("/users/services/credentials")
     assert seen["headers"]["Authorization"].startswith("Basic ")
+
+
+class _Resp:
+    """A minimal urlopen response: context manager + bounded read()."""
+
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self, n: int = -1) -> bytes:
+        return self._body if n < 0 else self._body[:n]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def test_get_json_normalizes_every_transport_failure(monkeypatch):
+    def refused(_req, timeout=0):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", refused)
+    with pytest.raises(providers.ProviderUnreachableError, match="could not reach"):
+        providers._get_json("https://api.example/x")
+
+    def http_503(_req, timeout=0):
+        raise urllib.error.HTTPError("url", 503, "unavailable", Message(), None)
+
+    monkeypatch.setattr("urllib.request.urlopen", http_503)
+    with pytest.raises(providers.ProviderAPIError, match="HTTP 503") as exc:
+        providers._get_json("https://api.example/x")
+    assert exc.value.status == 503
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda _req, timeout=0: _Resp(b"{not json")
+    )
+    with pytest.raises(providers.ProviderAPIError, match="invalid JSON"):
+        providers._get_json("https://api.example/x")
+
+
+def test_get_json_bounds_the_response_size(monkeypatch):
+    huge = b'"' + b"x" * (providers.MAX_RESPONSE_BYTES + 10) + b'"'
+    monkeypatch.setattr("urllib.request.urlopen", lambda _req, timeout=0: _Resp(huge))
+    with pytest.raises(providers.ProviderAPIError, match="exceeds"):
+        providers._get_json("https://api.example/x")
 
 
 def test_nord_locations_cache_and_forget(monkeypatch):
@@ -150,7 +209,9 @@ def test_nord_locations_cache_expires_after_ttl(monkeypatch):
     assert calls == ["fetch"]
 
     # age the cached entry past the TTL: the next call re-fetches
-    fetched_at, data = providers._nord_countries_cache
+    cached = providers._nord_countries_cache
+    assert cached is not None
+    fetched_at, data = cached
     providers._nord_countries_cache = (fetched_at - providers.NORD_CACHE_TTL - 1, data)
     providers.nordvpn_locations()
     assert calls == ["fetch", "fetch"]
@@ -166,25 +227,49 @@ def test_nord_locations_stale_cache_beats_refresh_failure(monkeypatch):
     providers.nordvpn_locations()
 
     # expire the cache, then make the refresh fail: stale data is served
-    fetched_at, data = providers._nord_countries_cache
+    cached = providers._nord_countries_cache
+    assert cached is not None
+    fetched_at, data = cached
     providers._nord_countries_cache = (fetched_at - providers.NORD_CACHE_TTL - 1, data)
     monkeypatch.setattr(
         providers,
         "_get_json",
-        lambda _url: (_ for _ in ()).throw(urllib.error.URLError("offline")),
+        lambda _url: (_ for _ in ()).throw(
+            providers.ProviderUnreachableError("offline")
+        ),
     )
     assert providers.nordvpn_locations() == {"US": []}
 
 
-def test_nord_locations_fetch_error(monkeypatch):
+def test_nord_locations_fetch_error_keeps_the_typed_class(monkeypatch):
     providers.forget_nord_countries()
     monkeypatch.setattr(
         providers,
         "_get_json",
-        lambda _url: (_ for _ in ()).throw(urllib.error.URLError("offline")),
+        lambda _url: (_ for _ in ()).throw(
+            providers.ProviderUnreachableError("offline")
+        ),
     )
 
-    with pytest.raises(providers.ProviderError, match="could not fetch"):
+    # context is added but the class survives, so callers can still tell
+    # "network down" from "API answered garbage"
+    with pytest.raises(providers.ProviderUnreachableError, match="could not fetch"):
+        providers.nordvpn_locations()
+
+
+def test_nord_country_list_schema_is_validated(monkeypatch):
+    providers.forget_nord_countries()
+    monkeypatch.setattr(providers, "_get_json", lambda _url: {"not": "a list"})
+    with pytest.raises(providers.ProviderAPIError, match="not a list"):
+        providers.nordvpn_locations()
+
+    providers.forget_nord_countries()
+    monkeypatch.setattr(
+        providers,
+        "_get_json",
+        lambda _url: [{"id": "one", "name": "US", "cities": []}],  # id not an int
+    )
+    with pytest.raises(providers.ProviderAPIError, match="unexpected shape"):
         providers.nordvpn_locations()
 
 

@@ -245,6 +245,25 @@ def test_restore_removes_everything_not_in_the_bundle():
     assert after.get_channel("nordvpn", ch.id) is not None
 
 
+def test_restore_prunes_metrics_of_channels_dropped_from_retained_providers():
+    from alle import metrics
+
+    store, ch = seed()
+    text = bundle.dumps(bundle.export_bundle())  # does NOT contain japan_1
+    extra = store.add_channel("nordvpn", "Japan", "", wg("8.8.8.8"))
+    metrics.add_delta("nordvpn", ch.id, 10, 10)
+    metrics.add_delta("nordvpn", extra.id, 20, 20)
+
+    bundle.apply_restore(text)
+
+    # nordvpn is retained but japan_1 was dropped: its totals go, ch's stay
+    assert ("nordvpn", extra.id) not in metrics.totals()
+    assert ("nordvpn", ch.id) in metrics.totals()
+    # …and a late daemon sample cannot resurrect the deleted row
+    metrics.add_delta("nordvpn", extra.id, 99, 99)
+    assert ("nordvpn", extra.id) not in metrics.totals()
+
+
 def test_restore_allocates_fresh_ports_for_new_identities(monkeypatch):
     seed()
     data = bundle.export_bundle()
