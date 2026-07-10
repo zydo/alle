@@ -5,7 +5,15 @@
 import { api, toast, confirmDialog } from "./core.js";
 
 let view = null;
+let mounted = false;
 let refreshStatus = () => { };
+
+// A stable identity for a File, so an in-flight validate/import can tell if the
+// user selected a different file while it was awaiting (a stale result must not
+// be applied to the new file).
+function fileKey(file) {
+  return file ? `${file.name}|${file.size}|${file.lastModified}` : "";
+}
 
 const ICON_LOCK = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="10.5" width="15" height="9.5" rx="2"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/></svg>`;
 const ICON_DL = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v10"/><path d="m8 11 4 4 4-4"/><path d="M5 19h14"/></svg>`;
@@ -73,19 +81,48 @@ const PAGE = `
 
 export function mount(v, ctx) {
   view = v;
+  mounted = true;
   refreshStatus = ctx?.refresh || (() => { });
   view.innerHTML = PAGE;
 
-  view.querySelector("#bundle-download").onclick = () => {
-    // plain navigation download: the session cookie authenticates the GET, and
-    // the Content-Disposition header names the file
-    const a = document.createElement("a");
-    a.href = "/api/v1/export";
-    a.download = "";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    toast("Downloading bundle…");
+  view.querySelector("#bundle-download").onclick = async () => {
+    // Fetch (not a blind navigation) so a non-2xx response is reported instead
+    // of silently downloaded as a fake bundle. The session cookie authenticates.
+    const btn = view.querySelector("#bundle-download");
+    const label = btn.textContent;
+    btn.disabled = true; btn.textContent = "Downloading…";
+    try {
+      let res;
+      try {
+        res = await fetch("/api/v1/export");
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        toast(`Can't reach the daemon: ${detail}`, "err");
+        return;
+      }
+      if (!res.ok) {
+        let detail = `Request failed (${res.status})`;
+        try { detail = (await res.json()).error || detail; } catch (_e) { /* keep default */ }
+        toast(detail, "err");
+        return;
+      }
+      if (!mounted) return;
+      const blob = await res.blob();
+      if (!mounted) return;
+      const disp = res.headers.get("Content-Disposition") || "";
+      const m = disp.match(/filename="([^"]+)"/);
+      const a = document.createElement("a");
+      const url = URL.createObjectURL(blob);
+      a.href = url;
+      a.download = m ? m[1] : "alle-backup.yaml";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast("Downloaded bundle.");
+    } finally {
+      if (mounted) { btn.disabled = false; btn.textContent = label; }
+    }
   };
 
   const input = view.querySelector("#bundle-file");
@@ -107,15 +144,25 @@ export function mount(v, ctx) {
     err.textContent = ""; okMsg.textContent = "";
     const file = input.files[0];
     if (!file) { err.textContent = "Choose a bundle file."; return; }
+    const startedWith = fileKey(file);
     const text = await file.text();
-    validateBtn.disabled = true;
-    const label = validateBtn.textContent; validateBtn.textContent = "Validating…";
-    const res = await api.post("/api/v1/validate", { text });
-    validateBtn.disabled = false; validateBtn.textContent = label;
-    if (!res.ok) { err.textContent = res.error; return; }
-    const d = res.data;
-    okMsg.textContent = `Valid — ${d.providers} provider(s), ${d.channels} channel(s), `
-      + `${d.rulesets} ruleset(s).` + (d.notes?.length ? ` (${d.notes.join("; ")})` : "");
+    const label = validateBtn.textContent;
+    validateBtn.disabled = true; validateBtn.textContent = "Validating…";
+    try {
+      const res = await api.post("/api/v1/validate", { text });
+      // A different file was selected while we were awaiting: the result is for
+      // the old file and must not mark the new one valid (setName already
+      // cleared the message); and stop if the page navigated away.
+      if (!mounted || fileKey(input.files[0]) !== startedWith) return;
+      if (!res.ok) { err.textContent = res.error; return; }
+      const d = res.data;
+      okMsg.textContent = `Valid — ${d.providers} provider(s), ${d.channels} channel(s), `
+        + `${d.rulesets} ruleset(s).` + (d.notes?.length ? ` (${d.notes.join("; ")})` : "");
+    } finally {
+      if (mounted && fileKey(input.files[0]) === startedWith) {
+        validateBtn.disabled = false; validateBtn.textContent = label;
+      }
+    }
   };
 
   // the whole box is the control: click (or Enter/Space) opens the picker
@@ -153,31 +200,40 @@ export function mount(v, ctx) {
     err.textContent = "";
     const file = input.files[0];
     if (!file) { err.textContent = "Choose a bundle file."; return; }
+    const startedWith = fileKey(file);
     const text = await file.text();
+    if (!mounted || fileKey(input.files[0]) !== startedWith) return;
     if (isRestore && !(await confirmDialog(
       "Replace the entire setup?",
       `Everything not in "${file.name}" — providers, channels, rulesets — will be removed. This cannot be undone.`,
       { confirmText: "Replace setup", danger: true },
     ))) return;
+    if (!mounted) return;
     const active = isRestore ? replaceBtn : mergeBtn;
     const label = active.textContent;
     mergeBtn.disabled = true; replaceBtn.disabled = true;
     active.textContent = isRestore ? "Replacing…" : "Merging…";
-    const res = await api.post("/api/v1/import", { text, replace: isRestore });
-    mergeBtn.disabled = false; replaceBtn.disabled = false;
-    active.textContent = label;
-    if (!res.ok) { err.textContent = res.error; return; }
-    input.value = ""; setName("");
-    toast(bundleSummaryText(res.data));
-    bundleFallbackToast(res.data);
-    refreshStatus();
+    try {
+      const res = await api.post("/api/v1/import", { text, replace: isRestore });
+      if (!mounted) return;
+      if (!res.ok) { err.textContent = res.error; return; }
+      input.value = ""; setName("");
+      toast(bundleSummaryText(res.data));
+      bundleFallbackToast(res.data);
+      refreshStatus();
+    } finally {
+      if (mounted) {
+        mergeBtn.disabled = false; replaceBtn.disabled = false;
+        active.textContent = label;
+      }
+    }
   }
 
   mergeBtn.onclick = () => apply(false);
   replaceBtn.onclick = () => apply(true);
 }
 
-export function unmount() { view = null; }
+export function unmount() { view = null; mounted = false; }
 
 function bundleSummaryText(d) {
   if (d.mode === "restore") {

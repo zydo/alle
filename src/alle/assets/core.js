@@ -124,9 +124,11 @@ export function confirmDialog(title, message, { confirmText = "Confirm", cancelT
     const onKey = (e) => {
       if (e.key === "Escape") {
         finish(false);
-      } else if (e.key === "Enter") {
-        finish(true);
       }
+      // Enter is NOT a global confirm: it would fire confirm even when Cancel
+      // has focus. Native button activation handles Enter/Space on whichever
+      // button is focused (the confirm button is auto-focused, so Enter
+      // confirms by default; tab to Cancel + Enter cancels).
     };
     root.querySelector("[data-cancel]").onclick = () => finish(false);
     root.querySelector("[data-confirm]").onclick = () => finish(true);

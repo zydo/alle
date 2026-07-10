@@ -25,8 +25,11 @@ function updateMasthead(s) {
 
 function route() {
   const key = location.hash.replace(/^#\/?/, "");
-  const page = pages[key] || dashboard;
-  const activeKey = pages[key] ? key : "";
+  // Own-property check only: a hash like #/constructor or #/__proto__ must not
+  // pick up an Object.prototype member (a truthy function) and crash mount().
+  const known = Object.prototype.hasOwnProperty.call(pages, key);
+  const page = known ? pages[key] : dashboard;
+  const activeKey = known ? key : "";
   current?.unmount?.();
   document.querySelectorAll(".nav a").forEach((a) =>
     a.classList.toggle("active", (a.dataset.route || "") === activeKey));
