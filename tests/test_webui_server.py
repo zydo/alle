@@ -24,7 +24,8 @@ def live():
     """A running control server. Yields ``(base_url, secret)``."""
     Store.load().add_provider("nordvpn")  # a little content for /status
     httpd = server.build_server()
-    Thread(target=httpd.serve_forever, daemon=True).start()
+    # a short poll interval keeps each test's shutdown() near-instant
+    Thread(target=lambda: httpd.serve_forever(poll_interval=0.02), daemon=True).start()
     api = server.control_api()
     try:
         yield f"http://{api['address']}", api["secret"]
@@ -32,9 +33,14 @@ def live():
         httpd.shutdown()
 
 
-def _req(url, *, method="GET", headers=None, data=None):
-    body = json.dumps(data).encode() if data is not None else None
-    r = urllib.request.Request(url, method=method, headers=headers or {}, data=body)
+def _req(url, *, method="GET", headers=None, data=None, raw=None):
+    """``data`` is JSON-encoded and sent as application/json (matching the
+    UI's fetch helper); ``raw`` sends bytes verbatim for malformed-body tests."""
+    body = json.dumps(data).encode() if data is not None else raw
+    headers = dict(headers or {})
+    if data is not None:
+        headers.setdefault("Content-Type", "application/json")
+    r = urllib.request.Request(url, method=method, headers=headers, data=body)
     try:
         with urllib.request.urlopen(r) as resp:  # noqa: S310 (loopback test)
             return resp.status, resp.read(), dict(resp.headers)
@@ -653,6 +659,227 @@ def test_lifecycle_endpoints_call_service(live, monkeypatch):
         assert st == 200
 
     assert calls == ["start", "stop", "restart"]
+
+
+# ---- strict request validation (fail closed, never coerce) ----
+
+
+def test_malformed_json_is_rejected_and_killswitch_untouched(live):
+    """Garbage bodies once coerced to {} — which read as enabled=False and
+    silently disabled the kill switch. They must 400 and change nothing."""
+    base, secret = live
+    Store.load().set_killswitch(True)
+    st, body, _ = _req(
+        base + "/api/v1/routes/killswitch",
+        method="POST",
+        headers={
+            "Origin": base,
+            "Authorization": f"Bearer {secret}",
+            "Content-Type": "application/json",
+        },
+        raw=b"{definitely not json",
+    )
+    assert st == 400 and "not valid JSON" in json.loads(body)["error"]
+    assert Store.load().router.get("killswitch") is True  # untouched
+
+
+def test_killswitch_requires_a_strict_boolean(live):
+    base, secret = live
+    origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    Store.load().set_killswitch(True)
+    # the *string* "false" must not read as a boolean at all
+    st, body, _ = _req(
+        base + "/api/v1/routes/killswitch",
+        method="POST",
+        headers=origin,
+        data={"enabled": "false"},
+    )
+    assert st == 400 and "must be a boolean" in json.loads(body)["error"]
+    # a missing field must not read as False
+    st, body, _ = _req(
+        base + "/api/v1/routes/killswitch", method="POST", headers=origin, data={}
+    )
+    assert st == 400 and "missing required field" in json.loads(body)["error"]
+    assert Store.load().router.get("killswitch") is True  # still untouched
+
+
+def test_unknown_body_fields_are_rejected(live):
+    base, secret = live
+    st, body, _ = _req(
+        base + "/api/v1/routes/killswitch",
+        method="POST",
+        headers={"Origin": base, "Authorization": f"Bearer {secret}"},
+        data={"enabled": True, "enabeld": True},
+    )
+    assert st == 400 and "unknown field(s): enabeld" in json.loads(body)["error"]
+
+
+def test_non_object_json_root_is_rejected(live):
+    base, secret = live
+    st, body, _ = _req(
+        base + "/api/v1/lifecycle/start",
+        method="POST",
+        headers={"Origin": base, "Authorization": f"Bearer {secret}"},
+        data=["not", "an", "object"],
+    )
+    assert st == 400 and "must be a JSON object" in json.loads(body)["error"]
+
+
+def test_wrong_content_type_is_415(live):
+    base, secret = live
+    st, body, _ = _req(
+        base + "/api/v1/lifecycle/start",
+        method="POST",
+        headers={
+            "Origin": base,
+            "Authorization": f"Bearer {secret}",
+            "Content-Type": "text/plain",
+        },
+        raw=b'{"ok": true}',
+    )
+    assert st == 415
+
+
+def test_replace_string_must_be_boolean_not_truthy(live):
+    """The string "false" once *selected* the destructive whole-setup replace
+    (bool("false") is True). Strict typing refuses it outright."""
+    base, secret = live
+    st, body, _ = _req(
+        base + "/api/v1/import",
+        method="POST",
+        headers={"Origin": base, "Authorization": f"Bearer {secret}"},
+        data={"text": "x", "replace": "false"},
+    )
+    assert st == 400 and "must be a boolean" in json.loads(body)["error"]
+
+
+def test_oversized_body_is_413_without_reading_it(live):
+    # the refusal is based on the declared Content-Length alone — the server
+    # never buffers the oversized payload
+    base, secret = live
+    host = base.removeprefix("http://")
+    head = (
+        f"POST /api/v1/validate HTTP/1.1\r\nHost: {host}\r\nOrigin: {base}\r\n"
+        f"Authorization: Bearer {secret}\r\nContent-Type: application/json\r\n"
+        f"Content-Length: {server.MAX_BODY + 1}\r\n\r\n"
+    ).encode()
+    resp = _raw_request(base, head)
+    assert b"413" in resp.split(b"\r\n", 1)[0]
+
+
+def test_matchers_shape_is_validated(live):
+    base, secret = live
+    origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    for bad in ("netflix.com", [42], [{"value": 42}], [{"vlaue": "x"}]):
+        st, body, _ = _req(
+            base + "/api/v1/routes/rulesets",
+            method="POST",
+            headers=origin,
+            data={"name": "X", "target": "direct", "matchers": bad},
+        )
+        assert st == 400, bad
+
+
+def _raw_request(base: str, payload: bytes) -> bytes:
+    """Send raw HTTP bytes (for framing that urllib refuses to produce)."""
+    import socket as _socket
+
+    host, port = base.removeprefix("http://").split(":")
+    with _socket.create_connection((host, int(port)), timeout=3) as s:
+        s.sendall(payload)
+        s.settimeout(3)
+        out = b""
+        try:
+            while chunk := s.recv(4096):
+                out += chunk
+        except TimeoutError:
+            pass
+        return out
+
+
+def test_invalid_and_conflicting_content_length_are_400(live):
+    base, secret = live
+    host = base.removeprefix("http://")
+    common = (
+        f"POST /api/v1/lifecycle/start HTTP/1.1\r\nHost: {host}\r\n"
+        f"Origin: {base}\r\nAuthorization: Bearer {secret}\r\n"
+        "Content-Type: application/json\r\n"
+    )
+    resp = _raw_request(base, (common + "Content-Length: abc\r\n\r\n").encode())
+    assert b"400" in resp.split(b"\r\n", 1)[0] and b"invalid Content-Length" in resp
+    resp = _raw_request(base, (common + "Content-Length: -5\r\n\r\n").encode())
+    assert b"400" in resp.split(b"\r\n", 1)[0]
+    resp = _raw_request(
+        base,
+        (common + "Content-Length: 2\r\nContent-Length: 4\r\n\r\n{}ab").encode(),
+    )
+    assert b"conflicting Content-Length" in resp
+
+
+def test_transfer_encoding_is_refused(live):
+    base, secret = live
+    host = base.removeprefix("http://")
+    payload = (
+        f"POST /api/v1/lifecycle/start HTTP/1.1\r\nHost: {host}\r\n"
+        f"Origin: {base}\r\nAuthorization: Bearer {secret}\r\n"
+        "Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"
+        "0\r\n\r\n"
+    ).encode()
+    resp = _raw_request(base, payload)
+    assert b"501" in resp.split(b"\r\n", 1)[0]
+
+
+def test_api_prefix_is_exact(live):
+    base, secret = live
+    st, _, _ = _req(base + "/api/v9/status", headers=_bearer(secret))
+    assert st == 404  # only /api/v1/... exists
+    st, _, _ = _req(
+        base + "/api/v9/routes/killswitch",
+        method="POST",
+        headers={"Origin": base, "Authorization": f"Bearer {secret}"},
+        data={"enabled": False},
+    )
+    assert st == 404
+
+
+def test_bounded_server_caps_worker_threads():
+    httpd = server.build_server()
+    try:
+        assert isinstance(httpd, server._BoundedServer)
+        assert httpd._slots._value == server._BoundedServer.MAX_WORKERS
+    finally:
+        httpd.server_close()
+
+
+# ---- readiness challenge (/health) ----
+
+
+def test_health_answers_the_nonce_challenge(live):
+    base, secret = live
+    st, body, _ = _req(base + "/health?nonce=abc123")  # no auth needed
+    assert st == 200
+    assert json.loads(body)["proof"] == auth.health_proof(secret, "abc123")
+    st, body, _ = _req(base + "/health")  # nonce required
+    assert st == 400
+
+
+def test_wait_until_serving_verifies_the_listener(live, monkeypatch):
+    base, _ = live
+    api = server.control_api()
+    assert server._health_ok(api) is True
+    # a listener that cannot prove the secret (foreign process on the port,
+    # or anything else) must NOT count as serving — no login URL for it
+    assert server._health_ok({**api, "secret": "not-the-real-secret"}) is False
+    assert server.wait_until_serving(timeout=0.3) is True
+
+
+def test_health_proof_is_domain_separated():
+    secret = "s3cret"
+    proof = auth.health_proof(secret, "n1")
+    assert proof != auth.health_proof(secret, "n2")  # nonce-bound
+    # the proof is not a usable credential anywhere else
+    assert auth.verify_login_token(secret, proof, set()) is False
+    assert auth.verify_session(secret, proof) is False
 
 
 def test_logs_endpoint_returns_tail_and_clamps_lines(live, monkeypatch):

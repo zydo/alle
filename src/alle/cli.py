@@ -558,20 +558,22 @@ def cmd_test(args):
 
 def _run_streaming_test(args):
     """Live, per-channel speed-test output (TTY only). See :func:`cmd_test`."""
-    state = {"renderer": None}
+    # 0-or-1-element holder: service.test() fills it via on_begin once the
+    # channel list is known (empty = nothing to stream, single-shot output).
+    stream: list[_SpeedStream] = []
 
     def on_begin(chans):
         if chans:  # no header when there are no channels — test() returns the reason
-            state["renderer"] = _SpeedStream(output.test_stream_widths(chans))
-            state["renderer"].begin()
+            stream.append(_SpeedStream(output.test_stream_widths(chans)))
+            stream[0].begin()
 
     def on_row(row):
-        if state["renderer"] is not None:
-            state["renderer"].row(row)
+        if stream:
+            stream[0].row(row)
 
     def progress(row, phase):
-        if state["renderer"] is not None:
-            state["renderer"].progress(row, phase)
+        if stream:
+            stream[0].progress(row, phase)
 
     result = service.test(
         speed=True,
@@ -581,10 +583,10 @@ def _run_streaming_test(args):
         on_begin=on_begin,
     )
 
-    if state["renderer"] is None:
+    if not stream:
         print(output.test_result(result))  # "No channels configured." etc.
         return
-    state["renderer"].end()
+    stream[0].end()
     healthy = result.get("healthy_count", 0)
     failed = result.get("failed_count", 0)
     print(f"{healthy} healthy · {failed} failed")
@@ -813,10 +815,11 @@ def cmd_stop(args):
 
 def cmd_ui(args):
     """Open the Web UI in the browser (or print the URL when headless)."""
-    if not service.ensure_web_ui():  # start the daemon + wait for it to serve
+    if not service.ensure_web_ui():  # start the daemon + wait for a verified serve
         sys.exit(
-            "The Web UI isn't responding yet. If the daemon is running an older "
-            "build, restart it: alle restart"
+            "The Web UI isn't responding (or its port is occupied by another "
+            "program — the sign-in link is only sent to a verified alle server). "
+            "Try: alle restart"
         )
     login_url = service.web_ui_login_url()
     opened = False

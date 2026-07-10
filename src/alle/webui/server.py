@@ -20,10 +20,12 @@ CSRF have burned loopback apps before):
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import secrets
 import socket
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path
@@ -39,6 +41,24 @@ _ASSET_TYPES = {
     ".js": "text/javascript; charset=utf-8",
     ".svg": "image/svg+xml",
 }
+
+# Hard cap on any request body. The largest legitimate payload is a setup
+# bundle (tens of KB of YAML); 1 MiB leaves generous headroom while keeping a
+# hostile local client from making the daemon buffer arbitrary amounts.
+MAX_BODY = 1 << 20
+
+
+class _BadRequest(Exception):
+    """A request the transport layer refuses — carries the HTTP status.
+
+    Central to the fail-closed contract: malformed input must become a 4xx,
+    never a silently-coerced ``{}`` (which once could disable the kill switch).
+    """
+
+    def __init__(self, status: int, message: str):
+        self.status = status
+        self.message = message
+        super().__init__(message)
 
 
 def _config_path() -> Path:
@@ -81,23 +101,38 @@ def ui_url() -> str:
 
 
 def wait_until_serving(timeout: float = 6.0) -> bool:
-    """Poll the control port until the server accepts a connection.
+    """Poll until *our* control server proves it is behind the contract port.
 
-    The daemon (which serves the UI) starts asynchronously, so ``alle ui`` waits
-    here before opening the browser — otherwise it would open on a port nothing
-    is listening on yet.
+    A bare TCP connect is not enough: the port may be squatted by an unrelated
+    process (after the real bind failed), and ``alle ui`` must never hand its
+    tokenized login URL to a foreign listener. Readiness therefore means
+    answering an HMAC health challenge with the installation secret — which is
+    never itself sent over the wire.
     """
     import time
 
-    host, port = control_api()["address"].split(":")
+    api = control_api()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        try:
-            with socket.create_connection((host, int(port)), timeout=0.5):
-                return True
-        except OSError:
-            time.sleep(0.15)
+        if _health_ok(api):
+            return True
+        time.sleep(0.15)
     return False
+
+
+def _health_ok(api: dict) -> bool:
+    """One health challenge round-trip against the contract port."""
+    import urllib.request
+
+    nonce = secrets.token_urlsafe(16)
+    try:
+        req = urllib.request.Request(f"http://{api['address']}/health?nonce={nonce}")  # noqa: S5332
+        with urllib.request.urlopen(req, timeout=1) as r:  # noqa: S310 (loopback)
+            data = json.loads(r.read(4096))
+    except (OSError, ValueError):
+        return False
+    proof = str((data or {}).get("proof") or "")
+    return hmac.compare_digest(proof, auth.health_proof(api["secret"], nonce))
 
 
 def mint_login_url() -> str:
@@ -105,6 +140,94 @@ def mint_login_url() -> str:
     api = control_api()
     token = auth.mint_login_token(api["secret"])
     return f"http://{api['address']}/?token={token}"  # noqa:S5332
+
+
+# ---- body field validation -------------------------------------------------
+
+
+def _fields(body: dict, *allowed: str) -> None:
+    """Reject unknown body fields — typos must not silently mean defaults."""
+    unknown = set(body) - set(allowed)
+    if unknown:
+        raise _BadRequest(400, f"unknown field(s): {', '.join(sorted(unknown))}")
+
+
+def _require(body: dict, key: str):
+    if key not in body or body[key] is None:
+        raise _BadRequest(400, f"missing required field {key!r}")
+    return body[key]
+
+
+def _str_field(body: dict, key: str, *, required: bool = False) -> str:
+    v = _require(body, key) if required else body.get(key)
+    if v is None:
+        return ""
+    if not isinstance(v, str):
+        raise _BadRequest(400, f"field {key!r} must be a string")
+    return v
+
+
+def _opt_str_field(body: dict, key: str) -> str | None:
+    """A string field where absent/null means None (e.g. optional country)."""
+    v = body.get(key)
+    if v is None:
+        return None
+    if not isinstance(v, str):
+        raise _BadRequest(400, f"field {key!r} must be a string")
+    return v
+
+
+def _bool_field(body: dict, key: str, *, required: bool = False) -> bool:
+    """A strict JSON boolean — the string \"false\" must never read as truthy."""
+    v = _require(body, key) if required else body.get(key)
+    if v is None:
+        return False
+    if not isinstance(v, bool):
+        raise _BadRequest(400, f"field {key!r} must be a boolean")
+    return v
+
+
+def _dict_field(body: dict, key: str) -> dict:
+    v = body.get(key)
+    if v is None:
+        return {}
+    if not isinstance(v, dict):
+        raise _BadRequest(400, f"field {key!r} must be an object")
+    return v
+
+
+def _str_list_field(body: dict, key: str, *, required: bool = False) -> list[str]:
+    v = _require(body, key) if required else body.get(key)
+    if v is None:
+        return []
+    if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+        raise _BadRequest(400, f"field {key!r} must be a list of strings")
+    return v
+
+
+def _matchers_field(body: dict) -> list:
+    """The ruleset matcher list: ``[{value, type?}, …]`` objects (the UI's
+    wire shape) or bare strings. Shape only — domain/CIDR syntax stays with
+    the service layer's validation."""
+    v = _require(body, "matchers")
+    if not isinstance(v, list):
+        raise _BadRequest(400, "field 'matchers' must be a list")
+    for item in v:
+        if isinstance(item, str):
+            continue
+        if not isinstance(item, dict):
+            raise _BadRequest(400, "each matcher must be an object with a 'value'")
+        unknown = set(item) - {"value", "type", "matcher_type"}
+        if unknown:
+            raise _BadRequest(
+                400, f"unknown matcher field(s): {', '.join(sorted(unknown))}"
+            )
+        if not isinstance(item.get("value", ""), str) or any(
+            item.get(k) is not None and not isinstance(item[k], str)
+            for k in ("type", "matcher_type")
+        ):
+            raise _BadRequest(400, "matcher fields must be strings")
+    return v
 
 
 # ---- request handler -----------------------------------------------------------
@@ -126,6 +249,9 @@ class _Handler(BaseHTTPRequestHandler):
     secret = ""
     address = ""
     consumed: set[str] = set()
+    # Socket deadline for reading the request line, headers, and body — a
+    # client that connects and stalls cannot pin a worker thread forever.
+    timeout = 30
 
     def log_message(self, *args):  # quiet: the app log is the record, not stderr
         pass
@@ -194,6 +320,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -- verbs --
     def do_GET(self):
+        try:
+            self._get()
+        except _BadRequest as e:
+            self._json(e.status, {"error": e.message})
+
+    def _get(self):
         if not self._host_ok():
             return self._json(403, {"error": "bad host"})
         parsed = urlparse(self.path)
@@ -201,7 +333,14 @@ class _Handler(BaseHTTPRequestHandler):
 
         if path == "/":
             return self._root(parse_qs(parsed.query))
+        if path == "/health":
+            # unauthenticated on purpose: `alle ui` uses it to prove the
+            # process behind the contract port is really alle *before* handing
+            # a tokenized login URL to it (see wait_until_serving)
+            return self._health(parse_qs(parsed.query))
         if path.startswith("/api/"):
+            if not path.startswith("/api/v1/"):
+                return self._json(404, {"error": "not found"})  # exact contract
             if not self._authed():
                 return self._json(401, {"error": "unauthorized"})
             return self._api_get(path)
@@ -230,6 +369,12 @@ class _Handler(BaseHTTPRequestHandler):
         self._mutate("DELETE")
 
     def _mutate(self, method: str):
+        try:
+            self._mutate_checked(method)
+        except _BadRequest as e:
+            self._json(e.status, {"error": e.message})
+
+    def _mutate_checked(self, method: str):
         if not self._host_ok():
             return self._json(403, {"error": "bad host"})
         if not self._origin_ok():  # CSRF: mutating requests must be same-origin
@@ -237,19 +382,58 @@ class _Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if method == "POST" and path == "/api/v1/login":
             return self._login_post()  # login authenticates itself
+        if not path.startswith("/api/v1/"):
+            return self._json(404, {"error": "not found"})  # exact contract
         if not self._authed():
             return self._json(401, {"error": "unauthorized"})
         self._api_mutate(method, path)
 
-    def _body(self) -> dict:
-        length = int(self.headers.get("Content-Length") or 0)
-        if not length:
-            return {}
+    def _read_body(self) -> bytes:
+        """The raw request body, strictly framed — or a typed 4xx refusal.
+
+        Framing errors must never degrade into "empty body": a body that
+        cannot be trusted end-to-end is rejected outright.
+        """
+        if self.headers.get("Transfer-Encoding"):
+            raise _BadRequest(501, "transfer encodings are not supported")
+        lengths = self.headers.get_all("Content-Length") or []
+        if len({v.strip() for v in lengths}) > 1:
+            raise _BadRequest(400, "conflicting Content-Length headers")
+        if not lengths:
+            return b""
         try:
-            data = json.loads(self.rfile.read(length))
-            return data if isinstance(data, dict) else {}
+            length = int(lengths[0])
         except ValueError:
+            raise _BadRequest(400, "invalid Content-Length") from None
+        if length < 0:
+            raise _BadRequest(400, "invalid Content-Length")
+        if length > MAX_BODY:
+            raise _BadRequest(413, "request body too large")
+        data = self.rfile.read(length)
+        if len(data) != length:
+            raise _BadRequest(400, "truncated request body")
+        return data
+
+    def _json_body(self) -> dict:
+        """The request body as a JSON object, or a typed 4xx refusal.
+
+        Never coerces: malformed JSON, a non-object root, or a wrong media
+        type is an error, not ``{}`` — ``{}`` once meant "disable the kill
+        switch" on the killswitch endpoint.
+        """
+        data = self._read_body()
+        if not data:
             return {}
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            raise _BadRequest(415, "Content-Type must be application/json")
+        try:
+            obj = json.loads(data)
+        except ValueError:
+            raise _BadRequest(400, "request body is not valid JSON") from None
+        if not isinstance(obj, dict):
+            raise _BadRequest(400, "request body must be a JSON object")
+        return obj
 
     # -- routes --
     def _root(self, query: dict):
@@ -275,13 +459,26 @@ class _Handler(BaseHTTPRequestHandler):
             )
         self._send(200, body, "text/html; charset=utf-8", {"Cache-Control": "no-store"})
 
+    def _health(self, query: dict):
+        """Answer a readiness challenge with an HMAC over the caller's nonce.
+
+        Proves possession of the installation secret without ever sending it;
+        the ``health:`` domain separation means the answer can never be
+        replayed as a login token or session cookie.
+        """
+        nonce = (query.get("nonce") or [""])[0]
+        if not nonce or len(nonce) > 128:
+            raise _BadRequest(400, "a nonce query parameter (<=128 chars) is required")
+        self._json(
+            200,
+            {"proof": auth.health_proof(self.secret, nonce)},
+            {"Cache-Control": "no-store"},
+        )
+
     def _login_post(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(length) if length else b""
-        try:
-            token = json.loads(raw).get("token", "")
-        except ValueError:
-            token = ""
+        body = self._json_body()
+        _fields(body, "token")
+        token = _str_field(body, "token")
         # accept either a one-time login token or the raw secret (manual paste)
         if auth.verify_login_token(
             self.secret, token, self.consumed
@@ -302,7 +499,7 @@ class _Handler(BaseHTTPRequestHandler):
         except (service.ServiceError, ProviderError) as e:
             return self._json(400, {"error": str(e)})
 
-    def _stream_test(self, body: dict):
+    def _stream_test(self, channel: str | None):
         """Stream a speed test as newline-delimited JSON.
 
         Emits one ``{"type":"row","data":<row>}`` per channel as it completes,
@@ -339,7 +536,7 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             result = service.test(
                 speed=True,
-                channel=body.get("channel") or None,
+                channel=channel or None,
                 on_row=on_row,
             )
         except (service.ServiceError, ProviderError) as e:
@@ -417,20 +614,31 @@ class _Handler(BaseHTTPRequestHandler):
         )
 
     def _api_mutate(self, method: str, path: str):
+        """Dispatch a mutation. Every body field is schema-checked here —
+        unknown fields, wrong primitive types, and framing problems are 4xx
+        via ``_BadRequest`` before any service call runs."""
         from alle import service
 
         seg = path.strip("/").split("/")[2:]  # drop "api/v1"
-        body = self._body()
+        body = self._json_body()
 
         if method == "POST" and seg == ["validate"]:
-            return self._call(service.setup_validate, str(body.get("text", "")))
+            _fields(body, "text")
+            return self._call(service.setup_validate, _str_field(body, "text"))
         if method == "POST" and seg == ["import"]:
+            _fields(body, "text", "replace")
             # --replace (the UI's Replace button confirms before calling) routes
-            # to the destructive whole-setup replace instead of a merge
-            fn = service.setup_restore if body.get("replace") else service.setup_import
-            return self._call(fn, str(body.get("text", "")))
+            # to the destructive whole-setup replace instead of a merge. A
+            # strict boolean: the *string* "false" must never select replace.
+            fn = (
+                service.setup_restore
+                if _bool_field(body, "replace")
+                else service.setup_import
+            )
+            return self._call(fn, _str_field(body, "text"))
 
         if method == "POST" and seg == ["providers"]:
+            _fields(body, "provider", "creds")
             return self._call(_add_provider, body)
         if (
             method == "POST"
@@ -440,12 +648,16 @@ class _Handler(BaseHTTPRequestHandler):
         ):
             # Replace an added token provider's credential (write-only: the token
             # is never returned). Config providers raise ServiceError → 400.
+            _fields(body, "creds")
             return self._call(
-                service.provider_update_token, seg[1], body.get("creds") or {}
+                service.provider_update_token, seg[1], _dict_field(body, "creds")
             )
         if method == "DELETE" and len(seg) == 2 and seg[0] == "providers":
             return self._call(lambda: service.provider_remove_many([seg[1]]))
         if method == "POST" and seg == ["channels"]:
+            _fields(
+                body, "provider", "country", "city", "label", "conf_text", "conf_name"
+            )
             return self._call(_add_channel, body)
         if (
             method == "POST"
@@ -453,32 +665,36 @@ class _Handler(BaseHTTPRequestHandler):
             and seg[0] == "channels"
             and seg[3] == "label"
         ):
+            _fields(body, "label")
             return self._call(
-                service.channel_set_label, f"{seg[1]}/{seg[2]}", body.get("label", "")
+                service.channel_set_label,
+                f"{seg[1]}/{seg[2]}",
+                _str_field(body, "label"),
             )
         if method == "DELETE" and len(seg) == 3 and seg[0] == "channels":
             return self._call(
                 lambda: service.channel_remove_many([seg[2]], provider=seg[1])
             )
         if method == "POST" and seg == ["routes", "rulesets"]:
+            _fields(body, "name", "target", "matchers")
             return self._call(
                 service.routes_ruleset_create,
-                body.get("name", ""),
-                body.get("target", ""),
-                body.get("matchers") or [],
+                _str_field(body, "name"),
+                _str_field(body, "target"),
+                _matchers_field(body),
             )
         if method == "POST" and len(seg) == 3 and seg[:2] == ["routes", "rulesets"]:
-            return self._call(
-                service.routes_ruleset_add, seg[2], body.get("matchers") or []
-            )
+            _fields(body, "matchers")
+            return self._call(service.routes_ruleset_add, seg[2], _matchers_field(body))
         if (
             method == "POST"
             and len(seg) == 4
             and seg[:2] == ["routes", "rulesets"]
             and seg[3] == "rename"
         ):
+            _fields(body, "name")
             return self._call(
-                service.routes_ruleset_rename, seg[2], body.get("name", "")
+                service.routes_ruleset_rename, seg[2], _str_field(body, "name")
             )
         if (
             method == "POST"
@@ -486,8 +702,9 @@ class _Handler(BaseHTTPRequestHandler):
             and seg[:2] == ["routes", "rulesets"]
             and seg[3] == "target"
         ):
+            _fields(body, "target")
             return self._call(
-                service.routes_ruleset_retarget, seg[2], body.get("target", "")
+                service.routes_ruleset_retarget, seg[2], _str_field(body, "target")
             )
         if (
             method == "POST"
@@ -495,41 +712,54 @@ class _Handler(BaseHTTPRequestHandler):
             and seg[:2] == ["routes", "rulesets"]
             and seg[3] == "update"
         ):
+            _fields(body, "name", "target", "matchers")
             return self._call(
                 service.routes_ruleset_update,
                 seg[2],
-                body.get("name", ""),
-                body.get("target", ""),
-                body.get("matchers") or [],
+                _str_field(body, "name"),
+                _str_field(body, "target"),
+                _matchers_field(body),
             )
         if method == "DELETE" and len(seg) == 3 and seg[:2] == ["routes", "rulesets"]:
             return self._call(service.routes_ruleset_remove, seg[2])
         if method == "POST" and seg == ["routes", "reorder"]:
+            _fields(body, "ids", "flat")
             return self._call(
-                service.routes_reorder, body.get("ids") or [], bool(body.get("flat"))
+                service.routes_reorder,
+                _str_list_field(body, "ids", required=True),
+                _bool_field(body, "flat"),
             )
         if method == "POST" and seg == ["routes", "killswitch"]:
-            return self._call(service.routes_killswitch, bool(body.get("enabled")))
+            # `enabled` is required and strictly boolean: a missing field or a
+            # coerced string must never silently disable the kill switch
+            _fields(body, "enabled")
+            return self._call(
+                service.routes_killswitch, _bool_field(body, "enabled", required=True)
+            )
         if method == "POST" and seg == ["routes", "lan"]:
-            return self._call(service.routes_lan_direct, bool(body.get("enabled")))
+            _fields(body, "enabled")
+            return self._call(
+                service.routes_lan_direct, _bool_field(body, "enabled", required=True)
+            )
         if method == "DELETE" and len(seg) == 2 and seg[0] == "routes":
             return self._call(service.routes_remove, [seg[1]])
         if method == "POST" and seg == ["test"]:
             # A speed test streams one row per channel as each finishes
             # (application/x-ndjson), so the UI isn't blind until the whole batch
             # completes. Plain probes stay on the single-shot JSON path.
-            if body.get("speed"):
-                return self._stream_test(body)
-            return self._call(
-                service.test,
-                speed=False,
-                channel=body.get("channel") or None,
-            )
+            _fields(body, "speed", "channel")
+            channel = _opt_str_field(body, "channel")
+            if _bool_field(body, "speed"):
+                return self._stream_test(channel)
+            return self._call(service.test, speed=False, channel=channel or None)
         if method == "POST" and seg == ["lifecycle", "start"]:
+            _fields(body)
             return self._call(service.start)
         if method == "POST" and seg == ["lifecycle", "stop"]:
+            _fields(body)
             return self._call(service.stop)
         if method == "POST" and seg == ["lifecycle", "restart"]:
+            _fields(body)
             return self._call(service.restart)
         self._json(404, {"error": "not found"})
 
@@ -537,12 +767,12 @@ class _Handler(BaseHTTPRequestHandler):
 def _add_provider(body: dict) -> dict:
     from alle import service
 
-    provider = service.resolve_provider(body.get("provider", ""))
+    provider = service.resolve_provider(_str_field(body, "provider", required=True))
     if service.kind(provider) == "config":
         return service.provider_add_config(provider)
     # Posting an already-added token provider replaces its credential (and
     # refreshes its channels) rather than erroring — the idempotent-add contract.
-    return service.provider_add_or_update_token(provider, body.get("creds") or {})
+    return service.provider_add_or_update_token(provider, _dict_field(body, "creds"))
 
 
 def _locations(path: str) -> dict:
@@ -558,17 +788,21 @@ def _locations(path: str) -> dict:
 def _add_channel(body: dict) -> dict:
     from alle import service
 
-    provider = service.resolve_provider(body.get("provider", ""))
-    conf_text = body.get("conf_text")
+    provider = service.resolve_provider(_str_field(body, "provider", required=True))
+    conf_text = _opt_str_field(body, "conf_text")
     if conf_text is not None:  # browser upload of a .conf's contents
         return service.channel_add_conf_text(
             provider,
-            body.get("conf_name") or "import.conf",
+            _str_field(body, "conf_name") or "import.conf",
             conf_text,
-            body.get("label", ""),
+            _str_field(body, "label"),
         )
     return service.channel_add(
-        provider, body.get("country"), body.get("city"), None, body.get("label", "")
+        provider,
+        _opt_str_field(body, "country"),
+        _opt_str_field(body, "city"),
+        None,
+        _str_field(body, "label"),
     )
 
 
@@ -584,6 +818,37 @@ def _log_lines(path: str) -> int:
 # ---- lifecycle -----------------------------------------------------------------
 
 
+class _BoundedServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a hard cap on concurrent handler threads.
+
+    Thread-per-connection with no bound lets any local process drive the
+    daemon to thousands of threads; over-capacity connections are closed
+    immediately instead (the single-user UI never needs this many).
+    """
+
+    MAX_WORKERS = 16
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._slots = threading.BoundedSemaphore(self.MAX_WORKERS)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 def build_server() -> ThreadingHTTPServer:
     """Create the control server bound to the contract port (not yet serving).
 
@@ -595,7 +860,7 @@ def build_server() -> ThreadingHTTPServer:
     _Handler.secret = api["secret"]
     _Handler.address = api["address"]
     _Handler.consumed = set()
-    return ThreadingHTTPServer((host, int(port)), _Handler)
+    return _BoundedServer((host, int(port)), _Handler)
 
 
 def start_in_thread() -> str | None:

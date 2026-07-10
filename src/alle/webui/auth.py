@@ -75,20 +75,22 @@ def verify_login_token(
     if token in consumed:
         return False
     consumed.add(token)
-    _expire_consumed(consumed, secret, now)
+    _expire_consumed(consumed, now)
     return True
 
 
-def _expire_consumed(consumed: set[str], secret: str, now: int) -> None:
+def _expire_consumed(consumed: set[str], now: int) -> None:
     """Drop consumed tokens whose validity window has passed (bounded memory)."""
-    for tok in list(consumed):
+    expired = set()
+    for tok in consumed:
         try:
             issued = int(_unb64(tok.split(".", 1)[0]).split(":")[1])
         except Exception:  # noqa: BLE001
-            consumed.discard(tok)
+            expired.add(tok)
             continue
         if now - issued > LOGIN_TTL:
-            consumed.discard(tok)
+            expired.add(tok)
+    consumed -= expired
 
 
 # ---- session cookie ------------------------------------------------------------
@@ -113,6 +115,17 @@ def verify_session(secret: str, cookie: str | None, *, now: int | None = None) -
     if expiry < now:
         return False
     return hmac.compare_digest(sig, _sign(secret, f"session:{expiry}"))
+
+
+# ---- readiness challenge ---------------------------------------------------
+
+
+def health_proof(secret: str, nonce: str) -> str:
+    """The HMAC answer to a readiness challenge — "the process on this port
+    really is alle" — proving possession of the installation secret without
+    sending it. The ``health:`` domain separation means a captured answer can
+    never be replayed as a login token or session cookie."""
+    return _sign(secret, f"health:{nonce}")
 
 
 # ---- bearer --------------------------------------------------------------------
