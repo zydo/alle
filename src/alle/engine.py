@@ -226,21 +226,33 @@ class Engine:
         grab one before a later sing-box (re)start — and sing-box treats a
         single unbindable inbound as fatal for the whole config. When a start
         fails that way, the stolen ports are reallocated and the apply retried
-        once; anything else (or a second failure) propagates to the caller.
+        once.
+
+        Raises :class:`singbox.ConfigRejectedError` when sing-box refuses the
+        generated config (deterministic — a timer retry cannot help, only a
+        state change can) and :class:`singbox.SingBoxRuntimeError` when a valid
+        config failed at runtime (environmental — worth retrying).
         """
         config, errors = self._build_config()
         self._errors = errors
         for ref, err in sorted(errors.items()):
             applog.log(f"reconcile: {ref}: {err}")
-        try:
-            changed = self.runner.apply(config)
-        except singbox.SingBoxError as e:
-            if not self._recover_stolen_ports(str(e)):
-                raise
+        result = self.runner.apply(config)
+        if result.outcome is singbox.ApplyOutcome.RUNTIME_FAILED and (
+            self._recover_stolen_ports(result.detail)
+        ):
             config, errors = self._build_config()  # store reloaded with new ports
             self._errors = errors
-            changed = self.runner.apply(config)  # a second failure propagates
-        if changed:
+            result = self.runner.apply(config)
+        if result.outcome is singbox.ApplyOutcome.REJECTED:
+            raise singbox.ConfigRejectedError(
+                result.detail or "sing-box rejected the generated config"
+            )
+        if result.outcome is singbox.ApplyOutcome.RUNTIME_FAILED:
+            raise singbox.SingBoxRuntimeError(
+                result.detail or "sing-box failed at runtime"
+            )
+        if result.outcome is singbox.ApplyOutcome.APPLIED:
             live = sum(1 for i in config["inbounds"] if i["tag"] != ROUTER_INBOUND_TAG)
             router = "+ router" if len(config["inbounds"]) > live else "no router"
             applog.log(f"reconciled sing-box: {live} channel(s) live, {router}")

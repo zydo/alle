@@ -401,9 +401,21 @@ def daemon_status(data: dict) -> str:
             lines.append(
                 f"  ⚠ CLI is {d['cli_version']} — run `alle restart` to match."
             )
+        lines.extend(_runtime_lines({"daemon": d}))
     else:
         lines.append("Daemon: not running.")
     return "\n".join(lines)
+
+
+def _runtime_lines(snapshot: dict) -> list[str]:
+    """A warning line when the daemon reports sing-box in a degraded state."""
+    rt = (snapshot.get("daemon") or {}).get("runtime") or {}
+    status = rt.get("singbox")
+    if status in {"crashed", "crash_looping", "config_rejected", "degraded"}:
+        label = str(status).replace("_", "-")
+        detail = rt.get("detail")
+        return [f"  ⚠ sing-box {label}" + (f": {detail}" if detail else "")]
+    return []
 
 
 def _skew_lines(snapshot: dict) -> list[str]:
@@ -421,7 +433,7 @@ def _skew_lines(snapshot: dict) -> list[str]:
 def status(snapshot: dict) -> str:
     channels = snapshot["channels"]
     if not snapshot["running"]:
-        lines = ["Alle - Inactive", *_skew_lines(snapshot)]
+        lines = ["Alle - Inactive", *_skew_lines(snapshot), *_runtime_lines(snapshot)]
         if channels:
             lines.append(
                 f"  ({snapshot['channel_count']} channel(s) across "
@@ -429,7 +441,7 @@ def status(snapshot: dict) -> str:
             )
         return "\n".join(lines)
 
-    lines = ["Alle - Active", *_skew_lines(snapshot)]
+    lines = ["Alle - Active", *_skew_lines(snapshot), *_runtime_lines(snapshot)]
     router = snapshot.get("router")
     if router:
         lines.append(f"  Router  {_router_where(router)} — {_router_mode(router)}")

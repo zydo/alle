@@ -1246,6 +1246,7 @@ def _daemon_info() -> dict:
         "cli_version": __version__,
         "skew": bool(dv and dv != __version__),
         "service_installed": daemonctl.is_installed(),
+        "runtime": (info or {}).get("runtime"),
     }
 
 

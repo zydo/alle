@@ -109,6 +109,19 @@ def test_status_inactive_with_channels_and_active_empty():
     assert "no channels yet" in active
 
 
+def test_status_surfaces_a_degraded_singbox_runtime():
+    snapshot = {
+        "running": True,
+        "channels": [],
+        "daemon": {"runtime": {"singbox": "crash_looping", "detail": "3 exits"}},
+    }
+    text = output.status(snapshot)
+    assert "⚠ sing-box crash-looping: 3 exits" in text
+    # a healthy runtime adds no warning line
+    snapshot["daemon"]["runtime"] = {"singbox": "ok", "detail": ""}
+    assert "sing-box" not in output.status(snapshot)
+
+
 def test_status_active_with_channel_rows(monkeypatch):
     monkeypatch.setattr(time, "time", lambda: 1_000)
 

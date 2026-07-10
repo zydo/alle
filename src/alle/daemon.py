@@ -36,6 +36,9 @@ PROBE_INTERVAL = 30.0  # how often each channel is probed
 METRICS_INTERVAL = 2.0  # how often traffic counters are sampled from the Clash API
 RECONCILE_RETRY = 60.0  # retry a *failed* reconcile this often, sans state change
 VERSION_CHECK = 30.0  # how often a supervised daemon checks for an upgraded package
+SUPERVISE_INTERVAL = 2.0  # how often sing-box liveness is checked (sans probes)
+CRASH_BACKOFF_MAX = 60.0  # cap between supervised restart attempts
+CRASH_RESET = 60.0  # this long alive after a crash forgets the crash history
 
 # What the applier's command line looks like: ensure_running() spawns
 # ``<python> -m alle applier``; a supervised or hand-run ``alle applier`` shows
@@ -51,19 +54,19 @@ def _info_path() -> Path:
     return paths.state_dir() / "applier.info.json"
 
 
-def _write_info() -> None:
+def _write_info(runtime: dict | None = None) -> None:
     """Record the running daemon's pid + version alongside the pidfile.
 
     Additive to the pidfile (old/new CLI↔daemon combos still parse each other):
     ``alle status`` reads the version here to warn about CLI↔daemon skew after
-    an upgrade.
+    an upgrade, and the optional ``runtime`` dict is how the loop surfaces a
+    degraded sing-box (``{"singbox": <status>, "detail": …}``).
     """
+    info = {"pid": os.getpid(), "version": __version__, "at": int(time.time())}
+    if runtime is not None:
+        info["runtime"] = runtime
     try:
-        _info_path().write_text(
-            json.dumps(
-                {"pid": os.getpid(), "version": __version__, "at": int(time.time())}
-            )
-        )
+        _info_path().write_text(json.dumps(info))
     except OSError:
         pass
 
@@ -299,7 +302,23 @@ def run_applier() -> None:
     signal.signal(signal.SIGINT, _handle)
 
     proc.write_pidfile(_pid_path(), os.getpid())
-    _write_info()
+
+    runtime_state: dict = {"cur": None}
+
+    def _set_runtime(status: str, detail: str = "") -> None:
+        """Publish the sing-box runtime status into the info file (on change).
+
+        Read back by ``alle status`` / the Web UI via :func:`daemon_info` —
+        this is where "degraded" and "crash-looping" become visible outside
+        the log. Detail is clipped to one line; the full text is in applog.
+        """
+        detail = detail.splitlines()[0][:200] if detail else ""
+        if runtime_state["cur"] == (status, detail):
+            return
+        runtime_state["cur"] = (status, detail)
+        _write_info({"singbox": status, "detail": detail})
+
+    _set_runtime("starting")
     supervised = bool(os.environ.get("ALLE_SERVICE"))
     last_stamp: tuple[int, int] | None = None
     sig = None
@@ -310,6 +329,11 @@ def run_applier() -> None:
     reconcile_ok = True
     reconcile_retry_at = 0.0
     read_error: str | None = None
+    expected_running = False  # a reconcile succeeded → sing-box should be up
+    last_supervise = float("-inf")
+    crashes = 0
+    last_crash_at = 0.0
+    next_restart_at = 0.0
     try:
         while not stop_flag["stop"]:
             now = time.monotonic()
@@ -341,11 +365,24 @@ def run_applier() -> None:
                     read_error = None
             # A failed reconcile is retried on a timer even when the state file
             # hasn't moved — the failure may be environmental (binary download
-            # offline, stolen port) and heal without a user edit.
+            # offline, stolen port) and heal without a user edit. A *rejected*
+            # config is deterministic (same state, same config, same refusal),
+            # so it is retried only on the next state change — never a storm.
             if sig != last_sig or (not reconcile_ok and now >= reconcile_retry_at):
                 try:
                     Engine(Store.load()).reconcile()
                     reconcile_ok = True
+                    expected_running = True
+                    _set_runtime("ok")
+                except singbox.ConfigRejectedError as e:
+                    reconcile_ok = False
+                    reconcile_retry_at = float("inf")
+                    applog.log(
+                        "reconcile: sing-box rejected the generated config — "
+                        f"keeping the last known-good one until state changes: {e}"
+                    )
+                    print(f"applier: config rejected: {e}", file=sys.stderr, flush=True)
+                    _set_runtime("config_rejected", str(e))
                 except Exception as e:  # noqa: BLE001 — one bad state must not kill the loop
                     reconcile_ok = False
                     reconcile_retry_at = now + RECONCILE_RETRY
@@ -355,7 +392,43 @@ def run_applier() -> None:
                     print(
                         f"applier: reconcile failed: {e}", file=sys.stderr, flush=True
                     )
+                    _set_runtime("degraded", str(e))
                 last_sig = sig
+
+            # Supervision: sing-box liveness independent of probes (which only
+            # *record* "stopped") — an unexpected exit is restarted with capped
+            # exponential backoff so a crash-looping config can't start a storm.
+            if now - last_supervise >= SUPERVISE_INTERVAL:
+                last_supervise = now
+                if singbox.Runner().is_running():
+                    if crashes and now - last_crash_at >= CRASH_RESET:
+                        crashes = 0  # stable again — forget the crash history
+                        _set_runtime("ok")
+                elif expected_running and now >= next_restart_at:
+                    crashes += 1
+                    last_crash_at = now
+                    delay = min(2.0 ** (crashes - 1), CRASH_BACKOFF_MAX)
+                    next_restart_at = now + delay
+                    _set_runtime(
+                        "crash_looping" if crashes >= 3 else "crashed",
+                        f"{crashes} unexpected exit(s); restarting",
+                    )
+                    applog.log(
+                        f"sing-box exited unexpectedly (crash {crashes}); "
+                        f"restarting (next attempt in {int(delay)}s if it "
+                        "crashes again)"
+                    )
+                    try:
+                        Engine(Store.load()).reconcile()
+                        applog.log("sing-box restarted after unexpected exit")
+                    except Exception as e:  # noqa: BLE001
+                        if singbox.Runner().is_running():
+                            applog.log(
+                                "sing-box restarted on the last known-good "
+                                f"config (desired config still failing: {e})"
+                            )
+                        else:
+                            applog.log(f"supervised restart failed: {e}")
             # Traffic sampling runs on its own faster cadence than probing: the
             # Clash API only reports live connections, so the more often we look
             # the fewer short-lived connections slip through between samples.

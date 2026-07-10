@@ -5,6 +5,7 @@ the signature never moves."""
 
 from __future__ import annotations
 
+import json
 import signal
 
 import pytest
@@ -96,6 +97,174 @@ def test_failed_reconcile_is_retried_without_a_state_change(monkeypatch):
         signal.signal(signal.SIGINT, old_int)
 
     assert len(calls) >= 2  # retried though the config signature never moved
+
+
+# ---- supervision: unexpected exit, crash loops, rejected configs ---------------
+
+
+def _run_loop(monkeypatch, engine_cls, runner_cls, *, step=2.1, sleeps=3):
+    """Drive run_applier with a fake clock stepping ``step``s per sleep and a
+    KeyboardInterrupt after ``sleeps`` iterations."""
+    from alle import singbox
+
+    class _Clock:
+        def __init__(self):
+            self.t = 0.0
+            self.sleeps = 0
+            self.info: dict = {}
+
+        def monotonic(self):
+            return self.t
+
+        def time(self):
+            return 1000.0
+
+        def sleep(self, _s):
+            self.sleeps += 1
+            self.t += step
+            if self.sleeps >= sleeps:
+                # snapshot before the loop's exit cleanup unlinks the file
+                self.info = json.loads(daemon._info_path().read_text())
+                raise KeyboardInterrupt
+
+    clock = _Clock()
+    monkeypatch.setattr("alle.engine.Engine", engine_cls)
+    monkeypatch.setattr(singbox, "Runner", runner_cls)
+    monkeypatch.setattr(daemon, "time", clock)
+    old = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            daemon.run_applier()
+    finally:
+        signal.signal(signal.SIGTERM, old[0])
+        signal.signal(signal.SIGINT, old[1])
+    return clock
+
+
+def test_supervision_restarts_an_unexpected_exit(monkeypatch):
+    """sing-box dying between probes is detected and restarted by the loop
+    itself — with the kill switch enabled, exactly the state where a dead
+    process means total outage."""
+    Store.load().set_killswitch(True)
+    world = {"running": False, "reconciles": 0}
+
+    class _Eng:
+        def __init__(self, store):
+            self.store = store
+
+        def reconcile(self):
+            world["reconciles"] += 1
+            world["running"] = True  # a reconcile brings sing-box up
+            return {}
+
+    class _Runner:
+        def is_running(self):
+            if world["reconciles"] == 1 and world["running"]:
+                world["running"] = False  # crash after the first reconcile
+                return True
+            return world["running"]
+
+        def connections(self):
+            return []
+
+    _run_loop(monkeypatch, _Eng, _Runner, sleeps=4)
+    assert world["reconciles"] >= 2  # initial apply + supervised restart
+    assert world["running"] is True  # recovered
+    log = _read_log()
+    assert "exited unexpectedly" in log and "restarted after unexpected exit" in log
+
+
+def test_supervision_backs_off_on_a_crash_loop(monkeypatch):
+    """A config that dies right after every start must not trigger a 1 Hz
+    restart storm: attempts space out exponentially, capped at 60s."""
+    world = {"reconciles": 0}
+
+    class _Eng:
+        def __init__(self, store):
+            self.store = store
+
+        def reconcile(self):
+            world["reconciles"] += 1
+            return {}  # "succeeds", but the process never stays up
+
+    class _Runner:
+        def is_running(self):
+            return False
+
+        def connections(self):
+            return []
+
+    clock = _run_loop(monkeypatch, _Eng, _Runner, step=2.0, sleeps=40)  # ~80 fake s
+    # 1 initial + crashes at ~0,2,4,8,16,32,64 fake-seconds ≈ 8 total; a
+    # storm would be ~40. Bounds are loose on purpose (tick alignment).
+    assert 4 <= world["reconciles"] <= 12
+    assert "crash 5" in _read_log()  # kept counting, kept backing off
+    assert clock.info["runtime"]["singbox"] == "crash_looping"
+
+
+def test_rejected_config_is_not_retried_on_the_timer(monkeypatch):
+    """A deterministic rejection waits for a state change instead of burning
+    the RECONCILE_RETRY timer on a config that cannot start."""
+    from alle import singbox
+
+    store = Store.load()
+    store.add_provider("nordvpn")
+    calls: list[int] = []
+
+    class _Eng:
+        def __init__(self, store):
+            self.store = store
+
+        def reconcile(self):
+            calls.append(1)
+            raise singbox.ConfigRejectedError("unknown field frobnicate")
+
+    class _Runner:
+        def is_running(self):
+            return False
+
+        def connections(self):
+            return []
+
+    info: dict = {}
+
+    class _Clock:
+        def __init__(self):
+            self.t = 0.0
+            self.sleeps = 0
+
+        def monotonic(self):
+            return self.t
+
+        def time(self):
+            return 1000.0
+
+        def sleep(self, _s):
+            self.sleeps += 1
+            self.t += daemon.RECONCILE_RETRY + 1  # far past any retry timer
+            if self.sleeps == 3:
+                # a real state change: the only thing that may retry a rejection
+                Store.load().add_channel("nordvpn", "US", "", dict(WG))
+            if self.sleeps >= 5:
+                # snapshot before the loop's exit cleanup unlinks the file
+                info.update(json.loads(daemon._info_path().read_text()))
+                raise KeyboardInterrupt
+
+    monkeypatch.setattr("alle.engine.Engine", _Eng)
+    monkeypatch.setattr(singbox, "Runner", _Runner)
+    monkeypatch.setattr(daemon, "time", _Clock())
+    old = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            daemon.run_applier()
+    finally:
+        signal.signal(signal.SIGTERM, old[0])
+        signal.signal(signal.SIGINT, old[1])
+
+    assert len(calls) == 2  # once at start, once after the state change — no storm
+    assert "rejected the generated config" in _read_log()
+    assert info["runtime"]["singbox"] == "config_rejected"
+    assert "frobnicate" in info["runtime"]["detail"]
 
 
 # ---- version info file + skew --------------------------------------------------

@@ -267,7 +267,7 @@ class _FakeRunner:
     def apply(self, config):
         self.applied.append(config)
         self._running = bool(config.get("inbounds"))
-        return True
+        return singbox.ApplyResult(singbox.ApplyOutcome.APPLIED)
 
     def is_running(self):
         return self._running
@@ -282,6 +282,34 @@ def test_reconcile_pushes_config():
     assert [i["tag"] for i in runner.applied[0]["inbounds"]] == ["in-nordvpn-us_1"]
 
 
+def test_reconcile_raises_on_a_rejected_generation():
+    class _RejectRunner:
+        def apply(self, config):
+            return singbox.ApplyResult(
+                singbox.ApplyOutcome.REJECTED, "unknown field frobnicate"
+            )
+
+    eng = Engine(Store.load())
+    eng.runner = cast(singbox.Runner, _RejectRunner())
+    with pytest.raises(singbox.ConfigRejectedError, match="frobnicate"):
+        eng.reconcile()
+
+
+def test_reconcile_raises_on_unrecoverable_runtime_failure():
+    class _DyingRunner:
+        def apply(self, config):
+            return singbox.ApplyResult(
+                singbox.ApplyOutcome.RUNTIME_FAILED, "exited immediately (code 1)"
+            )
+
+    eng = Engine(Store.load())
+    eng.runner = cast(singbox.Runner, _DyingRunner())
+    # no address-in-use ports to recover — the failure propagates for the
+    # daemon's timer retry
+    with pytest.raises(singbox.SingBoxRuntimeError, match="exited immediately"):
+        eng.reconcile()
+
+
 class _PortStealRunner:
     """Fails the first apply with sing-box's address-in-use error, then works."""
 
@@ -292,12 +320,13 @@ class _PortStealRunner:
     def apply(self, config):
         self.applied.append(config)
         if len(self.applied) == 1:
-            raise singbox.SingBoxError(
+            return singbox.ApplyResult(
+                singbox.ApplyOutcome.RUNTIME_FAILED,
                 "sing-box exited immediately (code 1); last log lines:\n"
                 "FATAL[0000] start service: start inbound/mixed[in-x]: listen tcp "
-                f"127.0.0.1:{self.stolen_port}: bind: address already in use"
+                f"127.0.0.1:{self.stolen_port}: bind: address already in use",
             )
-        return True
+        return singbox.ApplyResult(singbox.ApplyOutcome.APPLIED)
 
     def is_running(self):
         return True
