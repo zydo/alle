@@ -458,6 +458,66 @@ def test_provider_update_token_per_channel_failure_keeps_old_wg(monkeypatch):
     assert ch.wg["private_key"] == "keep"
 
 
+def test_provider_update_token_rolls_back_credential_when_commit_fails(monkeypatch):
+    """The credential and its re-resolved channels commit together: if the
+    state write (the commit point) fails, the journalled old token comes back."""
+    monkeypatch.setattr(service, "validate_provider_credentials", lambda p, c: None)
+    store = service.Store.load()
+    store.add_provider("nordvpn")
+    store.add_channel("nordvpn", "Japan", "", {"private_key": "keep", "peer": {}})
+    service.credentials.set_("nordvpn", {"token": "old"})
+    monkeypatch.setattr(
+        service,
+        "provider_resolver",
+        lambda p, c: lambda country, city="": {"private_key": "fresh", "peer": {}},
+    )
+
+    def boom(self, provider, wg_by_cid):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(service.Store, "update_channels_wg", boom)
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        service.provider_update_token("nordvpn", {"token": "new"})
+
+    # nothing half-applied: old token restored, old channel params intact
+    assert service.credentials.get("nordvpn") == {"token": "old"}
+    ch = service.Store.load().get_channel("nordvpn", "japan_1")
+    assert ch is not None and ch.wg["private_key"] == "keep"
+
+
+def test_provider_remove_rolls_back_credential_when_state_removal_fails(monkeypatch):
+    store = service.Store.load()
+    store.add_provider("nordvpn")
+    service.credentials.set_("nordvpn", {"token": "keep"})
+
+    def boom(self, providers):
+        raise RuntimeError("state write failed")
+
+    monkeypatch.setattr(service.Store, "remove_providers", boom)
+
+    with pytest.raises(RuntimeError, match="state write failed"):
+        service.provider_remove_many(["nordvpn"])
+
+    # the already-removed credential was rolled back with the failed removal
+    assert service.credentials.get("nordvpn") == {"token": "keep"}
+    assert service.Store.load().has_provider("nordvpn")
+
+
+def test_provider_add_token_rolls_back_credential_when_state_add_fails(monkeypatch):
+    monkeypatch.setattr(service, "validate_provider_credentials", lambda p, c: None)
+
+    def boom(self, provider):
+        raise RuntimeError("state write failed")
+
+    monkeypatch.setattr(service.Store, "add_provider", boom)
+
+    with pytest.raises(RuntimeError, match="state write failed"):
+        service.provider_add_token("nordvpn", {"token": "t"})
+
+    assert service.credentials.get("nordvpn") is None  # no orphan credential
+
+
 def test_provider_update_token_rejects_config_provider():
     store = service.Store.load()
     store.add_provider("protonvpn")

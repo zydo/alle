@@ -292,9 +292,12 @@ current token afterwards if the old one is dead.
 - **Forward compatibility:** a bundle with a `bundle_version` newer than the
   installed alle is refused with an upgrade hint rather than misparsed.
 - **Two files, one commit point:** credentials are written before state; the
-  state transaction is the commit that triggers the reconcile. A crash
-  between the two leaves only an orphaned credential, healed by re-running
-  the apply.
+  state transaction (a single transaction for the whole merge or replace) is
+  the commit that triggers the reconcile. The whole apply runs as a *setup
+  transaction*: the pre-apply credentials are journalled first, and any
+  failure — or a crash, healed automatically on the next setup change or
+  daemon start — rolls the credentials back, so an interrupted apply leaves
+  the setup exactly as it was.
 - **The daemon picks changes up automatically** — `import` ends by ensuring
   the runtime is up, so applying a bundle onto a fresh install starts serving
   without a separate `alle start`.

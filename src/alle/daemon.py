@@ -282,6 +282,16 @@ def run_applier() -> None:
     instance_lock.flush()
 
     try:
+        # A compound setup change (token update, bundle apply, …) that crashed
+        # before its commit point leaves a rollback journal; heal it before
+        # the first reconcile reads a half-changed setup.
+        from alle import txn
+
+        txn.recover()
+    except Exception as e:  # noqa: BLE001 — recovery is best-effort at startup
+        applog.log(f"setup-journal recovery failed: {e}")
+
+    try:
         # The always-on router entrypoint's contract port: allocated once, here,
         # so a fresh install gets its router on the first daemon start. The
         # resulting state change is picked up by the first reconcile below.

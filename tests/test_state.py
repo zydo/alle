@@ -3,6 +3,7 @@ probe round-trips, cascade removal, and the config signature."""
 
 from __future__ import annotations
 
+import json
 import stat
 
 import pytest
@@ -224,6 +225,157 @@ def test_non_object_state_is_quarantined():
     _state_file().write_text('["not", "an", "object"]')  # valid JSON, wrong shape
     assert Store.load().provider_names() == []
     assert len(list(paths.state_dir().glob("state.json.corrupt-*"))) == 1
+
+
+def test_malformed_container_schema_is_quarantined():
+    # Parses as JSON but the container shapes are unusable for read-modify-write:
+    # the same loud quarantine path as outright corruption, never a crash deep
+    # inside a mutation (or a partial rewrite around the bad shape).
+    _state_file().parent.mkdir(parents=True, exist_ok=True)
+    _state_file().write_text(json.dumps({"version": 1, "providers": ["nordvpn"]}))
+    assert Store.load().provider_names() == []
+    assert len(list(paths.state_dir().glob("state.json.corrupt-*"))) == 1
+
+
+def test_newer_state_version_aborts_instead_of_quarantining():
+    store = Store.load()
+    store.add_provider("nordvpn")
+    data = json.loads(_state_file().read_text())
+    data["version"] = 99  # written by a newer alle
+    _state_file().write_text(json.dumps(data))
+
+    with pytest.raises(StoreReadError, match="upgrade alle"):
+        Store.load()
+    # a mutation aborts before writing anything…
+    with pytest.raises(StoreReadError, match="upgrade alle"):
+        Store().add_provider("protonvpn")
+    # …and the file is neither quarantined nor rewritten — the data is fine,
+    # this alle just must not touch it.
+    assert list(paths.state_dir().glob("state.json.corrupt-*")) == []
+    assert json.loads(_state_file().read_text())["version"] == 99
+
+
+def test_channel_writes_never_resurrect_a_missing_provider():
+    store = Store.load()
+    with pytest.raises(ValueError, match="not added"):
+        store.add_channel("nordvpn", "US", "", dict(WG))
+    with pytest.raises(ValueError, match="not added"):
+        store.upsert_channel("protonvpn", "p1", "", "", dict(WG))
+    assert Store.load().provider_names() == []  # nothing created implicitly
+
+
+def test_remove_providers_is_all_or_nothing():
+    store = Store.load()
+    store.add_provider("nordvpn")
+    store.add_provider("protonvpn")
+    ch = store.add_channel("nordvpn", "US", "", dict(WG))
+    store.upsert_channel("protonvpn", "p1", "", "", dict(WG))
+    _rule(store, "domain_suffix", "netflix.com", f"nordvpn/{ch.id}")
+
+    # One provider's channel is still referenced → the whole batch is refused,
+    # including the unreferenced provider.
+    with pytest.raises(ReferencedError):
+        store.remove_providers(["protonvpn", "nordvpn"])
+    assert Store.load().provider_names() == ["nordvpn", "protonvpn"]
+
+
+def test_remove_channels_is_all_or_nothing():
+    store = Store.load()
+    store.add_provider("nordvpn")
+    ch1 = store.add_channel("nordvpn", "US", "", dict(WG))
+    ch2 = store.add_channel("nordvpn", "Japan", "", dict(WG))
+    _rule(store, "domain_suffix", "netflix.com", f"nordvpn/{ch2.id}")
+
+    with pytest.raises(ReferencedError):
+        store.remove_channels([("nordvpn", ch1.id), ("nordvpn", ch2.id)])
+    assert {c.id for c in Store.load().channels()} == {ch1.id, ch2.id}
+
+
+def test_update_channels_wg_commits_the_whole_batch():
+    store = Store.load()
+    store.add_provider("nordvpn")
+    ch1 = store.add_channel("nordvpn", "US", "", dict(WG))
+    ch2 = store.add_channel("nordvpn", "Japan", "", dict(WG))
+    fresh = dict(WG, private_key="FRESH=")
+
+    updated = store.update_channels_wg(
+        "nordvpn", {ch1.id: dict(fresh), ch2.id: dict(fresh), "ghost_1": dict(fresh)}
+    )
+
+    assert sorted(updated) == sorted([ch1.id, ch2.id])  # ghost skipped, not fatal
+    reloaded = Store.load()
+    for cid in (ch1.id, ch2.id):
+        got = reloaded.get_channel("nordvpn", cid)
+        assert got is not None
+        assert got.wg["private_key"] == "FRESH="
+
+
+def test_merge_setup_upserts_and_appends_in_one_pass():
+    store = Store.load()
+    store.add_provider("nordvpn")
+    ch = store.add_channel("nordvpn", "US", "", dict(WG), label="US East")
+    old_port = ch.port
+    store.set_reconnect("nordvpn", ch.id, {"state": "give-up"})
+    store.create_ruleset("Existing", "direct", [("domain_suffix", "a.com")])
+
+    summary = store.merge_setup(
+        {
+            "nordvpn": {
+                ch.id: {
+                    "country": "US",
+                    "city": "",
+                    "label": "",
+                    "wg": dict(WG, private_key="NEW="),
+                },
+            },
+            "protonvpn": {
+                "p1": {"country": "", "city": "", "label": "", "wg": dict(WG)},
+            },
+        },
+        [
+            {
+                "name": "Imported",
+                "target": "block",
+                "matchers": [("domain", "b.example.com")],
+            }
+        ],
+        killswitch=None,
+        lan_direct=None,
+    )
+
+    assert summary["providers_added"] == ["protonvpn"]
+    assert summary["updated"] == [f"nordvpn/{ch.id}"]
+    assert summary["created"] == ["protonvpn/p1"]
+    assert summary["rulesets_added"] == ["Imported"]
+
+    reloaded = Store.load()
+    got = reloaded.get_channel("nordvpn", ch.id)
+    assert got is not None
+    assert got.port == old_port  # the local port contract survives an update
+    assert got.label == "US East"  # no label in the spec → the user's naming stays
+    assert got.reconnect == {}  # an import is human intervention: retry fresh
+    assert got.wg["private_key"] == "NEW="
+    # imported rulesets append at the BOTTOM of the priority order
+    assert [b["name"] for b in reloaded.rulesets()] == ["Existing", "Imported"]
+    assert reloaded.router["killswitch"] is False  # None toggles change nothing
+
+
+def test_merge_setup_unchanged_channel_is_reported_not_rewritten():
+    store = Store.load()
+    store.add_provider("nordvpn")
+    ch = store.add_channel("nordvpn", "US", "", dict(WG))
+    summary = store.merge_setup(
+        {
+            "nordvpn": {
+                ch.id: {"country": "US", "city": "", "label": "", "wg": dict(WG)}
+            }
+        },
+        [],
+        killswitch=None,
+        lan_direct=None,
+    )
+    assert summary["unchanged"] == [f"nordvpn/{ch.id}"]
+    assert summary["updated"] == [] and summary["created"] == []
 
 
 def test_unreadable_state_aborts_instead_of_reading_empty():

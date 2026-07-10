@@ -80,6 +80,13 @@ def seed():
     return Store.load(), ch
 
 
+def channel(store: Store, provider: str, cid: str):
+    """The channel, asserted present — keeps attribute access type-safe."""
+    ch = store.get_channel(provider, cid)
+    assert ch is not None
+    return ch
+
+
 # ---- export ---------------------------------------------------------------------
 
 
@@ -205,13 +212,13 @@ router:
 
 def test_restore_roundtrip_keeps_ports_and_replaces_setup():
     store, ch = seed()
-    old_port = store.get_channel("nordvpn", ch.id).port
+    old_port = channel(store, "nordvpn", ch.id).port
     text = bundle.dumps(bundle.export_bundle())
 
     summary = bundle.apply_restore(text)
 
     after = Store.load()
-    restored = after.get_channel("nordvpn", ch.id)
+    restored = channel(after, "nordvpn", ch.id)
     assert restored.port == old_port  # same identity on the same machine
     assert restored.label == "US East"
     assert restored.probe == {} and restored.reconnect == {}  # runtime state reset
@@ -258,7 +265,7 @@ def test_restore_allocates_fresh_ports_for_new_identities(monkeypatch):
 
 def test_import_upserts_by_provider_and_id(monkeypatch):
     store, ch = seed()
-    old_port = store.get_channel("protonvpn", "proton_us_1").port
+    old_port = channel(store, "protonvpn", "proton_us_1").port
     data = bundle.export_bundle()
     # config channel: the snapshot IS the config — an edited one applies in place
     proton = data["providers"]["protonvpn"]["channels"]["proton_us_1"]
@@ -272,10 +279,10 @@ def test_import_upserts_by_provider_and_id(monkeypatch):
     summary = bundle.apply_import(bundle.dumps(data))
 
     after = Store.load()
-    updated = after.get_channel("protonvpn", "proton_us_1")
+    updated = channel(after, "protonvpn", "proton_us_1")
     assert updated.wg["peer"]["endpoint_host"] == "9.9.9.9"
     assert updated.port == old_port  # update in place, port kept
-    fresh = after.get_channel("nordvpn", "fresh_1")
+    fresh = channel(after, "nordvpn", "fresh_1")
     assert fresh.country == "Sweden"
     assert fresh.wg["peer"]["endpoint_host"] == "8.8.8.8"
     assert summary["channels"]["updated"] == ["protonvpn/proton_us_1"]
@@ -305,6 +312,73 @@ def test_import_reports_credential_replacement():
     summary = bundle.apply_import(text)
     assert summary["credentials"]["replaced"] == ["nordvpn"]
     assert credentials.get("nordvpn") == {"token": "tok-123"}
+
+
+def test_import_commits_state_in_one_transaction(monkeypatch):
+    from contextlib import contextmanager
+
+    from alle import state
+
+    seed()
+    data = bundle.export_bundle()
+    data["providers"]["nordvpn"]["channels"]["fresh_1"] = {
+        "country": "Sweden",
+        "city": "",
+        "wg": wg("7.7.7.7"),
+    }
+    monkeypatch.setattr(bundle, "provider_resolver", _factory("8.8.8.8"))
+
+    opened = []
+    real = state.transaction
+
+    @contextmanager
+    def counting():
+        opened.append(1)
+        with real() as raw:
+            yield raw
+
+    monkeypatch.setattr(state, "transaction", counting)
+    bundle.apply_import(bundle.dumps(data))
+
+    # providers, channels, rulesets, and toggles all land in ONE state
+    # transaction — the merge's commit point, never a mutation sequence.
+    assert len(opened) == 1
+
+
+def test_import_failure_before_commit_leaves_setup_untouched(monkeypatch):
+    seed()
+    data = bundle.export_bundle()
+    data["providers"]["nordvpn"]["credential"] = {"token": "tok-456"}
+    before_state = Store.load().data
+
+    def boom(self, providers, rulesets, killswitch, lan_direct):
+        raise RuntimeError("state write failed")
+
+    monkeypatch.setattr(Store, "merge_setup", boom)
+
+    with pytest.raises(RuntimeError, match="state write failed"):
+        bundle.apply_import(bundle.dumps(data))
+
+    # the already-written credential was rolled back with the failed merge
+    assert credentials.get("nordvpn") == {"token": "tok-123"}
+    assert Store.load().data == before_state
+
+
+def test_restore_failure_before_commit_leaves_credentials_untouched(monkeypatch):
+    seed()
+    data = bundle.export_bundle()
+    data["providers"]["nordvpn"]["credential"] = {"token": "tok-456"}
+
+    def boom(self, providers, rulesets, killswitch, lan_direct):
+        raise RuntimeError("state write failed")
+
+    monkeypatch.setattr(Store, "restore_setup", boom)
+
+    with pytest.raises(RuntimeError, match="state write failed"):
+        bundle.apply_restore(bundle.dumps(data))
+
+    assert credentials.get("nordvpn") == {"token": "tok-123"}
+    assert Store.load().provider_names() == ["nordvpn", "protonvpn"]
 
 
 def test_import_into_empty_state_creates_providers(monkeypatch):
@@ -351,16 +425,15 @@ def test_fresh_resolve_wins_over_snapshot_and_derives_once(monkeypatch):
     # both nord channels resolved fresh; the account key was derived once
     assert factories == [("nordvpn", {"token": "tok-123"})]
     after = Store.load()
-    assert after.get_channel("nordvpn", ch.id).wg["peer"]["endpoint_host"] == "7.7.7.7"
+    assert channel(after, "nordvpn", ch.id).wg["peer"]["endpoint_host"] == "7.7.7.7"
     assert (
-        after.get_channel("nordvpn", "sweden_1").wg["peer"]["endpoint_host"]
-        == "7.7.7.7"
+        channel(after, "nordvpn", "sweden_1").wg["peer"]["endpoint_host"] == "7.7.7.7"
     )
     assert summary["wg_resolved"] == [f"nordvpn/{ch.id}", "nordvpn/sweden_1"]
     assert summary["wg_fallback"] == []
     # the config channel is applied exactly as exported — never resolved
     assert (
-        after.get_channel("protonvpn", "proton_us_1").wg["peer"]["endpoint_host"]
+        channel(after, "protonvpn", "proton_us_1").wg["peer"]["endpoint_host"]
         == "5.6.7.8"
     )
 
@@ -374,7 +447,7 @@ def test_existing_channel_same_location_keeps_live_params_without_api(monkeypatc
     monkeypatch.setattr(bundle, "provider_resolver", _factory_forbidden)
     summary = bundle.apply_import(bundle.dumps(data))
 
-    live = Store.load().get_channel("nordvpn", ch.id)
+    live = channel(Store.load(), "nordvpn", ch.id)
     assert live.wg["peer"]["endpoint_host"] == "1.2.3.4"  # live params kept
     assert f"nordvpn/{ch.id}" in summary["channels"]["unchanged"]
     assert summary["wg_resolved"] == [] and summary["wg_fallback"] == []
@@ -388,7 +461,7 @@ def test_token_resolve_failure_falls_back_to_snapshot(monkeypatch):
     monkeypatch.setattr(bundle, "provider_resolver", _factory_down)
     summary = bundle.apply_restore(text)
 
-    nord = Store.load().get_channel("nordvpn", "united_states_1")
+    nord = channel(Store.load(), "nordvpn", "united_states_1")
     assert nord.wg["peer"]["endpoint_host"] == "1.2.3.4"  # the snapshot
     assert summary["wg_fallback"] == ["nordvpn/united_states_1"]
     assert summary["wg_resolved"] == []
@@ -410,7 +483,7 @@ def test_token_snapshot_with_credential_falls_back_when_api_down(monkeypatch):
     monkeypatch.setattr(bundle, "provider_resolver", _factory_down)
     summary = bundle.apply_restore(bundle.dumps(data))
     assert summary["wg_fallback"] == ["nordvpn/sweden_1"]
-    ch = Store.load().get_channel("nordvpn", "sweden_1")
+    ch = channel(Store.load(), "nordvpn", "sweden_1")
     assert ch.wg["peer"]["endpoint_host"] == "3.3.3.3"
 
 
@@ -451,8 +524,7 @@ def test_wgless_channel_resolves_via_token_and_matchers_infer(monkeypatch):
     assert summary["wg_resolved"] == ["nordvpn/sweden_1"]
     after = Store.load()
     assert (
-        after.get_channel("nordvpn", "sweden_1").wg["peer"]["endpoint_host"]
-        == "7.7.7.7"
+        channel(after, "nordvpn", "sweden_1").wg["peer"]["endpoint_host"] == "7.7.7.7"
     )
     types = [(r["type"], r["value"]) for r in after.rules()]
     assert types == [
@@ -472,7 +544,7 @@ def test_wgless_channel_keeps_existing_params_when_location_unchanged(monkeypatc
     summary = bundle.apply_import(HANDWRITTEN)
     assert summary["channels"]["unchanged"] == ["nordvpn/sweden_1"]
     assert (
-        Store.load().get_channel("nordvpn", "sweden_1").wg["peer"]["endpoint_host"]
+        channel(Store.load(), "nordvpn", "sweden_1").wg["peer"]["endpoint_host"]
         == "6.6.6.6"
     )
 

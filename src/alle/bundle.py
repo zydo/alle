@@ -45,7 +45,7 @@ import copy
 
 import yaml
 
-from alle import credentials, metrics, routes, wgconf
+from alle import credentials, metrics, routes, txn, wgconf
 from alle.providers import (
     ProviderError,
     WireGuardResolver,
@@ -730,18 +730,15 @@ def _resolve_token_wg(
     return resolved, fallback
 
 
-def _channel_unchanged(existing, ch: dict) -> bool:
-    return (
-        existing is not None
-        and existing.country == ch["country"]
-        and existing.city == ch["city"]
-        and existing.wg == ch["wg"]
-        and (not ch["label"] or existing.label == ch["label"])
-    )
-
-
 def apply_import(text: str) -> dict:
-    """Merge a bundle into the current setup (upsert by ``(provider, id)``)."""
+    """Merge a bundle into the current setup (upsert by ``(provider, id)``).
+
+    All-or-nothing: validation + network resolution stage everything first,
+    then the whole merge commits as credentials writes + ONE state
+    transaction (:meth:`Store.merge_setup`) inside a setup transaction — a
+    failure or crash anywhere before the state commit rolls the credentials
+    back and leaves the setup untouched.
+    """
     data = loads(text)
     store = Store.load()
     existing_refs = {f"{c.provider}/{c.id}" for c in store.channels()}
@@ -755,47 +752,34 @@ def apply_import(text: str) -> dict:
         parsed, store, stored_credentials_ok=True
     )
 
-    providers_added: list[str] = []
     creds_added: list[str] = []
     creds_replaced: list[str] = []
-    created: list[str] = []
-    updated: list[str] = []
-    unchanged: list[str] = []
-    for provider, entry in parsed["providers"].items():
-        if not store.has_provider(provider):
-            providers_added.append(provider)
-            store.add_provider(provider)
-        if entry["credential"] is not None:
-            old = credentials.get(provider)
-            if old != entry["credential"]:
-                (creds_added if old is None else creds_replaced).append(provider)
-                credentials.set_(provider, entry["credential"])
-        for cid, ch in entry["channels"].items():
-            ref = f"{provider}/{cid}"
-            if _channel_unchanged(store.get_channel(provider, cid), ch):
-                unchanged.append(ref)
-                continue
-            _, was_created = store.upsert_channel(
-                provider, cid, ch["country"], ch["city"], ch["wg"], ch["label"]
-            )
-            (created if was_created else updated).append(ref)
-
     router = parsed["router"]
-    rulesets_added = [
-        store.create_ruleset(block["name"], block["target"], block["matchers"])["name"]
-        for block in (router["rulesets"] or [])
-    ]
-    if router["killswitch"] is not None:
-        store.set_killswitch(router["killswitch"])
-    if router["lan_direct"] is not None:
-        store.set_lan_direct(router["lan_direct"])
+    with txn.setup_transaction("bundle import") as t:
+        for provider, entry in parsed["providers"].items():
+            if entry["credential"] is not None:
+                old = credentials.get(provider)
+                if old != entry["credential"]:
+                    (creds_added if old is None else creds_replaced).append(provider)
+                    credentials.set_(provider, entry["credential"])
+        merged = store.merge_setup(
+            {p: e["channels"] for p, e in parsed["providers"].items()},
+            router["rulesets"] or [],
+            killswitch=router["killswitch"],
+            lan_direct=router["lan_direct"],
+        )
+        t.commit()
 
     return {
         "mode": "import",
-        "providers_added": providers_added,
+        "providers_added": merged["providers_added"],
         "credentials": {"added": creds_added, "replaced": creds_replaced},
-        "channels": {"created": created, "updated": updated, "unchanged": unchanged},
-        "rulesets_added": rulesets_added,
+        "channels": {
+            "created": merged["created"],
+            "updated": merged["updated"],
+            "unchanged": merged["unchanged"],
+        },
+        "rulesets_added": merged["rulesets_added"],
         "wg_resolved": wg_resolved,
         "wg_fallback": wg_fallback,
         "killswitch": router["killswitch"],
@@ -857,24 +841,28 @@ def apply_restore(text: str) -> dict:
     old_providers = set(store.provider_names())
     old_channels = {f"{c.provider}/{c.id}" for c in store.channels()}
 
-    # Credentials first, then state: the state transaction is the commit
-    # point (it moves config_signature and triggers the reconcile). A crash
-    # between the two leaves only replaced credentials, healed by re-running
-    # the restore — the two files have no shared transaction today.
-    credentials.replace_all(
-        {
-            provider: entry["credential"]
-            for provider, entry in parsed["providers"].items()
-            if entry["credential"] is not None
-        }
-    )
+    # Credentials first (journalled — rolled back on any failure or crash),
+    # then state in ONE transaction: the commit point (it moves
+    # config_signature and triggers the reconcile). Metrics cleanup is
+    # best-effort post-commit work.
     router = parsed["router"]
-    store.restore_setup(
-        {p: e["channels"] for p, e in parsed["providers"].items()},
-        router["rulesets"] or [],
-        killswitch=bool(router["killswitch"]),
-        lan_direct=router["lan_direct"] if router["lan_direct"] is not None else True,
-    )
+    with txn.setup_transaction("bundle restore") as t:
+        credentials.replace_all(
+            {
+                provider: entry["credential"]
+                for provider, entry in parsed["providers"].items()
+                if entry["credential"] is not None
+            }
+        )
+        store.restore_setup(
+            {p: e["channels"] for p, e in parsed["providers"].items()},
+            router["rulesets"] or [],
+            killswitch=bool(router["killswitch"]),
+            lan_direct=router["lan_direct"]
+            if router["lan_direct"] is not None
+            else True,
+        )
+        t.commit()
     new_channels = {
         f"{provider}/{cid}"
         for provider, entry in parsed["providers"].items()

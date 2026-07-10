@@ -35,6 +35,7 @@ that assumption fails. (Tracked as backlog: per-installation proxy auth.)
 | Web UI secret | `~/.alle/control_api.json` | `0600` |
 | sing-box stats secret | `~/.alle/clash_api.json` | `0600` |
 | Setup bundles (`alle export`) | wherever you save them | `0600` on export; **the file is a secret** |
+| Setup rollback journal | `~/.alle/setup-journal.json` | `0600`, transient — holds the pre-change credentials while a compound setup change (token update, bundle apply, provider removal) is in flight, and is used to roll them back if the change fails or crashes before committing |
 
 ## The Web UI
 

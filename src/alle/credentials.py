@@ -9,17 +9,20 @@ preview of secret values, never the raw credential.
 
 from __future__ import annotations
 
-import os
-import tempfile
+from contextlib import contextmanager
 
 import yaml
 
-from alle import paths
+from alle import fsio, paths
 from alle.state import StoreReadError, _quarantine
 
 
 def _path():
     return paths.state_dir() / "credentials.yaml"
+
+
+def _lock_path():
+    return paths.state_dir() / "credentials.lock"
 
 
 def _load_all() -> dict[str, dict]:
@@ -46,30 +49,44 @@ def _load_all() -> dict[str, dict]:
 
 
 def _save_all(providers: dict[str, dict]) -> None:
-    p = _path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    header = "# Managed by alle. Provider login credentials — keep this file private.\n"
-    # mkstemp creates the temp file 0600 from the first byte — never a window
-    # where secrets sit under the default (usually world-readable) umask mode —
-    # and the atomic rename means a crash mid-write keeps the previous file.
-    fd, tmp = tempfile.mkstemp(
-        dir=str(p.parent), prefix=".credentials-", suffix=".yaml"
-    )
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(header)
-            yaml.safe_dump(
-                {"providers": providers}, f, sort_keys=False, default_flow_style=False
-            )
-        os.replace(tmp, p)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+    # mkstemp (inside write_durably) creates the temp file 0600 from the first
+    # byte — never a window where secrets sit under the default (usually
+    # world-readable) umask mode — and the fsync + atomic rename mean a crash
+    # at any point keeps a complete file (previous or new).
+    def dump(f):
+        f.write(
+            "# Managed by alle. Provider login credentials — keep this file private.\n"
+        )
+        yaml.safe_dump(
+            {"providers": providers}, f, sort_keys=False, default_flow_style=False
+        )
+
+    fsio.write_durably(_path(), dump, prefix=".credentials-", suffix=".yaml")
+
+
+@contextmanager
+def transaction():
+    """Exclusive read-modify-write of credentials.yaml under an OS file lock.
+
+    Yields the mutable ``{provider: creds}`` dict; whatever it looks like on
+    exit is written back atomically. Serialises concurrent writers (CLI and
+    Web UI mutations) so neither loses the other's update — the same contract
+    as :func:`alle.state.transaction`, on its own lock file.
+    """
+    with fsio.locked(_lock_path()):
+        data = _load_all()
+        yield data
+        _save_all(data)
 
 
 def get(provider: str) -> dict | None:
     """The stored credential dict for a provider, or None if not configured."""
     return _load_all().get(provider)
+
+
+def snapshot() -> dict[str, dict]:
+    """The whole stored mapping — the setup-transaction journal's rollback copy."""
+    return _load_all()
 
 
 def clean(creds: dict) -> dict:
@@ -81,9 +98,8 @@ def clean(creds: dict) -> dict:
 
 def set_(provider: str, creds: dict) -> None:
     """Store (or replace) a provider's credentials, stripping surrounding space."""
-    data = _load_all()
-    data[provider] = clean(creds)
-    _save_all(data)
+    with transaction() as data:
+        data[provider] = clean(creds)
 
 
 def replace_all(providers: dict[str, dict]) -> None:
@@ -92,17 +108,15 @@ def replace_all(providers: dict[str, dict]) -> None:
     The bundle-restore path: a restore is declarative, so providers absent
     from ``providers`` lose their stored credential.
     """
-    _save_all({provider: clean(creds) for provider, creds in providers.items()})
+    with transaction() as data:
+        data.clear()
+        data.update({provider: clean(creds) for provider, creds in providers.items()})
 
 
 def remove(provider: str) -> bool:
     """Forget a provider's credentials. True if anything was removed."""
-    data = _load_all()
-    if provider not in data:
-        return False
-    del data[provider]
-    _save_all(data)
-    return True
+    with transaction() as data:
+        return data.pop(provider, None) is not None
 
 
 def configured() -> list[str]:

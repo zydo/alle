@@ -24,6 +24,7 @@ from alle import (
     routes,
     singbox,
     throughput,
+    txn,
     wgconf,
 )
 from alle.engine import Engine
@@ -107,8 +108,12 @@ def provider_add_token(provider: str, creds: dict) -> dict:
     store = Store.load()
     if is_functional(provider):
         validate_provider_credentials(provider, creds)
-    credentials.set_(provider, creds)
-    store.add_provider(provider)
+    # Credential + provider entry commit together: the journal rolls the
+    # credential back if the state write (the commit point) never happens.
+    with txn.setup_transaction(f"add provider {provider}") as t:
+        credentials.set_(provider, creds)
+        store.add_provider(provider)
+        t.commit()
     applog.log(f"added provider {provider}")
     return {
         "provider": provider,
@@ -120,40 +125,39 @@ def provider_add_token(provider: str, creds: dict) -> dict:
     }
 
 
-def _refresh_token_channels(provider: str, creds: dict) -> dict:
-    """Re-resolve every token channel's WireGuard params after a token change.
+def _resolve_token_channels(
+    provider: str, creds: dict
+) -> tuple[dict[str, dict], list[str]]:
+    """Resolve fresh WireGuard params for every token channel via ``creds``.
 
     A token channel's ``wg`` is *derived* from (provider, token, location), so a
     new token means the previously-picked servers were selected with a credential
     that may no longer be valid. Resolve each channel afresh through the new
     token, in one pass, reusing the shared resolver (account key derived once).
 
-    A per-channel resolve failure is non-fatal: the channel keeps its existing
-    ``wg`` (so it stays usable) and the daemon's probe + auto-reconnect refresh it
-    later — the same healing path the bundle apply relies on. Returns
-    ``{"resolved": [ids…], "failed": [ids…]}`` (channel ids, provider implied).
+    Pure staging — writes nothing; the caller commits the results together with
+    the credential. A per-channel resolve failure is non-fatal: the channel is
+    reported in ``failed``, keeps its existing ``wg`` (so it stays usable), and
+    the daemon's probe + auto-reconnect refresh it later — the same healing
+    path the bundle apply relies on. Returns ``({cid: wg, …}, [failed ids])``.
     """
-    store = Store.load()
-    channels = store.provider_channels(provider)
-    resolved: list[str] = []
+    channels = Store.load().provider_channels(provider)
+    wg_by_cid: dict[str, dict] = {}
     failed: list[str] = []
     if not channels:
-        return {"resolved": resolved, "failed": failed}
+        return wg_by_cid, failed
     try:
         resolve = provider_resolver(provider, creds)
     except ProviderError:
         # The token just validated, so a resolver-build failure here is unusual;
         # treat every channel as "couldn't refresh" rather than crash the update.
-        return {"resolved": resolved, "failed": [ch.id for ch in channels]}
+        return wg_by_cid, [ch.id for ch in channels]
     for ch in channels:
         try:
-            wg = resolve(ch.country or "", ch.city or "")
+            wg_by_cid[ch.id] = resolve(ch.country or "", ch.city or "")
         except ProviderError:
             failed.append(ch.id)
-            continue
-        store.update_channel_wg(provider, ch.id, wg)
-        resolved.append(ch.id)
-    return {"resolved": resolved, "failed": failed}
+    return wg_by_cid, failed
 
 
 def provider_update_token(provider: str, creds: dict) -> dict:
@@ -162,9 +166,11 @@ def provider_update_token(provider: str, creds: dict) -> dict:
 
     The new token is validated **before** anything is written, so a bad token
     leaves the old one in place (the failure surfaces as a ``ProviderError``).
-    After the credential is stored, every dependent token channel is re-resolved
-    through the new token (see :func:`_refresh_token_channels`). Config providers
-    have no token and are rejected.
+    Every dependent token channel is then re-resolved through the new token
+    (see :func:`_resolve_token_channels`) *before* the write, and the
+    credential + all re-resolved channels commit in one setup transaction —
+    a crash can never persist the new token with only some of its derived
+    channels. Config providers have no token and are rejected.
     """
     store = Store.load()
     if not store.has_provider(provider):
@@ -190,8 +196,15 @@ def provider_update_token(provider: str, creds: dict) -> dict:
         }
     if is_functional(provider):
         validate_provider_credentials(provider, creds)  # raises → old token kept
-    credentials.set_(provider, creds)
-    channels = _refresh_token_channels(provider, creds)
+    # Stage first (network, no writes), then commit credential + every
+    # re-resolved channel together: one state transaction is the commit point,
+    # and the setup journal rolls the credential back if it never happens.
+    wg_by_cid, failed = _resolve_token_channels(provider, creds)
+    with txn.setup_transaction(f"update {provider} token") as t:
+        credentials.set_(provider, creds)
+        resolved = Store.load().update_channels_wg(provider, wg_by_cid)
+        t.commit()
+    channels = {"resolved": resolved, "failed": failed}
     daemon.ensure_running()
     applog.log(
         f"updated provider {provider} token "
@@ -311,20 +324,24 @@ def provider_remove_many(providers: list[str], dry_run: bool = False) -> dict:
     if dry_run:
         return {"providers": planned, "dry_run": True}
 
-    store = Store.load()
-    for item in planned:
-        provider = item["provider"]
-        # Store first: if a later step fails, the leftover is a stray credential
-        # on disk (which re-adding repairs), never a provider that is still
-        # listed but has silently lost its credential.
+    names = [item["provider"] for item in planned]
+    # All-or-nothing: credentials go first (journalled — rolled back if the
+    # state removal fails), then the whole batch is removed in ONE state
+    # transaction, the commit point. The setup lock also means a concurrent
+    # `providers add` cannot interleave and resurrect a half-removed provider.
+    with txn.setup_transaction(f"remove provider(s) {', '.join(names)}") as t:
+        for provider in names:
+            credentials.remove(provider)
         try:
-            store.remove_provider(provider)
+            Store.load().remove_providers(names)
         except ReferencedError as e:  # rule added between plan and removal
             raise _blockers_error(e.blockers) from e
-        credentials.remove(provider)
-        metrics.remove_provider(provider)
+        t.commit()
+    for item in planned:
+        metrics.remove_provider(item["provider"])
         applog.log(
-            f"removed provider {provider} ({item['channels_removed']} channel(s))"
+            f"removed provider {item['provider']} "
+            f"({item['channels_removed']} channel(s))"
         )
     daemon.ensure_running()
     return {"providers": planned, "dry_run": False}
@@ -650,11 +667,15 @@ def channel_remove_many(
     if dry_run:
         return {"channels": planned, "dry_run": True}
 
+    # The whole batch is removed in ONE state transaction (all-or-nothing):
+    # a rule added between plan and removal blocks the batch, never half of it.
+    try:
+        Store.load().remove_channels(
+            [(item["provider"], item["channel"]) for item in planned]
+        )
+    except ReferencedError as e:
+        raise _blockers_error(e.blockers) from e
     for item in planned:
-        try:
-            Store.load().remove_channel(item["provider"], item["channel"])
-        except ReferencedError as e:  # rule added between plan and removal
-            raise _blockers_error(e.blockers) from e
         metrics.remove_channel(item["provider"], item["channel"])
         applog.log(f"removed channel {item['provider']}/{item['channel']}")
     daemon.ensure_running()

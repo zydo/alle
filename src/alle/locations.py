@@ -17,6 +17,7 @@ import sys
 import time
 from pathlib import Path
 
+from alle import fsio
 from alle.providers import PROVIDERS
 
 MAX_AGE_SECONDS = 24 * 3600  # 1 day; force a refresh sooner with `--refresh`
@@ -45,8 +46,15 @@ def write(root: Path, provider: str) -> dict:
         "countries": dict(sorted(countries.items())),
     }
     p = path_for(root, provider)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(out, indent=2, ensure_ascii=False) + "\n")
+    # Locked + atomic: two concurrent refreshes serialise (last complete write
+    # wins) and a reader never sees a torn file.
+    with fsio.locked(p.parent / ".locations.lock"):
+        fsio.write_durably(
+            p,
+            lambda f: f.write(json.dumps(out, indent=2, ensure_ascii=False) + "\n"),
+            prefix=f".{provider}-",
+            suffix=".json",
+        )
     return out["_meta"]
 
 

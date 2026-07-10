@@ -27,6 +27,19 @@ def test_write_sorts_and_records_metadata(tmp_path, monkeypatch):
     assert list(saved["countries"]) == ["Alpha", "Zed"]
 
 
+def test_write_is_atomic_and_leaves_no_temp_files(tmp_path, monkeypatch):
+    monkeypatch.setitem(
+        locations.PROVIDERS, "demo", {"locations": lambda: {"US": ["Seattle"]}}
+    )
+
+    locations.write(tmp_path, "demo")
+
+    # Only the cache file and the writers' lock — no temp leftovers, so a
+    # concurrent reader can never see a torn file.
+    names = {p.name for p in (tmp_path / "providers").iterdir()}
+    assert names == {"demo.json", ".locations.lock"}
+
+
 def test_write_unknown_provider_errors(tmp_path):
     with pytest.raises(ValueError, match="unknown provider"):
         locations.write(tmp_path, "missing")

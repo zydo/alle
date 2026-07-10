@@ -26,13 +26,12 @@ import os
 import re
 import socket
 import sys
-import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from alle import applog, paths
+from alle import applog, fsio, paths
 from alle.constants import INBOUND_PREFIX, OUTBOUND_PREFIX
 
 STATE_VERSION = 1
@@ -197,6 +196,19 @@ def _target_name(target: str) -> str:
     return target
 
 
+def _require_provider(data: dict, provider: str) -> dict:
+    """The provider's dict, or ``ValueError`` if it is not added.
+
+    Channel writes never create their provider implicitly: a channel add
+    racing a provider removal must fail, not silently resurrect the provider
+    without its credential.
+    """
+    prov = data["providers"].get(provider)
+    if prov is None:
+        raise ValueError(f"provider {provider!r} is not added")
+    return prov
+
+
 def _ensure_channel_target(data: dict, target: str) -> None:
     provider, _, cid = target.partition("/")
     if cid:
@@ -320,6 +332,51 @@ class StoreReadError(RuntimeError):
     """
 
 
+class StateVersionError(StoreReadError):
+    """state.json was written by a newer alle than this one.
+
+    Not corruption — the data is presumably fine, this alle just cannot be
+    trusted to interpret (let alone read-modify-write) it. Never quarantined;
+    reads and mutations abort until alle is upgraded.
+    """
+
+
+def _check_schema(data: dict) -> None:
+    """Reject a parsed state whose container shapes are unusable.
+
+    Raises ``ValueError`` — the same class the JSON-corruption path uses — so
+    a file that *parses* but cannot be safely read-modify-written (providers
+    as a list, a channel as a string, …) is quarantined loudly instead of
+    crashing mid-mutation or, worse, being partially rewritten around.
+    Deliberately shallow: only the container types every mutator relies on,
+    not per-field value checks.
+    """
+    version = data.get("version", STATE_VERSION)
+    if not isinstance(version, int) or isinstance(version, bool):
+        raise ValueError("version is not an integer")
+    providers = data.get("providers") or {}
+    if not isinstance(providers, dict):
+        raise ValueError("providers is not an object")
+    for provider, prov in providers.items():
+        if not isinstance(prov, dict):
+            raise ValueError(f"provider {provider!r} is not an object")
+        chans = prov.get("channels") or {}
+        if not isinstance(chans, dict):
+            raise ValueError(f"provider {provider!r} channels is not an object")
+        for cid, ch in chans.items():
+            if not isinstance(ch, dict):
+                raise ValueError(f"channel {provider!r}/{cid!r} is not an object")
+    router = data.get("router") or {}
+    if not isinstance(router, dict):
+        raise ValueError("router is not an object")
+    rules = router.get("rules") or []
+    if not isinstance(rules, list):
+        raise ValueError("router.rules is not a list")
+    for rule in rules:
+        if not isinstance(rule, dict):
+            raise ValueError("router.rules entry is not an object")
+
+
 def _read_raw() -> dict:
     p = _state_path()
     try:
@@ -332,10 +389,16 @@ def _read_raw() -> dict:
         data = json.loads(text)
         if not isinstance(data, dict):
             raise ValueError("root is not a JSON object")
+        _check_schema(data)
     except ValueError as e:
         _quarantine(p, e)
         return _blank()
-    data.setdefault("version", STATE_VERSION)
+    version = data.setdefault("version", STATE_VERSION)
+    if version > STATE_VERSION:
+        raise StateVersionError(
+            f"{p.name} is version {version}, newer than this alle understands "
+            f"(max {STATE_VERSION}) — upgrade alle"
+        )
     data.setdefault("providers", {})
     data.setdefault("router", _router_blank())
     _normalize_rulesets(data)
@@ -343,19 +406,19 @@ def _read_raw() -> dict:
 
 
 def _write_raw(data: dict) -> None:
-    """Atomically replace state.json (write temp in the same dir, then rename)."""
-    p = _state_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=".state-", suffix=".json")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-        os.replace(tmp, p)
-        os.chmod(p, 0o600)  # carries WireGuard private keys
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+    """Atomically and durably replace state.json (temp + fsync + rename)."""
+
+    def dump(f):
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+    fsio.write_durably(
+        _state_path(),
+        dump,
+        prefix=".state-",
+        suffix=".json",
+        mode=0o600,  # carries WireGuard private keys
+    )
 
 
 @contextmanager
@@ -366,18 +429,10 @@ def transaction():
     atomically. Serialises the CLI's structural edits against the daemon's probe
     writes so neither clobbers the other.
     """
-    import fcntl
-
-    lp = _lock_path()
-    lp.parent.mkdir(parents=True, exist_ok=True)
-    with open(lp, "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            data = _read_raw()
-            yield data
-            _write_raw(data)
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+    with fsio.locked(_lock_path()):
+        data = _read_raw()
+        yield data
+        _write_raw(data)
 
 
 @dataclass
@@ -413,15 +468,31 @@ class Store:
         target of a routing rule (restrict-only removal — checked inside the
         transaction so a rule added concurrently cannot slip through).
         """
+        return self.remove_providers([provider])[provider]
+
+    def remove_providers(self, providers: list[str]) -> dict[str, int]:
+        """Remove several providers (and all their channels) in ONE transaction.
+
+        All-or-nothing: the restrict-only blocker check runs across every
+        provider's channels inside the transaction, so either the whole batch
+        is removed or — on any :class:`ReferencedError` — none of it is.
+        Returns ``{provider: channels_removed}``.
+        """
         with transaction() as data:
-            chans = (data["providers"].get(provider) or {}).get("channels") or {}
-            blockers = _rules_referencing(data, {(provider, cid) for cid in chans})
+            refs = {
+                (provider, cid)
+                for provider in providers
+                for cid in (data["providers"].get(provider) or {}).get("channels") or {}
+            }
+            blockers = _rules_referencing(data, refs)
             if blockers:
                 raise ReferencedError(blockers)
-            prov = data["providers"].pop(provider, None)
-            count = len(prov.get("channels", {})) if prov else 0
+            counts: dict[str, int] = {}
+            for provider in providers:
+                prov = data["providers"].pop(provider, None)
+                counts[provider] = len(prov.get("channels", {})) if prov else 0
         self.data = _read_raw()
-        return count
+        return counts
 
     # ---- channels ----------------------------------------------------------
     def channels(self) -> list[Channel]:
@@ -458,7 +529,7 @@ class Store:
         # on-disk state — two concurrent adds can never pick the same slot.
         # ``label`` is the optional display label, not part of the id.
         with transaction() as data:
-            prov = data["providers"].setdefault(provider, {"channels": {}})
+            prov = _require_provider(data, provider)
             chans = prov.setdefault("channels", {})
             cid = _next_id(set(chans), country, city)
             port = _next_free_port(data)
@@ -499,7 +570,7 @@ class Store:
         """
         cid = _slug(filename)
         with transaction() as data:
-            prov = data["providers"].setdefault(provider, {"channels": {}})
+            prov = _require_provider(data, provider)
             chans = prov.setdefault("channels", {})
             ch = chans.get(cid)
             created = ch is None
@@ -530,13 +601,24 @@ class Store:
     def remove_channel(self, provider: str, cid: str) -> bool:
         """Remove one channel. Raises :class:`ReferencedError` if a routing rule
         still targets it (restrict-only removal, enforced in the transaction)."""
-        removed = False
+        return bool(self.remove_channels([(provider, cid)]))
+
+    def remove_channels(self, refs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        """Remove several channels in ONE transaction; returns those removed.
+
+        All-or-nothing: the restrict-only blocker check covers the whole batch
+        inside the transaction, so a rule added concurrently blocks the batch
+        rather than slipping a half-removed set through.
+        """
+        removed: list[tuple[str, str]] = []
         with transaction() as data:
-            blockers = _rules_referencing(data, {(provider, cid)})
+            blockers = _rules_referencing(data, set(refs))
             if blockers:
                 raise ReferencedError(blockers)
-            prov = data["providers"].get(provider) or {}
-            removed = (prov.get("channels") or {}).pop(cid, None) is not None
+            for provider, cid in refs:
+                prov = data["providers"].get(provider) or {}
+                if (prov.get("channels") or {}).pop(cid, None) is not None:
+                    removed.append((provider, cid))
         self.data = _read_raw()
         return removed
 
@@ -926,6 +1008,122 @@ class Store:
                 updated = True
         self.data = _read_raw()
         return updated
+
+    def update_channels_wg(
+        self, provider: str, wg_by_cid: dict[str, dict]
+    ) -> list[str]:
+        """Replace several channels' WireGuard params in ONE transaction.
+
+        The token-replacement commit: every re-resolved channel lands (or none
+        does), so a crash can never persist the new credential with only *some*
+        of its derived channels. Channels that no longer exist are skipped;
+        returns the ids actually updated.
+        """
+        updated: list[str] = []
+        with transaction() as data:
+            chans = (data["providers"].get(provider) or {}).get("channels") or {}
+            for cid, wg in wg_by_cid.items():
+                ch = chans.get(cid)
+                if ch is not None:
+                    ch["wg"] = wg
+                    updated.append(cid)
+        self.data = _read_raw()
+        return updated
+
+    def merge_setup(
+        self,
+        providers: dict[str, dict],
+        rulesets: list[dict],
+        killswitch: bool | None,
+        lan_direct: bool | None,
+    ) -> dict:
+        """Merge a validated bundle into the setup in ONE transaction — the
+        bundle-import commit point (the replace twin is :meth:`restore_setup`).
+
+        ``providers`` maps provider -> {channel id -> {country, city, label,
+        wg}} (channels upserted by ``(provider, id)`` with
+        :meth:`upsert_channel` semantics: port/probe kept, reconnect reset,
+        label preserved unless the spec carries one); missing providers are
+        created. ``rulesets`` ({name, target, matchers: [(type, value), …]})
+        append as new blocks at the bottom of the priority order. ``None``
+        toggles mean "bundle leaves it unstated" and change nothing. Returns
+        the apply summary pieces: ``{providers_added, created, updated,
+        unchanged, rulesets_added}`` (channel entries as ``provider/cid``
+        refs).
+        """
+        summary: dict = {
+            "providers_added": [],
+            "created": [],
+            "updated": [],
+            "unchanged": [],
+            "rulesets_added": [],
+        }
+        with transaction() as data:
+            for provider, channels in providers.items():
+                prov = data["providers"].get(provider)
+                if prov is None:
+                    prov = data["providers"][provider] = {"channels": {}}
+                    summary["providers_added"].append(provider)
+                chans = prov.setdefault("channels", {})
+                for cid, spec in channels.items():
+                    ref = f"{provider}/{cid}"
+                    ch = chans.get(cid)
+                    label = spec.get("label") or ""
+                    if ch is None:
+                        entry = {
+                            "country": spec.get("country", ""),
+                            "city": spec.get("city", ""),
+                            "port": _next_free_port(data),
+                            "wg": spec["wg"],
+                            "probe": {},
+                        }
+                        if label:
+                            entry["label"] = label
+                        chans[cid] = entry
+                        summary["created"].append(ref)
+                    elif (
+                        ch.get("country", "") == spec.get("country", "")
+                        and ch.get("city", "") == spec.get("city", "")
+                        and ch.get("wg") == spec["wg"]
+                        and (not label or ch.get("label", "") == label)
+                    ):
+                        summary["unchanged"].append(ref)
+                    else:
+                        ch["country"] = spec.get("country", "")
+                        ch["city"] = spec.get("city", "")
+                        ch["wg"] = spec["wg"]
+                        if label:  # explicit override; otherwise keep the old
+                            ch["label"] = label
+                        # An import is human intervention: forget any reconnect
+                        # give-up state so the daemon retries from scratch.
+                        ch.pop("reconnect", None)
+                        summary["updated"].append(ref)
+            for block in rulesets:
+                _ensure_channel_target(data, block["target"])
+            router = data.setdefault("router", _router_blank())
+            rules = router.setdefault("rules", [])
+            for block in rulesets:
+                rsid = _next_ruleset_id(rules)
+                new_rules: list[dict] = []
+                for matcher_type, value in block["matchers"]:
+                    new_rules.append(
+                        {
+                            "id": _next_rule_id(rules + new_rules),
+                            "type": matcher_type,
+                            "value": value,
+                            "target": block["target"],
+                            "ruleset": rsid,
+                            "ruleset_name": block["name"],
+                        }
+                    )
+                rules.extend(new_rules)
+                summary["rulesets_added"].append(block["name"])
+            if killswitch is not None:
+                router["killswitch"] = bool(killswitch)
+            if lan_direct is not None:
+                router["lan_direct"] = bool(lan_direct)
+        self.data = _read_raw()
+        return summary
 
     def restore_setup(
         self,

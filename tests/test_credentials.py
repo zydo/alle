@@ -69,6 +69,26 @@ def test_non_mapping_credentials_are_quarantined():
     assert len(list(paths.state_dir().glob("credentials.yaml.corrupt-*"))) == 1
 
 
+def test_writers_hold_the_credentials_lock():
+    import fcntl
+
+    with credentials.transaction() as data:
+        data["nordvpn"] = {"token": "t"}
+        lock = paths.state_dir() / "credentials.lock"
+        with open(lock, "w") as second:  # another writer would block here
+            with pytest.raises(OSError):
+                fcntl.flock(second, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    assert credentials.get("nordvpn") == {"token": "t"}  # written on exit
+
+
+def test_snapshot_is_a_detached_copy():
+    credentials.set_("nordvpn", {"token": "t"})
+    snap = credentials.snapshot()
+    assert snap == {"nordvpn": {"token": "t"}}
+    snap["nordvpn"]["token"] = "mutated"
+    assert credentials.get("nordvpn") == {"token": "t"}  # store unaffected
+
+
 def test_unreadable_credentials_abort_instead_of_wiping():
     credentials.set_("nordvpn", {"token": "tok_12345678"})
     path = paths.state_dir() / "credentials.yaml"
