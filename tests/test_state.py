@@ -8,7 +8,7 @@ import stat
 import pytest
 
 from alle import paths
-from alle.state import ReferencedError, Store, config_signature
+from alle.state import ReferencedError, Store, StoreReadError, config_signature
 from conftest import wg_config
 
 
@@ -224,6 +224,25 @@ def test_non_object_state_is_quarantined():
     _state_file().write_text('["not", "an", "object"]')  # valid JSON, wrong shape
     assert Store.load().provider_names() == []
     assert len(list(paths.state_dir().glob("state.json.corrupt-*"))) == 1
+
+
+def test_unreadable_state_aborts_instead_of_reading_empty():
+    store = Store.load()
+    store.add_provider("nordvpn")
+    store.add_channel("nordvpn", "US", "", dict(WG))
+    _state_file().chmod(0)  # permission error ≠ absent file
+    try:
+        with pytest.raises(StoreReadError):
+            Store.load()
+        # a mutation aborts before writing anything — the data is never
+        # replaced by the blank view an unreadable file used to produce
+        with pytest.raises(StoreReadError):
+            store.add_provider("protonvpn")
+    finally:
+        _state_file().chmod(0o600)
+    assert Store.load().provider_names() == ["nordvpn"]  # nothing was lost
+    # and it was not quarantined either — the file itself is fine
+    assert list(paths.state_dir().glob("state.json.corrupt-*")) == []
 
 
 # ---- router entrypoint + rules --------------------------------------------------

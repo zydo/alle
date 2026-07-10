@@ -138,7 +138,7 @@ def _install(key: str, expected: str, target: Path) -> Path:
                         f"sing-box checksum mismatch (expected {expected}, got {got}); "
                         "refusing to run an unverified binary."
                     )
-                os.chmod(staged, 0o755)
+                os.chmod(staged, 0o755)  # noqa: S2612
                 os.replace(staged, target)
             finally:
                 if os.path.exists(staged):
@@ -226,15 +226,11 @@ class Runner:
         self.log_path = _log_path()
 
     def running_pid(self) -> int | None:
-        pf = _pid_path()
-        try:
-            pid = int(pf.read_text().strip())
-        except (OSError, ValueError):
-            return None
         # PID-recycling guard: believe the pidfile only if the process behind
-        # the number really is a sing-box (see alle.proc), so a stale file can
-        # neither report a dead daemon as running nor let stop() kill a stranger.
-        return pid if proc.alive_matching(pid, ("sing-box",)) else None
+        # the number matches the identity recorded at spawn (kernel start time;
+        # see alle.proc), so a stale file can neither report a dead daemon as
+        # running nor let stop() kill a stranger.
+        return proc.read_pidfile(_pid_path(), ("sing-box",))
 
     def is_running(self) -> bool:
         return self.running_pid() is not None
@@ -272,7 +268,7 @@ class Runner:
                 self._write_protected(old)
             return False
         if self.is_running():
-            if self.reload():
+            if self.reload():  # noqa: S1066
                 return True  # reloaded in place (PID + start time preserved)
             # config is valid but SIGHUP could not be delivered — full restart
         self.restart()
@@ -305,7 +301,9 @@ class Runner:
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
             )
-        _pid_path().write_text(str(child.pid))
+        # Identity is captured while the child is still ours and unreaped, so
+        # the recorded start time provably belongs to this sing-box.
+        proc.write_pidfile(_pid_path(), child.pid)
         _started_path().write_text(str(int(time.time())))
         # A config can pass `check` yet still die at startup (a port stolen by
         # another process binds only at run time). Catch an immediate exit so
@@ -395,7 +393,7 @@ class Runner:
         """
         api = clash_api()
         req = urllib.request.Request(
-            f"http://{api['address']}/connections",
+            f"http://{api['address']}/connections",  # noqa: S5332
             headers={"Authorization": f"Bearer {api['secret']}"},
         )
         try:

@@ -148,9 +148,14 @@ class Engine:
         stored order, and unmatched handling — a trailing ``reject`` when the
         kill-switch is on, otherwise fall-through to ``route.final: direct``.
 
-        Defense-in-depth: a rule whose channel target is not in this build
-        (removed behind our back, or the channel itself failed to build) is
-        dropped and reported via ``errors`` — sing-box would reject the whole
+        Fail closed: a rule whose channel target is not in this build (removed
+        behind our back, or the channel itself failed to build) compiles to
+        ``action: reject`` — its matcher keeps matching, but the traffic is
+        blocked instead of silently falling through to ``route.final: direct``
+        outside the tunnel. The miss is still reported via ``errors``. (A
+        channel that failed to build also loses its own inbound, so its proxy
+        port refuses connections — fail-closed on that surface already.)
+        Emitting the rule at all matters: sing-box would reject the whole
         config over one missing outbound tag.
         """
         router = self.store.router
@@ -196,7 +201,12 @@ class Engine:
             else:
                 provider, _, cid = target.partition("/")
                 if (provider, cid) not in built:
-                    errors[ref] = f"references missing channel {target}"
+                    errors[ref] = (
+                        f"references unusable channel {target}; "
+                        "matching traffic is blocked until this is fixed"
+                    )
+                    compiled["action"] = "reject"
+                    rules.append(compiled)
                     continue
                 compiled["outbound"] = f"{OUTBOUND_PREFIX}{provider}-{cid}"
             rules.append(compiled)
@@ -208,7 +218,9 @@ class Engine:
         """Rebuild the config and (re)start sing-box to match the store.
 
         Returns ``{"<provider>/<id>": error}`` for channels that could not be
-        built; those are simply left out of the live config.
+        built (left out of the live config, their proxy ports closed) and
+        ``{"rule <id>": error}`` for router rules whose target is unusable
+        (compiled to ``reject`` so their traffic is blocked, not leaked).
 
         Ports are allocated when a channel is added, so another process can
         grab one before a later sing-box (re)start — and sing-box treats a
@@ -219,7 +231,7 @@ class Engine:
         config, errors = self._build_config()
         self._errors = errors
         for ref, err in sorted(errors.items()):
-            applog.log(f"reconcile: left {ref} out of the config: {err}")
+            applog.log(f"reconcile: {ref}: {err}")
         try:
             changed = self.runner.apply(config)
         except singbox.SingBoxError as e:

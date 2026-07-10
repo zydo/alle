@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import stat
 
+import pytest
+
 from alle import credentials, paths
+from alle.state import StoreReadError
 
 
 def test_set_get_remove_roundtrip():
@@ -64,3 +67,19 @@ def test_non_mapping_credentials_are_quarantined():
     path.write_text("- just\n- a\n- list\n")  # valid YAML, wrong shape
     assert credentials.configured() == []
     assert len(list(paths.state_dir().glob("credentials.yaml.corrupt-*"))) == 1
+
+
+def test_unreadable_credentials_abort_instead_of_wiping():
+    credentials.set_("nordvpn", {"token": "tok_12345678"})
+    path = paths.state_dir() / "credentials.yaml"
+    path.chmod(0)  # permission error ≠ absent file
+    try:
+        with pytest.raises(StoreReadError):
+            credentials.get("nordvpn")
+        # a write built on the unreadable view must abort, not wipe the file
+        with pytest.raises(StoreReadError):
+            credentials.set_("protonvpn", {"token": "x"})
+    finally:
+        path.chmod(0o600)
+    assert credentials.get("nordvpn") == {"token": "tok_12345678"}
+    assert list(paths.state_dir().glob("credentials.yaml.corrupt-*")) == []

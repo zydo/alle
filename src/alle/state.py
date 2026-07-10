@@ -309,14 +309,25 @@ def _quarantine(p: Path, err: Exception) -> None:
     print(f"alle: {msg}", file=sys.stderr)
 
 
+class StoreReadError(RuntimeError):
+    """A store file exists but could not be read (permissions, transient I/O).
+
+    Deliberately not treated as empty: every mutation is read-modify-write, so
+    proceeding from a blank view would let the next write persist the emptiness
+    and silently destroy the real data (channels, WireGuard keys, credentials).
+    Callers abort instead; the file on disk stays intact. Distinct from a
+    *corrupt* file, which :func:`_quarantine` moves aside loudly.
+    """
+
+
 def _read_raw() -> dict:
     p = _state_path()
-    if not p.exists():
-        return _blank()
     try:
         text = p.read_text()
-    except OSError:
-        return _blank()
+    except FileNotFoundError:
+        return _blank()  # genuinely absent — a fresh install starts blank
+    except OSError as e:
+        raise StoreReadError(f"cannot read {p.name}: {e}") from e
     try:
         data = json.loads(text)
         if not isinstance(data, dict):
@@ -794,9 +805,7 @@ class Store:
                 )
             kept[insert_at:insert_at] = new_rules
             router["rules"] = kept
-            block = next(
-                (b for b in _ruleset_blocks(kept) if b["id"] == ruleset_id), None
-            )
+            block = next(b for b in _ruleset_blocks(kept) if b["id"] == ruleset_id)
         self.data = _read_raw()
         return block
 

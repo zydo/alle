@@ -36,6 +36,59 @@ def test_alive_matching_rejects_nonsense_pids():
     assert proc.alive_matching(-1, ("x",)) is False
 
 
+def test_start_time_of_reads_a_live_process():
+    assert proc.start_time_of(os.getpid()) is not None
+    assert proc.start_time_of(-1) is None
+
+
+def test_start_time_of_rejects_dead_pids():
+    child = subprocess.Popen(["sleep", "0"])
+    child.wait()  # reaped — the PID no longer exists
+    assert proc.start_time_of(child.pid) is None
+
+
+def test_verify_matches_on_recorded_start_time():
+    rec = proc.record(os.getpid())
+    assert rec["start"] is not None
+    # exact identity: markers are irrelevant once the start time matches …
+    assert proc.verify(rec, ("definitely-not-in-argv",)) is True
+    # … and a mismatched start time means a recycled PID, marker hit or not
+    interp = (proc.command_of(os.getpid()) or "x").split()[0]
+    fake = {"pid": os.getpid(), "start": "ticks:0-not-this-process"}
+    assert proc.verify(fake, (interp,)) is False
+
+
+def test_pidfile_roundtrip_and_reaped_child():
+    path = paths.state_dir() / "roundtrip.pid"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    child = subprocess.Popen(["sleep", "30"])
+    try:
+        proc.write_pidfile(path, child.pid)
+        assert proc.read_pidfile(path, ()) == child.pid  # no marker needed
+    finally:
+        child.kill()
+        child.wait()
+    assert proc.read_pidfile(path, ("sleep",)) is None  # dead = not ours
+
+
+def test_read_pidfile_accepts_legacy_plain_int_via_marker():
+    path = paths.state_dir() / "legacy.pid"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{os.getpid()}\n")
+    interp = (proc.command_of(os.getpid()) or "x").split()[0]
+    assert proc.read_pidfile(path, (interp,)) == os.getpid()
+    assert proc.read_pidfile(path, ("definitely-not-in-argv",)) is None
+
+
+def test_read_pidfile_rejects_garbage():
+    path = paths.state_dir() / "garbage.pid"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for text in ("", "not-a-pid", '{"start": "x"}', '["list"]'):
+        path.write_text(text)
+        assert proc.read_pidfile(path, ("x",)) is None
+    assert proc.read_pidfile(path.with_name("absent.pid"), ("x",)) is None
+
+
 def test_singbox_pidfile_pointing_at_foreign_process_is_ignored():
     # Simulate PID recycling: the pidfile holds a live PID (ours) that is not
     # a sing-box. It must read as "not running", not become a kill target.
@@ -45,4 +98,14 @@ def test_singbox_pidfile_pointing_at_foreign_process_is_ignored():
 
 def test_applier_pidfile_pointing_at_foreign_process_is_ignored():
     (paths.state_dir() / "applier.pid").write_text(str(os.getpid()))
+    assert daemon.running_pid() is None
+
+
+def test_recorded_pidfile_with_stale_start_time_is_ignored():
+    # Even a marker-perfect command line is rejected when the start time
+    # says the PID was recycled since the record was written.
+    import json
+
+    rec = {"pid": os.getpid(), "start": "ticks:0-not-this-process"}
+    (paths.state_dir() / "applier.pid").write_text(json.dumps(rec))
     assert daemon.running_pid() is None

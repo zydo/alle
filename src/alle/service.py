@@ -460,7 +460,7 @@ def _import_conf(
         existing, country, city, wg, label
     )
     channel, created = store.upsert_channel(provider, stem, country, city, wg, label)
-    action = "imported" if created else ("unchanged" if unchanged else "updated")
+    action = "imported" if created else ("unchanged" if unchanged else "updated")  # noqa: S3358
     applog.log(
         f"{action} channel {provider}/{channel.id} from {filename} on :{channel.port}"
     )
@@ -1399,8 +1399,10 @@ def _stop_all() -> bool:
     runner = singbox.Runner()
     was_singbox = runner.is_running()
     was_applier = daemon.stop()
-    if was_singbox:
-        runner.stop()
+    # Always run the (idempotent) stop rather than gating it on the earlier
+    # liveness answer — a transiently unreadable identity check must not
+    # leave a live sing-box behind.
+    runner.stop()
     return was_singbox or was_applier
 
 

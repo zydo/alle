@@ -187,7 +187,7 @@ def test_unallocated_router_port_means_no_router_inbound():
     assert [i["tag"] for i in config["inbounds"]] == ["in-nordvpn-us_1"]
 
 
-def test_dangling_rule_reference_is_dropped_and_reported():
+def test_dangling_rule_reference_fails_closed_and_is_reported():
     store = _store(
         ("nordvpn", "us_1", 8888, "US", "", dict(WG)),
         router=_router(
@@ -197,20 +197,57 @@ def test_dangling_rule_reference_is_dropped_and_reported():
     )
     config, errors = Engine(store)._build_config()
     assert "rule r1" in errors and "nordvpn/gone_1" in errors["rule r1"]
-    compiled = [r for r in config["route"]["rules"] if r.get("domain")]
-    assert [r["domain"] for r in compiled] == [["b.com"]]  # healthy rule survives
+    # the dangling rule blocks its traffic instead of leaking it via final:direct
+    assert {
+        "inbound": ["in-router"],
+        "domain": ["a.com"],
+        "action": "reject",
+    } in config["route"]["rules"]
+    assert {
+        "inbound": ["in-router"],
+        "domain": ["b.com"],
+        "outbound": "out-nordvpn-us_1",
+    } in config["route"]["rules"]  # healthy rule survives untouched
 
 
-def test_rule_targeting_unbuildable_channel_is_dropped():
+def test_rule_targeting_missing_provider_fails_closed():
     store = _store(
-        ("nordvpn", "us_1", 8888, "US", "", {}),  # channel itself fails to build
+        ("nordvpn", "us_1", 8888, "US", "", dict(WG)),
+        router=_router(("domain", "a.com", "protonvpn/nl_1")),  # provider gone
+    )
+    config, errors = Engine(store)._build_config()
+    assert "rule r1" in errors and "protonvpn/nl_1" in errors["rule r1"]
+    assert {
+        "inbound": ["in-router"],
+        "domain": ["a.com"],
+        "action": "reject",
+    } in config["route"]["rules"]
+
+
+def test_rule_targeting_unbuildable_channel_fails_closed():
+    store = _store(
+        ("nordvpn", "us_1", 8888, "US", "", {}),  # malformed WireGuard data
         router=_router(("domain", "a.com", "nordvpn/us_1")),
     )
     config, errors = Engine(store)._build_config()
     assert "nordvpn/us_1" in errors and "rule r1" in errors
-    # neither a dangling outbound reference nor a half-built channel in the config
+    # no dangling outbound reference or half-built channel in the config …
     assert config["endpoints"] == []
-    assert all("domain" not in r for r in config["route"]["rules"])
+    # … and the rule's traffic is blocked rather than routed direct
+    assert {
+        "inbound": ["in-router"],
+        "domain": ["a.com"],
+        "action": "reject",
+    } in config["route"]["rules"]
+
+
+def test_catchall_ruleset_with_invalid_target_blocks_everything():
+    # a ruleset whose only target is invalid: its catch-all row must not let
+    # the whole router entrypoint fall through to direct
+    store = _store(router=_router(("all", "", "nordvpn/gone_1")))
+    config, errors = Engine(store)._build_config()
+    assert "rule r1" in errors
+    assert {"inbound": ["in-router"], "action": "reject"} in config["route"]["rules"]
 
 
 def test_malformed_channel_omitted_and_reported():

@@ -120,15 +120,11 @@ def _state_stamp() -> tuple[int, int]:
 
 
 def running_pid() -> int | None:
-    pf = _pid_path()
-    try:
-        pid = int(pf.read_text().strip())
-    except (OSError, ValueError):
-        return None
     # PID-recycling guard: believe the pidfile only if the process behind the
-    # number really is an applier, so a stale file can neither block a fresh
-    # start nor let stop() kill a stranger.
-    return pid if proc.alive_matching(pid, _MARKERS) else None
+    # number matches the identity recorded at spawn (kernel start time; see
+    # alle.proc), so a stale file can neither block a fresh start nor let
+    # stop() kill a stranger.
+    return proc.read_pidfile(_pid_path(), _MARKERS)
 
 
 def is_running() -> bool:
@@ -191,7 +187,7 @@ def ensure_running() -> None:
     log = paths.state_dir() / "applier.log"
     applog.rotate_if_needed(log, applog.MAX_LOG_BYTES)
     with open(log, "ab") as lf:
-        proc = subprocess.Popen(
+        child = subprocess.Popen(
             [sys.executable, "-m", "alle", "applier"],
             stdout=lf,
             stderr=lf,
@@ -199,7 +195,7 @@ def ensure_running() -> None:
             start_new_session=True,
             env=env,
         )
-    _pid_path().write_text(str(proc.pid))
+    proc.write_pidfile(_pid_path(), child.pid)
     applog.log("applier started")
 
 
@@ -250,7 +246,7 @@ def run_applier() -> None:
 
     from alle import metrics, reconnect, singbox
     from alle.engine import Engine
-    from alle.state import Store, config_signature, _read_raw
+    from alle.state import Store, StoreReadError, config_signature, _read_raw
 
     # Exclusive instance lock: two CLI mutations racing through ensure_running()
     # can both see "not running" and spawn two appliers — the flock makes the
@@ -265,15 +261,15 @@ def run_applier() -> None:
     except OSError:
         try:
             instance_lock.seek(0)
-            holder = int(instance_lock.read().strip())
-            if proc.alive_matching(holder, _MARKERS):
-                _pid_path().write_text(str(holder))
-        except (ValueError, OSError):
+            holder = proc.parse_record(instance_lock.read())
+            if holder and proc.verify(holder, _MARKERS):
+                _pid_path().write_text(json.dumps(holder))
+        except OSError:
             pass
         applog.log("applier already running; duplicate exiting")
         return
     instance_lock.truncate(0)
-    instance_lock.write(str(os.getpid()))
+    instance_lock.write(json.dumps(proc.record(os.getpid())))
     instance_lock.flush()
 
     try:
@@ -302,7 +298,7 @@ def run_applier() -> None:
     signal.signal(signal.SIGTERM, _handle)
     signal.signal(signal.SIGINT, _handle)
 
-    _pid_path().write_text(str(os.getpid()))
+    proc.write_pidfile(_pid_path(), os.getpid())
     _write_info()
     supervised = bool(os.environ.get("ALLE_SERVICE"))
     last_stamp: tuple[int, int] | None = None
@@ -313,6 +309,7 @@ def run_applier() -> None:
     last_version_check = 0.0
     reconcile_ok = True
     reconcile_retry_at = 0.0
+    read_error: str | None = None
     try:
         while not stop_flag["stop"]:
             now = time.monotonic()
@@ -329,8 +326,19 @@ def run_applier() -> None:
                     break
             stamp = _state_stamp()
             if stamp != last_stamp:
-                last_stamp = stamp
-                sig = config_signature(_read_raw())
+                # An unreadable state file must not kill the loop (or be
+                # mistaken for an empty one — see StoreReadError): keep the
+                # previous signature and retry next poll, logging the failure
+                # once per distinct error rather than at 1 Hz.
+                try:
+                    sig = config_signature(_read_raw())
+                except StoreReadError as e:
+                    if str(e) != read_error:
+                        read_error = str(e)
+                        applog.log(f"state unreadable (will retry): {e}")
+                else:
+                    last_stamp = stamp
+                    read_error = None
             # A failed reconcile is retried on a timer even when the state file
             # hasn't moved — the failure may be environmental (binary download
             # offline, stolen port) and heal without a user edit.

@@ -15,7 +15,7 @@ import tempfile
 import yaml
 
 from alle import paths
-from alle.state import _quarantine
+from alle.state import StoreReadError, _quarantine
 
 
 def _path():
@@ -24,12 +24,14 @@ def _path():
 
 def _load_all() -> dict[str, dict]:
     p = _path()
-    if not p.exists():
-        return {}
     try:
         text = p.read_text()
-    except OSError:
-        return {}
+    except FileNotFoundError:
+        return {}  # genuinely absent — no provider configured yet
+    except OSError as e:
+        # Unreadable is not empty: a save from a blank view would wipe every
+        # provider's credential. Abort the caller instead (see StoreReadError).
+        raise StoreReadError(f"cannot read {p.name}: {e}") from e
     try:
         data = yaml.safe_load(text) or {}
         if not isinstance(data, dict):
