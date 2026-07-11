@@ -9,7 +9,7 @@ description = "A universal VPN client that manages multiple VPN connections with
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "zydo" }]
 keywords = ["vpn", "sing-box", "nordvpn", "wireguard", "proxy", "gateway"]
 classifiers = [
@@ -29,8 +29,18 @@ Issues = "https://github.com/zydo/alle/issues"
 alle = "alle.cli:main"
 alled = "alle.daemon:run_applier"
 
+[tool.hatch.build]
+# Keep local-only roadmap notes out of every release artifact (sdist + wheel).
+# .gitignore also ignores ROADMAP*.md; this is belt-and-suspenders for builders
+# that do not consult VCS ignore rules.
+exclude = ["ROADMAP*.md"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/alle"]
+# The dashboard screenshot ships in the sdist so it renders on the PyPI project
+# page (PyPI rewrites relative README image paths to files.pythonhosted.org),
+# but the Web UI never serves it, so omit it from the installed wheel.
+exclude = ["src/alle/assets/webui.png"]
 
 [tool.ruff]
 line-length = 88

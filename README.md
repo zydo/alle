@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/wordmark.svg" alt="alle" width="320">
+  <img src="src/alle/assets/wordmark.svg" alt="alle" width="320">
 </p>
 
 <p align="center">
-  <a href="https://github.com/zydo/alle/actions/workflows/ci.yml"><img src="https://github.com/zydo/alle/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/zydo/alle/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/zydo/alle/ci.yml?branch=main&amp;label=CI" alt="CI"></a>
   <a href="https://pypi.org/project/alle-proxy/"><img src="https://img.shields.io/pypi/v/alle-proxy.svg" alt="PyPI"></a>
 </p>
 
@@ -12,7 +12,7 @@
 A universal VPN client that manages multiple VPN connections with rule-based routing.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/webui.png" alt="alle Web UI dashboard" width="900">
+  <img src="src/alle/assets/webui.png" alt="alle Web UI dashboard" width="900">
 </p>
 
 # Why alle

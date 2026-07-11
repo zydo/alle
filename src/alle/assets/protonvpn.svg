@@ -6,7 +6,7 @@
    fill="none"
    version="1.1"
    id="svg14183"
-   sodipodi:docname="ProtonMail_6.svg"
+   sodipodi:docname="protonvpn.svg"
    inkscape:version="1.2.2 (732a01da63, 2022-12-09)"
    xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
    xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
@@ -16,7 +16,7 @@
    xmlns:cc="http://creativecommons.org/ns#"
    xmlns:dc="http://purl.org/dc/elements/1.1/">
   <title
-     id="title14203">Proton Mail</title>
+     id="title14203">Proton VPN</title>
   <sodipodi:namedview
      id="namedview14185"
      pagecolor="#ffffff"
@@ -147,10 +147,10 @@
     <rdf:RDF>
       <cc:Work
          rdf:about="">
-        <dc:title>Proton Mail</dc:title>
+        <dc:title>Proton VPN</dc:title>
         <dc:subject>
           <rdf:Bag>
-            <rdf:li>Proton Mail</rdf:li>
+            <rdf:li>Proton VPN</rdf:li>
             <rdf:li>Logo</rdf:li>
             <rdf:li>Logotipo</rdf:li>
             <rdf:li>Icon</rdf:li>

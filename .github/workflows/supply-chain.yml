@@ -1,0 +1,46 @@
+name: Supply Chain
+
+# Runtime dependency intelligence: known-vulnerable Python dependencies (OSV,
+# read straight from the pinned uv.lock) and leaked secrets (gitleaks). Runs on
+# every PR and push to main so problems surface pre-merge, plus a weekly sweep
+# to catch advisories published after a dependency was pinned. All Actions are
+# pinned to immutable commit SHAs; the trailing comment records the tag.
+on:
+  schedule:
+    - cron: "17 6 * * 1" # weekly, Monday 06:17 UTC (off the :00 herd)
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  osv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      # Scan the lockfile, not pyproject.toml: osv-scanner reads the pinned
+      # versions from uv.lock instead of resolving, so the result reflects what
+      # actually installs.
+      - name: OSV scan (uv.lock)
+        uses: google/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        with:
+          scan-args: |-
+            --lockfile=uv.lock
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # full history so the scheduled sweep scans all commits
+
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

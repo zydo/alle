@@ -1,7 +1,8 @@
 # Third-Party Notices
 
-alle's package contains only its own code. Two kinds of third-party component
-are involved when you run it:
+alle's package ships its own code plus small provider brand logos for the Web UI
+(see "Provider brand assets" below). Two kinds of third-party component are
+involved when you run it:
 
 1. **Python dependencies** — declared in `pyproject.toml` and installed from PyPI
    alongside alle. These are the work of their respective authors under their own
@@ -60,3 +61,21 @@ with this application without prior consent.
 > alle does not redistribute the sing-box binary; each user downloads it
 > directly from the upstream release page. alle is an independent project and
 > is not affiliated with, endorsed by, or sponsored by the sing-box project.
+
+## Provider brand assets
+
+alle's Web UI shows small provider wordmarks/logos to identify each supported
+provider in the dashboard. These are trademarks of their respective owners,
+used here nominatively — solely to identify the provider and its service — and
+do not imply any affiliation with, endorsement by, or sponsorship from the
+trademark holders.
+
+- **NordVPN** (`src/alle/assets/nordvpn.svg`) — "NordVPN" and the NordVPN logo
+  are trademarks of Nord Security.
+- **Proton VPN** (`src/alle/assets/protonvpn.svg`) — "Proton VPN" and the Proton
+  logo are trademarks of Proton AG. This SVG was derived from an upstream asset
+  whose embedded Inkscape/RDF metadata mislabeled it "Proton Mail"; that stale
+  metadata has been corrected to "Proton VPN."
+
+alle is an independent project and is not affiliated with, endorsed by, or
+sponsored by Nord Security, Proton AG, or any VPN provider.

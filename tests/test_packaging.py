@@ -1,0 +1,117 @@
+"""Release-artifact contents: the sdist/wheel ship exactly what they should.
+
+Regression for the P1 'constrain package contents and complete notices' gate:
+
+* local-only roadmap notes never leak into a release artifact (they used to —
+  Hatchling reads ``.gitignore`` but not ``.git/info/exclude``);
+* the dashboard screenshot stays in the sdist (so it renders on the PyPI
+  project page via a relative README path) but out of the installed wheel (the
+  Web UI never serves it);
+* ``THIRD_PARTY_NOTICES.md`` ships in the wheel's ``dist-info/licenses/``;
+* every Web UI asset the server can serve is present in the wheel;
+* every relative README image ships in the sdist, so PyPI can render it.
+"""
+
+from __future__ import annotations
+
+import re
+import shutil
+import subprocess
+import tarfile
+import zipfile
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+ASSETS = ROOT / "src" / "alle" / "assets"
+UV = shutil.which("uv") or ""
+
+pytestmark = pytest.mark.skipif(not UV, reason="uv not installed")
+
+
+@pytest.fixture(scope="module")
+def built():
+    """Build sdist + wheel once into a throwaway dir; return their paths."""
+    import tempfile
+
+    tmp = Path(tempfile.mkdtemp(prefix="alle-dist-"))
+    subprocess.run(
+        [UV, "build", "--out-dir", str(tmp)], cwd=ROOT, check=True, capture_output=True
+    )
+    sdist = next(tmp.glob("*.tar.gz"))
+    wheel = next(tmp.glob("*.whl"))
+    yield sdist, wheel
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _sdist_names(sdist: Path) -> set[str]:
+    with tarfile.open(sdist) as tf:
+        return {m.name for m in tf.getmembers()}
+
+
+def _wheel_names(wheel: Path) -> set[str]:
+    with zipfile.ZipFile(wheel) as zf:
+        return set(zf.namelist())
+
+
+def test_roadmaps_do_not_leak_into_artifacts(built):
+    sdist, wheel = built
+    for name in _sdist_names(sdist) | _wheel_names(wheel):
+        assert "ROADMAP" not in name.upper(), f"roadmap leaked into artifact: {name}"
+
+
+def test_screenshot_in_sdist_not_wheel(built):
+    sdist, wheel = built
+    sdist_names = _sdist_names(sdist)
+    wheel_names = _wheel_names(wheel)
+    assert any(n.endswith("webui.png") for n in sdist_names), (
+        "webui.png must ship in the sdist so it renders on the PyPI project page"
+    )
+    assert not any(n.endswith("webui.png") for n in wheel_names), (
+        "webui.png must not ship in the wheel — the Web UI never serves it"
+    )
+
+
+def test_third_party_notices_ships_in_wheel_and_sdist(built):
+    sdist, wheel = built
+    sdist_names = _sdist_names(sdist)
+    wheel_names = _wheel_names(wheel)
+    assert any(n.endswith("THIRD_PARTY_NOTICES.md") for n in sdist_names)
+    assert any("licenses/THIRD_PARTY_NOTICES" in n for n in wheel_names), (
+        "THIRD_PARTY_NOTICES.md must be in the wheel's dist-info/licenses/"
+    )
+
+
+def test_all_served_assets_present_in_wheel(built):
+    _, wheel = built
+    wheel_names = _wheel_names(wheel)
+    served = [
+        p.name
+        for p in ASSETS.iterdir()
+        if p.is_file() and not p.name.startswith(".") and p.name != "webui.png"
+    ]
+    missing = [
+        name
+        for name in served
+        if not any(n.endswith(f"assets/{name}") for n in wheel_names)
+    ]
+    assert not missing, f"served Web UI assets missing from wheel: {missing}"
+
+
+def test_readme_relative_images_ship_in_sdist(built):
+    """PyPI rewrites relative README image URLs to files.pythonhosted.org, but
+    only for files present in the sdist — so every relative image must ship."""
+    sdist, _ = built
+    sdist_names = _sdist_names(sdist)
+    readme = (ROOT / "README.md").read_text()
+    rel_srcs = [
+        s
+        for s in re.findall(r'src="([^"]+)"', readme)
+        if not s.startswith(("http://", "https://"))
+    ]
+    assert rel_srcs, "expected at least one relative README image"
+    for src in rel_srcs:
+        assert any(n.endswith(src) for n in sdist_names), (
+            f"README image {src!r} is not in the sdist — it will not render on PyPI"
+        )

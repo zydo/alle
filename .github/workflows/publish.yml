@@ -5,20 +5,35 @@ on:
     tags:
       - "v*"
 
+# Publish is gated on the full test/lint/format/package suite run on the exact
+# tag checkout, then publishes the artifact that was built from that same clean,
+# locked tree (downstream jobs download the uploaded artifact — they never
+# rebuild). Every third-party Action is pinned to an immutable commit SHA; the
+# trailing comment records the tag it was resolved from.
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.14"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.2.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           cache-suffix: publish-py3.14
+          enable-cache: true
+
+      # --frozen fails the build if uv.lock is out of sync with pyproject.toml,
+      # so the published artifact is built from a locked, reproducible tree.
+      - name: Sync locked environment
+        run: uv sync --frozen
 
       - name: Verify tag matches pyproject.toml version
         run: |
@@ -29,11 +44,23 @@ jobs:
             exit 1
           fi
 
+      - name: Lint
+        run: uv run ruff check
+
+      - name: Format check
+        run: uv run ruff format --check
+
+      - name: Test
+        run: uv run pytest -q
+
       - name: Build sdist + wheel
         run: uv build
 
+      - name: Package smoke (metadata + README render)
+        run: uvx twine check dist/*
+
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: dist
           path: dist/
@@ -50,13 +77,13 @@ jobs:
       id-token: write
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dist
           path: dist/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
 
   github-release:
     needs: publish-pypi
@@ -65,13 +92,13 @@ jobs:
       contents: write
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dist
           path: dist/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
         with:
           files: dist/*
           generate_release_notes: true
