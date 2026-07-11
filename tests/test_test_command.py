@@ -140,25 +140,26 @@ def test_test_unambiguous_bare_id_still_works(two_channels, stub_probe):
     assert [r["name"] for r in data["channels"]] == ["japan_1"]
 
 
-def test_metrics_rejects_an_ambiguous_bare_channel_id(
-    same_id_under_two_providers, monkeypatch
-):
-    # metrics_snapshot reads totals(); stub a non-empty total so the path runs
-    monkeypatch.setattr(service.metrics, "totals", lambda: {})
-    with pytest.raises(service.ServiceError, match="multiple providers"):
-        service.metrics_snapshot("united_states_1")
-
-
-def test_metrics_accepts_a_qualified_ref(same_id_under_two_providers, monkeypatch):
+def test_test_rows_carry_traffic_totals(same_id_under_two_providers, monkeypatch):
+    # `alle test` is the one per-channel table, so the durable counters ride
+    # along on every row (the metrics command/endpoint are gone).
     monkeypatch.setattr(
         service.metrics,
         "totals",
-        lambda: {("nordvpn", "united_states_1"): {"sent": 10, "received": 20}},
+        lambda: {
+            ("nordvpn", "united_states_1"): {
+                "sent": 10,
+                "received": 20,
+                "updated_at": 99,
+            }
+        },
     )
-    data = service.metrics_snapshot("nordvpn/united_states_1")
+    data = service.test(channel="nordvpn/united_states_1")
     names = [r["name"] for r in data["channels"]]
     assert names == ["united_states_1"]
-    assert data["channels"][0]["provider"] == "nordvpn"
+    row = data["channels"][0]
+    assert row["provider"] == "nordvpn"
+    assert (row["sent"], row["received"], row["traffic_updated_at"]) == (10, 20, 99)
 
 
 def test_test_speed_is_cancelled_skips_remaining_channels(
@@ -310,6 +311,7 @@ def test_run_streaming_test_prints_live_table(
     assert (
         "nordvpn/japan_1" in captured.out and "nordvpn/united_states_1" in captured.out
     )
-    assert lines[-1] == "2 healthy · 0 failed"  # final summary
+    # no trailing summary line: a failing channel marks its own row instead
+    assert lines[-1].split()[:2] == ["united_states_1", "nordvpn/united_states_1"]
     # the animated progress indicator lives on stderr, never polluting the table
     assert "⠋" not in captured.out

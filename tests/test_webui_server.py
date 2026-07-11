@@ -745,16 +745,25 @@ def test_locations_endpoint_requires_a_provider(live):
 # ---- /api/v1 metrics, test, logs (Phase 4.4) ----
 
 
-def test_metrics_endpoint_returns_snapshot(live):
+def test_metrics_endpoint_is_gone_and_test_rows_carry_traffic(live):
+    # /api/v1/metrics was retired: test rows carry sent/received directly,
+    # so the UI (and any API client) reads traffic off the one channel table.
     base, secret = live
     Store.load().add_channel("nordvpn", "US", "", dict(WG))
 
-    st, body, _ = _req(base + "/api/v1/metrics", headers=_bearer(secret))
+    st, _, _ = _req(base + "/api/v1/metrics", headers=_bearer(secret))
+    assert st == 404
 
-    data = json.loads(body)
+    st, body, _ = _req(
+        base + "/api/v1/test",
+        method="POST",
+        headers=_bearer(secret),
+        data={"speed": False},
+    )
     assert st == 200
-    assert data["total_sent"] == 0 and data["total_received"] == 0
-    assert data["channels"][0]["name"] == "us_1"
+    row = json.loads(body)["channels"][0]
+    assert row["name"] == "us_1"
+    assert row["sent"] == 0 and row["received"] == 0
 
 
 def test_test_endpoint_streams_speed_test(live, monkeypatch):

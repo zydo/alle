@@ -145,8 +145,8 @@ function chanRow(c) {
     <span class="port copyable" data-copy="http://127.0.0.1:${esc(c.port_number)}" title="Click to copy">${esc(c.port)}</span>
     <span class="ip${m.ip ? " copyable" : ""}"${m.ip ? ` data-copy="${esc(m.ip)}" title="Click to copy"` : ""}>${esc(m.ip || "")}</span>
     <span class="lat">${isSet(m.latency_ms) ? `${esc(m.latency_ms)} ms` : ""}</span>
-    <span class="mono">${m.metrics ? bytes(m.metrics.sent) : ""}</span>
-    <span class="mono">${m.metrics ? bytes(m.metrics.received) : ""}</span>
+    <span class="mono">${isSet(m.sent) ? bytes(m.sent) : ""}</span>
+    <span class="mono">${isSet(m.received) ? bytes(m.received) : ""}</span>
     <span class="mono">${speed.download_bps ? mbps(speed.download_bps) : ""}</span>
     <span class="mono">${speed.upload_bps ? mbps(speed.upload_bps) : ""}</span>
     <span class="row-actions channel-actions">
@@ -191,11 +191,11 @@ async function runTest(channel, speed) {
       await runSpeedStream(channel);
     } else {
       const res = await api.post("/api/v1/test", { speed: false, channel: channel ? channel.name : null });
-      const metrics = await api.get("/api/v1/metrics");
       if (!res.ok) { toast(res.error, "err"); return; }
-      const metricMap = new Map((metrics.ok ? metrics.data.channels : []).map((c) => [`${c.provider}/${c.name}`, c]));
+      // Test rows carry everything the table shows — fresh probe results and
+      // the cumulative sent/received totals; there is no separate metrics call.
       for (const row of res.data.channels || []) {
-        measured.set(`${row.provider}/${row.name}`, { ...row, metrics: metricMap.get(`${row.provider}/${row.name}`) });
+        measured.set(`${row.provider}/${row.name}`, row);
       }
       renderChannels();
       toast("Probe complete.");
@@ -216,7 +216,6 @@ async function runSpeedStream(channel) {
   const res = await startSpeedStream(channel);
   if (!res) return;                 // network/401/non-stream error already toasted
   if (await consumeSpeedStream(res.body)) return;  // mid-stream error already toasted
-  await mergeMetrics();
   toast("Speed test complete.");
   refreshStatus();
 }
@@ -272,9 +271,9 @@ function applySpeedEvent(line) {
   try { evt = JSON.parse(line); } catch { return false; }
   if (evt.type === "row" && evt.data) {
     const r = evt.data;
-    const k = `${r.provider}/${r.name}`;
-    measured.set(k, { ...r, metrics: measured.get(k)?.metrics });
-    busy.delete(`${k}:speed`);
+    // Each streamed row already carries post-test sent/received totals.
+    measured.set(`${r.provider}/${r.name}`, r);
+    busy.delete(`${r.provider}/${r.name}:speed`);
     renderChannels();
   } else if (evt.type === "error" && evt.data) {
     toast(evt.data.error || "Speed test failed.", "err");
@@ -282,15 +281,6 @@ function applySpeedEvent(line) {
   }
   // "done" carries only summary counts; nothing to render.
   return false;
-}
-
-// Refresh byte counters (sent/received) for the rows just measured.
-async function mergeMetrics() {
-  const metrics = await api.get("/api/v1/metrics");
-  if (!metrics.ok) return;
-  const mm = new Map(metrics.data.channels.map((c) => [`${c.provider}/${c.name}`, c]));
-  for (const [k, v] of measured) if (mm.has(k)) measured.set(k, { ...v, metrics: mm.get(k) });
-  renderChannels();
 }
 
 async function onChannelClick(e) {

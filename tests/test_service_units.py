@@ -150,13 +150,13 @@ def test_channel_add_config_read_error(monkeypatch, tmp_path):
     assert "could not read" in str(exc.value)
 
 
-def test_metrics_snapshot_filter_skips_nonmatching_channels():
+def test_test_channel_filter_skips_nonmatching_channels():
     store = service.Store.load()
     store.add_provider("nordvpn")
     store.add_channel("nordvpn", "Japan", "", dict(WG))
     store.add_channel("nordvpn", "United States", "", dict(WG))
 
-    result = service.metrics_snapshot("japan_1")
+    result = service.test(channel="japan_1")
 
     assert [row["name"] for row in result["channels"]] == ["japan_1"]
 

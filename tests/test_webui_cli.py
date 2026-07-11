@@ -46,5 +46,5 @@ def test_status_output_shows_web_ui_url():
         "web_ui": "http://127.0.0.1:8123",
     }
     text = output.status(snap)
-    assert "Web UI  http://127.0.0.1:8123" in text
+    assert "Web UI    http://127.0.0.1:8123" in text
     assert "alle ui" in text

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 
 from alle import output
 
@@ -122,103 +121,45 @@ def test_status_surfaces_a_degraded_singbox_runtime():
     assert "sing-box" not in output.status(snapshot)
 
 
-def test_status_active_with_channel_rows(monkeypatch):
-    monkeypatch.setattr(time, "time", lambda: 1_000)
-
+def test_status_active_is_a_summary_without_a_table():
+    # status is the system view: per-provider channel counts, never the
+    # per-channel table (that is `alle test`) — so no LABEL header, no AGO.
     text = output.status(
         {
             "running": True,
             "channels": [
-                {
-                    "provider": "nordvpn",
-                    "name": "japan_1",
-                    "port": ":53124",
-                    "country": "Japan",
-                    "city": "(Any City)",
-                    "state": "Active",
-                    "probe": {"at": 990},
-                    "latency_ms": 42,
-                    "ip": "1.2.3.4",
-                },
-                {
-                    "provider": "protonvpn",
-                    "name": "wg_us_ca_842",
-                    "port": ":53125",
-                    "country": "United States",
-                    "city": "California",
-                    "state": "Pending",
-                    "probe": {},
-                    "latency_ms": None,
-                    "ip": None,
-                },
+                {"provider": "nordvpn", "name": "japan_1"},
+                {"provider": "nordvpn", "name": "us_1"},
+                {"provider": "protonvpn", "name": "wg_us_ca_842"},
             ],
+            "channel_count": 3,
+            "provider_count": 2,
         }
     )
 
-    assert "10s ago" in text
-    assert "42ms" in text
-    # ID column carries the provider-qualified ref (no separate provider column)
-    assert "nordvpn/japan_1" in text and "protonvpn/wg_us_ca_842" in text
+    assert "Channels  NordVPN: 2 channels, Proton VPN: 1 channel" in text
+    assert "(details: alle channels ls)" in text
+    assert "LABEL" not in text and "ago" not in text
 
 
-def test_metrics_filter_empty_and_age_units(monkeypatch):
+def test_status_router_line_points_at_routes_ls():
+    text = output.status(
+        {
+            "running": True,
+            "channels": [],
+            "router": {
+                "port": 54585,
+                "rule_count": 8,
+                "killswitch": False,
+                "unmatched": "direct",
+                "lan_direct": True,
+            },
+        }
+    )
     assert (
-        output.metrics({"channels": [], "filter": "missing"})
-        == "No channel named 'missing'. See: alle channels ls"
+        "Router    127.0.0.1:54585 — 8 rule(s), LAN bypasses VPN, "
+        "unmatched → direct  (details: alle routes ls)" in text
     )
-
-    now = 10_000
-    monkeypatch.setattr(time, "time", lambda: now)
-    text = output.metrics(
-        {
-            "channels": [
-                {
-                    "provider": "nordvpn",
-                    "name": "us_1",
-                    "port": ":53124",
-                    "country": "US",
-                    "city": "(Any City)",
-                    "sent": 1536,
-                    "received": 1024**2,
-                    "total": 1024**3,
-                    "updated_at": now - 3600,
-                }
-            ]
-        }
-    )
-    assert "1.5 KB" in text
-    assert "1.0 MB" in text
-    assert "1.0 GB" in text
-    assert "1h ago" in text
-
-
-def test_metrics_empty_without_filter_and_age_units(monkeypatch):
-    assert output.metrics({"channels": [], "filter": None}).startswith(
-        "No channels configured"
-    )
-
-    now = 100_000
-    monkeypatch.setattr(time, "time", lambda: now)
-    text = output.metrics(
-        {
-            "channels": [
-                {
-                    "provider": "nordvpn",
-                    "name": "old_1",
-                    "port": ":53124",
-                    "country": "Old",
-                    "city": "(Any City)",
-                    "sent": 0,
-                    "received": 0,
-                    "total": 1024**4,
-                    "updated_at": now - 3 * 24 * 3600,
-                }
-            ]
-        }
-    )
-
-    assert "1.0 TB" in text
-    assert "3d ago" in text
 
 
 def test_test_result_empty_filter_and_default_failure_state():
@@ -275,6 +216,8 @@ def test_test_result_speed_and_failure_state_cells():
                     "error": None,
                     "latency_ms": 12,
                     "ip": "1.2.3.4",
+                    "sent": 1536,
+                    "received": 1024**3,
                     "speed_result": {
                         "download_bps": 150_000_000,
                         "upload_bps": 20_000_000,
@@ -288,11 +231,23 @@ def test_test_result_speed_and_failure_state_cells():
     assert "Timeout" in text
     assert "150.0 Mbps" in text
     assert "20.0 Mbps" in text
+    # traffic totals ride along on every test row (SENT/RECV columns)
+    assert "SENT" in text and "RECV" in text
+    assert "1.5 KB" in text and "1.0 GB" in text
 
 
-def test_router_mode_flags_lan_direct_only_when_off():
-    on = {"rule_count": 0, "killswitch": False, "lan_direct": True}
-    assert output._router_mode(on) == "pass-through (no rules)"
+def test_router_mode_always_shows_the_lan_state():
+    # LAN handling sits at priority zero — as consequential as unmatched
+    # handling, so it shows in both states, not only when disabled.
+    empty = {"rule_count": 0, "killswitch": False, "lan_direct": True}
+    assert output._router_mode(empty) == "pass-through (no rules)"
+    on = {
+        "rule_count": 8,
+        "killswitch": False,
+        "unmatched": "direct",
+        "lan_direct": True,
+    }
+    assert output._router_mode(on) == "8 rule(s), LAN bypasses VPN, unmatched → direct"
     off = {
         "rule_count": 2,
         "killswitch": True,
@@ -301,7 +256,8 @@ def test_router_mode_flags_lan_direct_only_when_off():
     }
     assert (
         output._router_mode(off)
-        == "2 rule(s), unmatched → block — kill-switch ON — LAN direct off"
+        == "2 rule(s), LAN follows rules, unmatched → block — kill-switch ON"
     )
-    legacy = {"rule_count": 0, "killswitch": False}  # pre-toggle JSON: default on
-    assert "LAN direct" not in output._router_mode(legacy)
+    # pre-toggle JSON carries no lan_direct key: the default is on
+    legacy = {"rule_count": 1, "killswitch": False, "unmatched": "direct"}
+    assert "LAN bypasses VPN" in output._router_mode(legacy)

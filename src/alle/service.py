@@ -524,47 +524,6 @@ def channel_list() -> dict:
     return {"providers": store.provider_names(), "channels": channels}
 
 
-def metrics_snapshot(channel: str | None = None) -> dict:
-    """Cumulative per-channel sent/received byte totals.
-
-    Rows are the currently-configured channels (totals for removed channels are
-    dropped at removal time), each joined with its stored counters. ``channel``
-    filters to one channel by bare id or ``provider/channel`` ref; a bare id
-    matching channels under more than one provider is rejected.
-    """
-    store = Store.load()
-    stored = metrics.totals()
-    wanted = _resolve_channel_filter(store, channel)
-    rows = []
-    for ch in store.channels():
-        if wanted and (ch.provider, ch.id) not in wanted:
-            continue
-        t = stored.get((ch.provider, ch.id), {})
-        sent = int(t.get("sent", 0))
-        received = int(t.get("received", 0))
-        rows.append(
-            {
-                "provider": ch.provider,
-                "name": ch.id,
-                "label": ch.label,
-                "port": f":{ch.port}",
-                "port_number": ch.port,
-                "country": _country_display(ch),
-                "city": _city_display(ch),
-                "sent": sent,
-                "received": received,
-                "total": sent + received,
-                "updated_at": int(t.get("updated_at", 0)),
-            }
-        )
-    return {
-        "channels": rows,
-        "filter": channel,
-        "total_sent": sum(r["sent"] for r in rows),
-        "total_received": sum(r["received"] for r in rows),
-    }
-
-
 def _is_pattern(ref: str) -> bool:
     return any(ch in ref for ch in "*?[")
 
@@ -1284,7 +1243,7 @@ def _daemon_info() -> dict:
     }
 
 
-def _test_row(channel, probe: dict) -> dict:
+def _test_row(channel, probe: dict, traffic: dict) -> dict:
     healthy = bool(probe.get("ok"))
     if healthy:
         state = "Healthy"
@@ -1311,6 +1270,12 @@ def _test_row(channel, probe: dict) -> dict:
         "ip": ip,
         "error": error,
         "probe": probe,
+        # Cumulative traffic totals ride along on every test row: `alle test`
+        # is the one per-channel table, so the durable counters (see
+        # alle.metrics) surface here rather than in a separate command.
+        "sent": int(traffic.get("sent", 0)),
+        "received": int(traffic.get("received", 0)),
+        "traffic_updated_at": int(traffic.get("updated_at", 0)),
         "speed_result": None,
     }
 
@@ -1386,7 +1351,15 @@ def test(
         )
 
     results = Engine(store).probe_all(channels)
-    rows = [_test_row(ch, results[f"{ch.provider}/{ch.id}"]) for ch in channels]
+    traffic = metrics.totals()
+    rows = [
+        _test_row(
+            ch,
+            results[f"{ch.provider}/{ch.id}"],
+            traffic.get((ch.provider, ch.id), {}),
+        )
+        for ch in channels
+    ]
     running = not rows or any(
         (row["probe"] or {}).get("error") != "stopped" for row in rows
     )
@@ -1418,6 +1391,13 @@ def test(
                 )
                 result["latency_ms"] = row["latency_ms"]
                 row["speed_result"] = {"tested": True, "skip_reason": None, **result}
+                # Re-read the totals after the transfers so the row reflects
+                # the traffic this very test just generated (as far as the
+                # daemon's sampler has banked it).
+                t = metrics.totals().get((row["provider"], row["name"]), {})
+                row["sent"] = int(t.get("sent", 0))
+                row["received"] = int(t.get("received", 0))
+                row["traffic_updated_at"] = int(t.get("updated_at", 0))
 
             if on_row is not None:
                 on_row(row)

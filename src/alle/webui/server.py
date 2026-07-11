@@ -101,7 +101,6 @@ _API_RESOURCE_METHODS = {
     "channels": {"GET", "POST", "DELETE"},
     "routes": {"GET", "POST", "DELETE"},
     "locations": {"GET"},
-    "metrics": {"GET"},
     "logs": {"GET"},
     "export": {"GET"},
     "import": {"POST"},
@@ -938,9 +937,6 @@ class _Handler(BaseHTTPRequestHandler):
             ("channels",): service.channel_list,
             ("routes",): service.routes_list,
             ("locations",): lambda: _locations(self.path),
-            ("metrics",): lambda: service.metrics_snapshot(
-                (parse_qs(urlparse(self.path).query).get("channel") or [None])[0]
-            ),
             ("logs",): lambda: {"text": service.logs_tail(_log_lines(self.path))},
         }
         fn = routes_.get(tuple(seg))

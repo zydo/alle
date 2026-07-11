@@ -7,7 +7,6 @@ text or JSON for the command-line adapter.
 from __future__ import annotations
 
 import json
-import time
 from typing import Any
 
 from alle import routes
@@ -40,29 +39,14 @@ def _mbps(bps: float | None) -> str:
     return f"{bps / 1e6:.1f} Mbps"
 
 
-def _ago(epoch: int) -> str:
-    if not epoch:
-        return "-"
-    secs = max(0, int(time.time()) - int(epoch))
-    if secs < 60:
-        return f"{secs}s ago"
-    minutes = secs // 60
-    if minutes < 60:
-        return f"{minutes}m ago"
-    hours = minutes // 60
-    if hours < 24:
-        return f"{hours}h ago"
-    return f"{hours // 24}d ago"
-
-
 def _display(channel: dict) -> str:
     """The channel's shown name: its label, or the id when no label is set."""
     return channel.get("label") or channel["name"]
 
 
 # The base columns every channel table leads with, in one place so the layout
-# stays identical across `channels ls`, `status`, `test`, and `metrics`. Each of
-# those extends this with its own trailing columns (state, latency, traffic, …).
+# stays identical across `channels ls` and `test` (the one detail table). Each
+# extends this with its own trailing columns (state, latency, traffic, …).
 # ID is the globally-unique, provider-qualified handle (``nordvpn/canada_1``) —
 # the same ref commands accept — so it needs no separate provider column.
 BASE_HEADERS = ["LABEL", "ID", "PORT", "COUNTRY", "CITY"]
@@ -187,16 +171,20 @@ def _router_where(router: dict) -> str:
 
 def _router_mode(router: dict) -> str:
     """One phrase for the entrypoint's behavior — must never let a user believe
-    they are behind a VPN when the router is passing traffic through."""
+    they are behind a VPN when the router is passing traffic through.
+
+    The two priority-boundary toggles always show together: the built-in
+    LAN block (priority zero — does local traffic bypass the VPN rules?) and
+    unmatched handling (priority last — does everything else leak direct or
+    hit the kill-switch?).
+    """
     n = router.get("rule_count", 0)
     if not n and not router.get("killswitch"):
-        mode = "pass-through (no rules)"
-    else:
-        mode = f"{n} rule(s), unmatched → {router['unmatched']}"
-        if router.get("killswitch"):
-            mode += " — kill-switch ON"
-    if not router.get("lan_direct", True):
-        mode += " — LAN direct off"
+        return "pass-through (no rules)"
+    lan = "LAN bypasses VPN" if router.get("lan_direct", True) else "LAN follows rules"
+    mode = f"{n} rule(s), {lan}, unmatched → {router['unmatched']}"
+    if router.get("killswitch"):
+        mode += " — kill-switch ON"
     return mode
 
 
@@ -255,27 +243,6 @@ def routes_list(data: dict) -> str:
     return "\n".join(lines)
 
 
-def metrics(data: dict) -> str:
-    channels = data["channels"]
-    if not channels:
-        if data.get("filter"):
-            return f"No channel named {data['filter']!r}. See: alle channels ls"
-        return "No channels configured. Add one:  alle channels add nordvpn --country …"
-
-    headers = [*BASE_HEADERS, "SENT", "RECV", "TOTAL", "SEEN"]
-    rows = [
-        [
-            *_base_cells(c),
-            _bytes(c["sent"]),
-            _bytes(c["received"]),
-            _bytes(c["total"]),
-            _ago(c["updated_at"]),
-        ]
-        for c in channels
-    ]
-    return "\n".join(_table(headers, rows))
-
-
 def _latency(ms: float | int | None) -> str:
     return f"{ms}ms" if ms is not None else "-"
 
@@ -300,7 +267,18 @@ def test_result(data: dict) -> str:
         return "No channels configured. Add one:  alle channels add nordvpn --country …"
 
     if data.get("speed"):
-        headers = [*BASE_HEADERS, "STATE", "LATENCY", "IP", "DOWNLOAD", "UPLOAD"]
+        # --speed strictly APPENDS to the plain table: same columns in the
+        # same order, plus DOWNLOAD and UPLOAD at the end.
+        headers = [
+            *BASE_HEADERS,
+            "STATE",
+            "LATENCY",
+            "IP",
+            "SENT",
+            "RECV",
+            "DOWNLOAD",
+            "UPLOAD",
+        ]
         rows = []
         for c in channels:
             speed = c.get("speed_result") or {}
@@ -310,19 +288,23 @@ def test_result(data: dict) -> str:
                     _state_cell(c),
                     _latency(c.get("latency_ms")),
                     c.get("ip") or "-",
+                    _bytes(c.get("sent", 0)),
+                    _bytes(c.get("received", 0)),
                     _mbps(speed.get("download_bps")),
                     _mbps(speed.get("upload_bps")),
                 ]
             )
         return "\n".join(_table(headers, rows))
 
-    headers = [*BASE_HEADERS, "STATE", "LATENCY", "IP"]
+    headers = [*BASE_HEADERS, "STATE", "LATENCY", "IP", "SENT", "RECV"]
     rows = [
         [
             *_base_cells(c),
             _state_cell(c),
             _latency(c.get("latency_ms")),
             c.get("ip") or "-",
+            _bytes(c.get("sent", 0)),
+            _bytes(c.get("received", 0)),
         ]
         for c in channels
     ]
@@ -333,8 +315,8 @@ def test_result(data: dict) -> str:
 # widths for them. Their values aren't known until each channel finishes, so the
 # streamed table can't size them from the data; these floors fit typical
 # "Healthy" / "23ms" / "45.2 Mbps" cells and keep rows aligned as they appear.
-_SPEED_RESULT_HEADERS = ["STATE", "LATENCY", "IP", "DOWNLOAD", "UPLOAD"]
-_SPEED_RESULT_WIDTHS = [7, 7, 15, 10, 10]
+_SPEED_RESULT_HEADERS = ["STATE", "LATENCY", "IP", "SENT", "RECV", "DOWNLOAD", "UPLOAD"]
+_SPEED_RESULT_WIDTHS = [7, 7, 15, 8, 8, 10, 10]
 _SPEED_HEADERS = [*BASE_HEADERS, *_SPEED_RESULT_HEADERS]
 
 
@@ -374,6 +356,8 @@ def test_stream_row(row: dict, widths: list[int]) -> str:
         _state_cell(row),
         _latency(row.get("latency_ms")),
         row.get("ip") or "-",
+        _bytes(row.get("sent", 0)),
+        _bytes(row.get("received", 0)),
         _mbps(speed.get("download_bps")),
         _mbps(speed.get("upload_bps")),
     ]
@@ -432,7 +416,24 @@ def _skew_lines(snapshot: dict) -> list[str]:
     return []
 
 
+def _channels_summary(channels: list[dict]) -> str:
+    """Per-provider channel counts: ``NordVPN: 6 channels, Proton VPN: 1 channel``."""
+    from alle.providers import display_name
+
+    counts: dict[str, int] = {}
+    for c in channels:
+        counts[c["provider"]] = counts.get(c["provider"], 0) + 1
+    return ", ".join(
+        f"{display_name(p)}: {n} channel" + ("" if n == 1 else "s")
+        for p, n in sorted(counts.items())
+    )
+
+
 def status(snapshot: dict) -> str:
+    """The system-level summary: run state, per-provider channel counts, router
+    posture, Web UI. Deliberately no per-channel table — `alle test` is the one
+    channel-detail view (fresh probes + traffic), and rendering the same rows
+    here from cached probes needed an AGO column just to qualify staleness."""
     channels = snapshot["channels"]
     if not snapshot["running"]:
         lines = ["Alle - Inactive", *_skew_lines(snapshot), *_runtime_lines(snapshot)]
@@ -444,31 +445,20 @@ def status(snapshot: dict) -> str:
         return "\n".join(lines)
 
     lines = ["Alle - Active", *_skew_lines(snapshot), *_runtime_lines(snapshot)]
+    if channels:
+        lines.append(
+            f"  Channels  {_channels_summary(channels)}  (details: alle channels ls)"
+        )
     router = snapshot.get("router")
     if router:
-        lines.append(f"  Router  {_router_where(router)} — {_router_mode(router)}")
+        lines.append(
+            f"  Router    {_router_where(router)} — {_router_mode(router)}"
+            "  (details: alle routes ls)"
+        )
     if snapshot.get("web_ui"):
-        lines.append(f"  Web UI  {snapshot['web_ui']}  (open it: alle ui)")
+        lines.append(f"  Web UI    {snapshot['web_ui']}  (open it: alle ui)")
     if not channels:
         lines.append(
             '  (no channels yet — add one: alle channels add nordvpn --country "United States")'
         )
-        return "\n".join(lines)
-
-    headers = [*BASE_HEADERS, "STATE", "AGO", "LATENCY", "IP"]
-    rows = []
-    for channel in channels:
-        latency = (
-            f"{channel['latency_ms']}ms" if channel["latency_ms"] is not None else "-"
-        )
-        probe = channel.get("probe") or {}
-        rows.append(
-            [
-                *_base_cells(channel),
-                channel["state"],
-                _ago(probe.get("at", 0)) if probe else "-",
-                latency,
-                channel["ip"] or "-",
-            ]
-        )
-    return "\n".join(lines + _table(headers, rows))
+    return "\n".join(lines)

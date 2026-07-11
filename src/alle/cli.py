@@ -582,10 +582,10 @@ def _run_streaming_test(args):
     if not stream:
         print(output.test_result(result))  # "No channels configured." etc.
         return
+    # No trailing summary line: plain `alle test` prints none either, and a
+    # failing channel is already visible in its own row (STATE carries the
+    # probe's failure reason; its skipped transfers render as "-").
     stream[0].end()
-    healthy = result.get("healthy_count", 0)
-    failed = result.get("failed_count", 0)
-    print(f"{healthy} healthy · {failed} failed")
 
 
 class _SpeedStream:
@@ -648,10 +648,6 @@ class _SpeedStream:
         with self._lock:
             sys.stderr.write("\r\033[K")
             sys.stderr.flush()
-
-
-def cmd_metrics(args):
-    _print_or_json(service.metrics_snapshot(args.channel), output.metrics, args.json)
 
 
 # ---- export / import / validate ---------------------------------------------
@@ -1141,7 +1137,7 @@ def build_parser() -> argparse.ArgumentParser:
     lo.set_defaults(func=cmd_locations)
 
     # top-level verbs
-    st = sub.add_parser("status", help="show alle + per-channel status")
+    st = sub.add_parser("status", help="show system status (run state, router, Web UI)")
     st.add_argument("--json", action="store_true", help="print machine-readable JSON")
     st.set_defaults(func=cmd_status)
     sub.add_parser(
@@ -1161,7 +1157,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ui.set_defaults(func=cmd_ui)
     te = sub.add_parser(
-        "test", help="probe channels now; optionally speed-test healthy ones"
+        "test",
+        help="per-channel table: fresh probe (IP/latency) + traffic totals; "
+        "--speed adds download/upload",
     )
     te.add_argument(
         "--speed", action="store_true", help="also run download/upload tests"
@@ -1172,14 +1170,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     te.add_argument("--json", action="store_true", help="print machine-readable JSON")
     te.set_defaults(func=cmd_test)
-    me = sub.add_parser("metrics", help="show per-channel cumulative traffic totals")
-    me.add_argument(
-        "channel",
-        nargs="?",
-        help="filter to one channel (id or provider/id; default: all)",
-    )
-    me.add_argument("--json", action="store_true", help="print machine-readable JSON")
-    me.set_defaults(func=cmd_metrics)
 
     # export / import / validate (the declarative setup bundle)
     ex = sub.add_parser(

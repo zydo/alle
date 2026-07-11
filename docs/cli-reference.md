@@ -37,7 +37,6 @@ omit the prefix.
   - [`alle status`](#alle-status)
   - [`alle start` / `stop` / `restart`](#alle-start--stop--restart)
   - [`alle test`](#alle-test)
-  - [`alle metrics`](#alle-metrics)
   - [`alle export [--out <file>]`](#alle-export---out-file)
   - [`alle import <file> [--replace] [--yes]`](#alle-import-file---replace---yes)
   - [`alle validate <file>`](#alle-validate-file)
@@ -57,7 +56,7 @@ omit the prefix.
 - **Help** — run `alle`, `alle <group>`, or any command with `-h/--help` to see usage.
   A group or command invoked with no action prints its help instead of erroring.
 - **`--json`** — read commands (`providers ls`, `channels ls`, `routes ls`,
-  `locations`, `status`, `test`, `metrics`) accept `--json` for a stable,
+  `locations`, `status`, `test`) accept `--json` for a stable,
   machine-readable projection of the same data. This is the scripting/cross-language interface (pipe to `jq`, etc.).
   It is **not** the programmatic API for `alle`'s own components — those call the core
   (`alle.service`) directly rather than shelling out. Human table output is for
@@ -258,7 +257,7 @@ alle channels setlabel japan_1                          # omit to clear → show
 ```
 
 `<channel>` is a channel id or `provider/id` ref (no globs — a label targets one
-channel). Every channel table (`channels ls`, `status`, `test`, `metrics`) shows
+channel). Every channel table (`channels ls`, `test`) shows
 the same `LABEL` + `ID` columns — `LABEL` is the label or the id when unset, `ID`
 is the provider-qualified ref (`nordvpn/japan_1`); `--json` on those carries the
 bare `name` (id), `provider`, and `label` separately.
@@ -384,7 +383,7 @@ the raw matcher rows (`ID`, `RULESET`, `MATCH`, `TARGET`, `NOTE`) for debugging
 against sing-box logs.
 
 ```text
-Router entrypoint 127.0.0.1:54585 — 3 rule(s), unmatched → direct
+Router entrypoint 127.0.0.1:54585 — 3 rule(s), LAN bypasses VPN, unmatched → direct
 rs1  Streaming → nordvpn/united_states_1 (2 matcher(s))
   r1  domain_suffix netflix.com
   r2  domain_suffix hulu.com
@@ -483,28 +482,28 @@ alle locations nordvpn --country "United States"
 
 `alle status [--json]`
 
-Show whether `alle` is running, the router entrypoint's address and mode, plus a
-per-channel health table from the latest probes: `LABEL`, `ID`, `PORT`,
-`COUNTRY`, `CITY`, `STATE`, `AGO` (probe age), `LATENCY` (latency), `IP` (exit
-IP). Every channel table shares the same `LABEL` + `ID` lead — `LABEL` is the
-display name (the id when no label is set), `ID` is the provider-qualified ref
-commands take.
+The system-level summary: whether `alle` is running, per-provider channel
+counts, the router entrypoint's address and posture, and the Web UI URL —
+deliberately **no per-channel table**. Channel detail lives in one place,
+[`alle test`](#alle-test) (fresh probes + traffic totals); rendering the same
+rows here from cached probes would just duplicate that table behind a probe-age
+column. Daemon problems (version skew after an upgrade, a crash-looping or
+config-rejected sing-box) surface as warning lines.
 
 ```text
 Alle - Active
-  Router  127.0.0.1:54585 — 2 rule(s), unmatched → direct
-LABEL           ID                      PORT    COUNTRY        CITY        STATE   AGO      LATENCY  IP
---------------  ----------------------  ------  -------------  ----------  ------  -------  -------  ---------------
-Test runner     nordvpn/japan_1         :53124  Japan          (Any City)  Active  19s ago  398ms    93.118.43.151
-wg_us_ca_842    protonvpn/wg_us_ca_842  :53126  United States  California  Active  19s ago  87ms     185.98.169.31
+  Channels  NordVPN: 6 channels, Proton VPN: 1 channel  (details: alle channels ls)
+  Router    127.0.0.1:54585 — 2 rule(s), LAN bypasses VPN, unmatched → direct  (details: alle routes ls)
+  Web UI    http://alle-cb9cd104.localhost:58601  (open it: alle ui)
 ```
 
-The router line always states the entrypoint's behavior — `pass-through (no
-rules)`, `N rule(s), unmatched → direct`, or `… → block — kill-switch ON` — so
-it is never ambiguous whether unmatched traffic is inside a VPN (it is not).
-
-`STATE` is `Active`, `Pending`, a probe error, or a reconnect state
-(`Reconnecting (N)` / `Reconnect failed`) when auto-reconnect is at work.
+The router line always states the entrypoint's full posture — `pass-through
+(no rules)`, or the rule count plus the two priority boundaries: the built-in
+LAN block (`LAN bypasses VPN` / `LAN follows rules`) and unmatched handling
+(`unmatched → direct`, or `… → block — kill-switch ON`) — so it is never
+ambiguous whether traffic is inside a VPN. `--json` still carries the full
+per-channel state (the Web UI and scripts read it); only the human rendering
+is a summary.
 
 ---
 
@@ -528,22 +527,29 @@ alle stop
 
 `alle test [--channel <id>] [--speed] [--json]`
 
-Probe channels **now** (rather than waiting for the next background cycle) and print a
-quick connectivity table: `LABEL`, `ID`, `PORT`, `COUNTRY`, `CITY`, `STATE`,
-`LATENCY` (probe latency), and `IP` (exit IP). With `--channel`, test just one channel by id.
-`STATE` is `Healthy`, or the failure reason (`Stopped` while the runtime is down, otherwise
-the probe error — e.g. `Timeout`, `Failed`) — the same convention as [`alle status`](#alle-status).
+**The** per-channel table: probe channels **now** (rather than waiting for the
+next background cycle) and print each channel's fresh connectivity plus its
+cumulative traffic: `LABEL`, `ID`, `PORT`, `COUNTRY`, `CITY`, `STATE`,
+`LATENCY` (probe latency), `IP` (exit IP), `SENT`, `RECV` (durable totals since
+counters began). With `--channel`, test just one channel by id. `STATE` is
+`Healthy`, or the failure reason (`Stopped` while the runtime is down,
+otherwise the probe error — e.g. `Timeout`, `Failed`); a failing channel marks
+its own row, it never aborts the rest of the run. Every channel table shares
+the same `LABEL` + `ID` lead — `LABEL` is the display name (the id when no
+label is set), `ID` is the provider-qualified ref commands take.
 
 ```text
-LABEL           ID                      PORT    COUNTRY        CITY        STATE     LATENCY  IP
---------------  ----------------------  ------  -------------  ----------  --------  -------  ---------------
-Test runner     nordvpn/japan_1         :53124  Japan          (Any City)  Healthy   398.0ms  93.118.43.151
-wg_us_ca_842    protonvpn/wg_us_ca_842  :53126  United States  California  Timeout   -        -
+LABEL         ID                      PORT    COUNTRY        CITY        STATE    LATENCY  IP             SENT      RECV
+------------  ----------------------  ------  -------------  ----------  -------  -------  -------------  --------  --------
+Test runner   nordvpn/japan_1         :53124  Japan          (Any City)  Healthy  398.0ms  93.118.43.151  104.0 MB  396.7 MB
+wg_us_ca_842  protonvpn/wg_us_ca_842  :53126  United States  California  Timeout  -        -              28.1 MB   141.8 MB
 ```
 
-Add `--speed` to run the slower download/upload test after the fresh connectivity
-probe. Speed tests run only for channels that were healthy in that same probe;
-unhealthy channels are shown with skipped speed columns.
+Add `--speed` to run the slower download/upload test after the fresh
+connectivity probe; it appends `DOWNLOAD` and `UPLOAD` columns. Speed tests run
+only for channels that were healthy in that same probe; an unhealthy channel
+keeps its row (failure reason in `STATE`, `-` in the speed columns) while the
+others proceed.
 
 In an interactive terminal `alle test --speed` **streams**: the table header
 prints up front and each channel's row appears the moment its own test completes
@@ -563,36 +569,13 @@ bundles TCP/TLS setup, so it reads higher than raw ping — the *ordering* acros
 is what's meaningful. `UPLOAD` is bounded by your machine's shared uplink, so channels
 tend to converge there.
 
----
-
-## `alle metrics`
-
-`alle metrics [<channel>] [--json]`
-
-Per-channel **cumulative** traffic totals (sent/received/total) since counters began,
-plus when traffic was last seen. Columns: `LABEL`, `ID`, `PORT`, `COUNTRY`,
-`CITY`, `SENT`, `RECV`, `TOTAL`, `SEEN`. Optionally filter to one channel by id.
-
-```text
-LABEL           ID                      PORT    COUNTRY        CITY        SENT      RECV      TOTAL     SEEN
---------------  ----------------------  ------  -------------  ----------  --------  --------  --------  -------
-Test runner     nordvpn/japan_1         :53124  Japan          (Any City)  104.0 MB  396.7 MB  500.7 MB  3s ago
-wg_us_ca_842    protonvpn/wg_us_ca_842  :53126  United States  California  28.1 MB   141.8 MB  169.9 MB  1m ago
-```
-
-```bash
-alle metrics
-alle metrics japan_1
-alle metrics --json
-```
-
-**Accuracy note:** totals are sampled from live connections every couple of
-seconds. Transfers that open and finish entirely between two samples are
-under-counted, and up to one sample interval is skipped when sing-box or the
-daemon (re)starts (counters are re-baselined so nothing is ever counted
-twice) — both inherent to the data source, not bugs. Use `metrics` for
-cumulative usage trends, not exact accounting. (`--json` also includes
-`total_sent` / `total_received` aggregates.)
+**Traffic accuracy note:** `SENT`/`RECV` are sampled from live connections
+every couple of seconds. Transfers that open and finish entirely between two
+samples are under-counted, and up to one sample interval is skipped when
+sing-box or the daemon (re)starts (counters are re-baselined so nothing is
+ever counted twice) — both inherent to the data source, not bugs. Use them for
+cumulative usage trends, not exact accounting. (`--json` also carries a
+`traffic_updated_at` epoch per row — when traffic last flowed.)
 
 ---
 

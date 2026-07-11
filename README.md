@@ -79,7 +79,7 @@ run at the same time.
 
 | Phase             | Status                                                                                                           |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Core CLI          | Providers, channels, per-channel proxies, status, tests, logs, metrics                                           |
+| Core CLI          | Providers, channels, per-channel proxies, status, tests (probe + speed + traffic), logs                          |
 | Routing           | Ruleset-based router entrypoint with domain/CIDR/all matchers, kill-switch, CLI shadow lint, built-in LAN bypass |
 | Web UI            | Dashboard (channels, probe/speed, routes, kill-switch) + Logs page                                               |
 | Desktop companion | Planned                                                                                                          |
@@ -161,12 +161,12 @@ Use that port from any tool or app that supports an HTTP or SOCKS proxy:
 curl -x http://127.0.0.1:53124 https://api.ipify.org
 ```
 
-Check health and traffic:
+Check health and traffic (`status` is the system summary; `test` is the
+per-channel table — fresh IP/latency plus cumulative sent/received):
 
 ```bash
 alle status
 alle test
-alle metrics
 ```
 
 **Provider setup**
@@ -206,7 +206,7 @@ nothing and tells you the channel already exists.
 Channels are identified by a globally-unique, provider-qualified id
 (`nordvpn/united_states_1`) — the handle every command takes, shown in the `ID`
 column. You can also give one a display label for readability (the `LABEL`
-column in `channels ls`, `status`, `test`, and `metrics`). The id never changes,
+column in `channels ls` and `test`). The id never changes,
 so relabelling is always safe:
 
 ```bash
@@ -225,7 +225,6 @@ alle channels ls
 alle channels ls --refs
 alle status
 alle test
-alle metrics
 alle logs
 alle stop
 ```
@@ -235,7 +234,7 @@ Most read commands support `--json` for scripts:
 ```bash
 alle status --json
 alle channels ls --json
-alle metrics --json
+alle test --json
 ```
 
 Channel and provider removals accept multiple targets:

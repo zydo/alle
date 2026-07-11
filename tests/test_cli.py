@@ -86,14 +86,13 @@ def test_channel_commands_share_identity_columns(capsys, no_singbox):
         service.channel_list()["channels"],
         service.status_snapshot()["channels"],
         service.test()["channels"],
-        service.metrics_snapshot()["channels"],
     ):
         assert rows
         assert set(basics) <= set(rows[0])
         assert rows[0]["port"].startswith(":")
 
     # every table that renders without a running daemon shares the LABEL+ID lead
-    for cmd in (["channels", "ls"], ["test"], ["metrics"]):
+    for cmd in (["channels", "ls"], ["test"]):
         header = run_cli(cmd, capsys).splitlines()[0].split()
         assert header[:2] == ["LABEL", "ID"], (cmd, header)
     # ID is the provider-qualified, globally-unique ref
