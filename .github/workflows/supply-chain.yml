@@ -26,8 +26,15 @@ jobs:
       # Scan the lockfile, not pyproject.toml: osv-scanner reads the pinned
       # versions from uv.lock instead of resolving, so the result reflects what
       # actually installs.
+      #
+      # The repo's root action.yml is metadata-only (no runs:) — the runnable
+      # scanner is the osv-scanner-action/ subdirectory action, a docker action
+      # wrapping the same pinned release. Google recommends their reusable
+      # workflow instead, but that wants security-events: write for a SARIF
+      # upload this job doesn't need; the SHA pin freezes the sub-action's
+      # behavior anyway.
       - name: OSV scan (uv.lock)
-        uses: google/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
         with:
           scan-args: |-
             --lockfile=uv.lock
