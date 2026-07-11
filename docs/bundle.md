@@ -135,9 +135,9 @@ router:
       target: nordvpn/united_states_1    # <provider>/<channel>, direct, or block
       matchers:
         - netflix.com          # bare strings are inferred, exactly like the CLI:
-        - api.example.com      #   2 labels -> suffix match, 3+ -> exact domain
+        - api.example.com      #   domains match themselves + all subdomains
         - 10.8.0.0/16          #   IP/CIDR -> ip_cidr
-        - {type: domain, value: cdn.netflix.com}   # or explicit {type, value}
+        - {type: domain_suffix, value: cdn.netflix.com}   # or explicit {type, value}
     - name: Everything else
       target: direct
       matchers: [all]          # the catch-all

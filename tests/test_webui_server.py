@@ -597,7 +597,7 @@ def test_remove_channel_blocked_by_rule_returns_verbatim_message(live):
         },
     )
     Store.load().create_ruleset(
-        "protonvpn/wg_de_1", "protonvpn/wg_de_1", [("domain", "x.com")]
+        "protonvpn/wg_de_1", "protonvpn/wg_de_1", [("domain_suffix", "x.com")]
     )
 
     st, body, _ = _req(

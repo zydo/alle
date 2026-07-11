@@ -253,7 +253,7 @@ async function consumeSpeedStream(body) {
   const dec = new TextDecoder();
   let buf = "";
   let errored = false;
-  for (;;) {
+  for (; ;) {
     const { value, done } = await reader.read();
     if (done) break;
     buf += dec.decode(value, { stream: true });
@@ -816,9 +816,9 @@ function matcherInputHTML(buttonText) {
       <div class="or-divider" aria-hidden="true"><span>or</span></div>
       <label class="field" id="match-list"><span>Specific domains / IPs (one per line)</span><textarea id="matchers" placeholder="netflix.com\napi.openai.com\n10.8.0.0/16"></textarea>
         <div class="match-examples">
-          <div class="mx-title">Examples:</div>
-          <div class="mx-item"><code>netflix.com</code>suffix match — any <code>*.netflix.com</code></div>
-          <div class="mx-item"><code>api.anthropic.com</code>that exact subdomain only</div>
+          <div class="mx-title">Examples (a domain matches itself and all its subdomains):</div>
+          <div class="mx-item"><code>netflix.com</code>the domain plus any <code>*.netflix.com</code></div>
+          <div class="mx-item"><code>api.anthropic.com</code>that host plus anything under it</div>
           <div class="mx-item"><code>185.98.169.31</code>that exact IPv4 address</div>
           <div class="mx-item"><code>185.81.1.1/16</code>the whole 185.81.0.0/16 IPv4 CIDR range</div>
           <div class="mx-item"><code>2001:db8::1</code>that exact IPv6 address</div>

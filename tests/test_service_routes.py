@@ -141,14 +141,14 @@ def test_routes_list_annotates_and_filters(channel):
 
 
 def test_routes_remove_reports_all_missing_ids(channel):
-    _add("domain", "a.com", "direct")
+    _add("domain_suffix", "a.com", "direct")
     with pytest.raises(service.ServiceError, match="r7, r9"):
         service.routes_remove(["r1", "r7", "r9"])
     assert [r["id"] for r in Store.load().rules()] == ["r1"]  # nothing removed
 
 
 def test_routes_remove_dry_run_then_real(channel):
-    _add("domain", "a.com", "direct")
+    _add("domain_suffix", "a.com", "direct")
     dry = service.routes_remove(["r1"], dry_run=True)
     assert dry["dry_run"] is True
     assert [r["id"] for r in Store.load().rules()] == ["r1"]
@@ -247,22 +247,22 @@ def test_referenced_channel_removal_is_blocked_with_fix_commands(channel):
 
 
 def test_referenced_provider_removal_is_blocked(channel):
-    _add("domain", "a.com", "nordvpn/us_1")
+    _add("domain_suffix", "a.com", "nordvpn/us_1")
     with pytest.raises(service.ServiceError, match="alle routes rm r1"):
         service.provider_remove_many(["nordvpn"])
     assert Store.load().has_provider("nordvpn")
 
 
 def test_unreferenced_removal_works_after_rules_are_gone(channel):
-    _add("domain", "a.com", "nordvpn/us_1")
+    _add("domain_suffix", "a.com", "nordvpn/us_1")
     service.routes_remove(["r1"])
     result = service.channel_remove_many(["us_1"])
     assert result["channels"][0]["channel"] == "us_1"
 
 
 def test_direct_and_block_targets_never_block_removal(channel):
-    _add("domain", "a.com", "direct")
-    _add("domain", "b.com", "block")
+    _add("domain_suffix", "a.com", "direct")
+    _add("domain_suffix", "b.com", "block")
     assert service.channel_remove_many(["us_1"])["channels"]
 
 

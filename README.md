@@ -262,7 +262,7 @@ so apps and future OS-level profiles can point at it permanently.
 ```bash
 alle routes ruleset create Streaming --via nordvpn/united_states_1 --domain netflix.com --domain hulu.com
 alle routes ruleset create LocalDirect --via direct --cidr 192.168.0.0/16
-alle routes ruleset create BlockTrackers --via block --domain-exact tracker.example.com
+alle routes ruleset create BlockTrackers --via block --domain tracker.example.com
 alle routes ruleset create DefaultVPN --via nordvpn/japan_1 --all
 alle routes ls
 ```
@@ -272,11 +272,10 @@ alle routes ls
   is priority: **first matching ruleset wins**. Reorder blocks with
   `alle routes reorder rs3 rs1 rs2`.
 - **Matchers** inside a ruleset are unordered because same-target matchers
-  commute. Use `--domain` for the friendly form (bare domains become suffix
-  matches, meaningful subdomains become exact matches), `--domain-exact` /
-  `--domain-suffix` for advanced overrides, `--cidr` for destination IP/CIDR,
-  and `--all` for a catch-all. A matcher that can never win because an earlier
-  ruleset covers it is flagged as *shadowed* in `routes ls`.
+  commute. Use `--domain` for a destination domain — it matches the domain
+  *and all of its subdomains* (dot-boundary) — `--cidr` for destination
+  IP/CIDR, and `--all` for a catch-all. A matcher that can never win because
+  an earlier ruleset covers it is flagged as *shadowed* in `routes ls`.
 - **Unmatched traffic goes direct** — without a VPN — like other modern VPN
   clients. To block unmatched traffic instead (a kill-switch for the router
   entrypoint), turn it on explicitly: `alle routes killswitch on`. Per-channel

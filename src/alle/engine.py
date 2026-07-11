@@ -186,8 +186,10 @@ class Engine:
                     "outbound": "direct",
                 }
             )
+        # One domain semantic: every domain rule compiles to sing-box's
+        # dot-boundary domain_suffix (the domain + its subdomains). Legacy
+        # exact "domain" rows are normalized away at state load.
         matcher_fields = {
-            "domain": "domain",
             "domain_suffix": "domain_suffix",
             "ip_cidr": "ip_cidr",
         }

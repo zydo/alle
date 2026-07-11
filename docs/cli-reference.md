@@ -303,11 +303,12 @@ Before any user rule, a **built-in LAN block** (on by default — see
 multicast destinations direct, so a catch-all VPN rule never cuts off printers,
 NAS boxes, router admin pages, or LAN discovery.
 
-**Domain matchers default to suffix matching.** A domain you add (`netflix.com`,
-`api.openai.com`) matches that domain *and all of its subdomains* — the usual
-intent. Use the explicit `--domain` (exact) matcher for the rare host-only case.
-`routes ls` flags any rule that can never match because an earlier rule (or the
-built-in LAN block, when on) already covers it.
+**Domain matchers always cover subdomains.** A domain you add
+(`netflix.com`, `api.openai.com`) matches that domain *and all of its
+subdomains*, dot-boundary (`example.co.uk` never matches `otherexample.co.uk`).
+There is deliberately no exact-only domain matcher — one semantic keeps rules
+predictable. `routes ls` flags any rule that can never match because an
+earlier rule (or the built-in LAN block, when on) already covers it.
 
 **DNS is not routed for you — mind DNS leakage.** alle routes by destination
 (IP/CIDR/domain), it does not intercept the system resolver. An app that
@@ -333,18 +334,16 @@ one exit target. `<target>` is where matched traffic exits:
 Matcher flags may be repeated; creation is atomic, so a multi-domain ruleset
 lands in one transaction and one daemon reconcile:
 
-| Matcher               | Matches / inference                                         |
-| --------------------- | ----------------------------------------------------------- |
-| `--domain <d>`        | friendly form: bare domains become suffix, subdomains exact |
-| `--domain-exact <d>`  | advanced: exactly `d`                                       |
-| `--domain-suffix <d>` | advanced: `d` and all subdomains (dot-boundary)             |
-| `--cidr <net>`        | destination IP in `net` (a bare IP means that one address)  |
-| `--all`               | everything — the catch-all for "VPN by default"             |
+| Matcher        | Matches                                                    |
+| -------------- | ---------------------------------------------------------- |
+| `--domain <d>` | `d` and all of its subdomains (dot-boundary)               |
+| `--cidr <net>` | destination IP in `net` (a bare IP means that one address) |
+| `--all`        | everything — the catch-all for "VPN by default"            |
 
 ```bash
 alle routes ruleset create Streaming --via nordvpn/united_states_1 --domain netflix.com --domain hulu.com
 alle routes ruleset create LocalDirect --via direct --cidr 192.168.0.0/16
-alle routes ruleset create BlockTrackers --via block --domain-exact tracker.example.com
+alle routes ruleset create BlockTrackers --via block --domain tracker.example.com
 alle routes ruleset create DefaultVPN --via nordvpn/japan_1 --all
 ```
 
@@ -703,7 +702,8 @@ It runs the self-contained (`--replace`-style) checks:
 - If a `router` block is present, `killswitch` and `lan_direct` must be set
   explicitly; ruleset names are non-empty, each `target` is `direct`, `block`,
   or a `<provider>/<channel>` defined in the bundle, and every matcher type is
-  one of the supported kinds (`domain`, `domain_suffix`, `ip_cidr`, `all`).
+  one of the supported kinds (`domain_suffix`, `ip_cidr`, `all`; the legacy
+  `domain` type is accepted and read as `domain_suffix`).
 
 ```text
 $ alle validate broken.yaml

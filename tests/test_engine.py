@@ -106,7 +106,7 @@ def test_router_entrypoint_compiles_rules_in_order():
     store = _store(
         ("nordvpn", "us_1", 8888, "US", "", dict(WG)),
         router=_router(
-            ("domain", "api.google.com", "nordvpn/us_1"),
+            ("domain_suffix", "api.google.com", "nordvpn/us_1"),
             ("domain_suffix", "netflix.com", "direct"),
             ("ip_cidr", "10.0.0.0/8", "block"),
             ("all", "", "nordvpn/us_1"),
@@ -131,7 +131,7 @@ def test_router_entrypoint_compiles_rules_in_order():
     }  # the built-in LAN block precedes every user rule
     assert rules[3] == {
         "inbound": ["in-router"],
-        "domain": ["api.google.com"],
+        "domain_suffix": ["api.google.com"],
         "outbound": "out-nordvpn-us_1",
     }
     assert rules[4] == {
@@ -191,8 +191,8 @@ def test_dangling_rule_reference_fails_closed_and_is_reported():
     store = _store(
         ("nordvpn", "us_1", 8888, "US", "", dict(WG)),
         router=_router(
-            ("domain", "a.com", "nordvpn/gone_1"),  # no such channel
-            ("domain", "b.com", "nordvpn/us_1"),
+            ("domain_suffix", "a.com", "nordvpn/gone_1"),  # no such channel
+            ("domain_suffix", "b.com", "nordvpn/us_1"),
         ),
     )
     config, errors = Engine(store)._build_config()
@@ -200,12 +200,12 @@ def test_dangling_rule_reference_fails_closed_and_is_reported():
     # the dangling rule blocks its traffic instead of leaking it via final:direct
     assert {
         "inbound": ["in-router"],
-        "domain": ["a.com"],
+        "domain_suffix": ["a.com"],
         "action": "reject",
     } in config["route"]["rules"]
     assert {
         "inbound": ["in-router"],
-        "domain": ["b.com"],
+        "domain_suffix": ["b.com"],
         "outbound": "out-nordvpn-us_1",
     } in config["route"]["rules"]  # healthy rule survives untouched
 
@@ -213,13 +213,13 @@ def test_dangling_rule_reference_fails_closed_and_is_reported():
 def test_rule_targeting_missing_provider_fails_closed():
     store = _store(
         ("nordvpn", "us_1", 8888, "US", "", dict(WG)),
-        router=_router(("domain", "a.com", "protonvpn/nl_1")),  # provider gone
+        router=_router(("domain_suffix", "a.com", "protonvpn/nl_1")),  # provider gone
     )
     config, errors = Engine(store)._build_config()
     assert "rule r1" in errors and "protonvpn/nl_1" in errors["rule r1"]
     assert {
         "inbound": ["in-router"],
-        "domain": ["a.com"],
+        "domain_suffix": ["a.com"],
         "action": "reject",
     } in config["route"]["rules"]
 
@@ -227,7 +227,7 @@ def test_rule_targeting_missing_provider_fails_closed():
 def test_rule_targeting_unbuildable_channel_fails_closed():
     store = _store(
         ("nordvpn", "us_1", 8888, "US", "", {}),  # malformed WireGuard data
-        router=_router(("domain", "a.com", "nordvpn/us_1")),
+        router=_router(("domain_suffix", "a.com", "nordvpn/us_1")),
     )
     config, errors = Engine(store)._build_config()
     assert "nordvpn/us_1" in errors and "rule r1" in errors
@@ -236,7 +236,7 @@ def test_rule_targeting_unbuildable_channel_fails_closed():
     # … and the rule's traffic is blocked rather than routed direct
     assert {
         "inbound": ["in-router"],
-        "domain": ["a.com"],
+        "domain_suffix": ["a.com"],
         "action": "reject",
     } in config["route"]["rules"]
 

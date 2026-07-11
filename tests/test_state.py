@@ -336,7 +336,7 @@ def test_merge_setup_upserts_and_appends_in_one_pass():
             {
                 "name": "Imported",
                 "target": "block",
-                "matchers": [("domain", "b.example.com")],
+                "matchers": [("domain_suffix", "b.example.com")],
             }
         ],
         killswitch=None,
@@ -424,13 +424,36 @@ def test_rules_get_stable_sequential_ids():
     assert [r["id"] for r in Store.load().rules()] == ["r2", "r3"]
 
 
+def test_legacy_exact_domain_rule_reads_as_suffix():
+    # Old state files may carry the removed exact "domain" type: it reads as
+    # domain_suffix (alle's one domain semantic) and compiles/lints that way.
+    from alle.state import transaction
+
+    store = Store.load()
+    store.add_provider("nordvpn")
+    with transaction() as data:
+        data["router"]["rules"] = [
+            {
+                "id": "r1",
+                "type": "domain",
+                "value": "api.example.com",
+                "target": "direct",
+                "ruleset": "rs1",
+                "ruleset_name": "Legacy",
+            }
+        ]
+    rules = Store.load().rules()
+    assert rules[0]["type"] == "domain_suffix"
+    assert rules[0]["value"] == "api.example.com"
+
+
 def test_rule_channel_target_must_exist():
     store = Store.load()
     store.add_provider("nordvpn")
     with pytest.raises(ValueError, match="no channel 'nordvpn/us_1'"):
-        _rule(store, "domain", "a.com", "nordvpn/us_1")
+        _rule(store, "domain_suffix", "a.com", "nordvpn/us_1")
     # direct/block targets need no channel
-    assert _rule(store, "domain", "a.com", "direct")["id"] == "r1"
+    assert _rule(store, "domain_suffix", "a.com", "direct")["id"] == "r1"
 
 
 def test_referenced_channel_cannot_be_removed():
@@ -488,7 +511,7 @@ def test_config_signature_tracks_router_changes():
     store.add_provider("nordvpn")
     store.add_channel("nordvpn", "US", "", dict(WG))
     before = config_signature(_read_raw())
-    _rule(store, "domain", "a.com", "nordvpn/us_1")
+    _rule(store, "domain_suffix", "a.com", "nordvpn/us_1")
     after_rule = config_signature(_read_raw())
     assert after_rule != before  # rule edits reconcile like channel edits
     store.set_killswitch(True)

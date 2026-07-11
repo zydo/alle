@@ -393,10 +393,6 @@ def _rule_entries(args) -> list[dict]:
     out = []
     for value in args.domain or []:
         out.append({"type": None, "value": value})
-    for value in args.domain_exact or []:
-        out.append({"type": "domain", "value": value})
-    for value in args.domain_suffix or []:
-        out.append({"type": "domain_suffix", "value": value})
     for value in args.cidr or []:
         out.append({"type": "ip_cidr", "value": value})
     if args.all:
@@ -1041,17 +1037,7 @@ def build_parser() -> argparse.ArgumentParser:
         parser.add_argument(
             "--domain",
             action="append",
-            help="domain entry; bare domains become suffix matches, subdomains exact",
-        )
-        parser.add_argument(
-            "--domain-exact",
-            action="append",
-            help="advanced: exact domain match",
-        )
-        parser.add_argument(
-            "--domain-suffix",
-            action="append",
-            help="advanced: suffix match for the domain and subdomains",
+            help="destination domain — matches the domain and all its subdomains",
         )
         parser.add_argument(
             "--cidr", action="append", help="destination IP or CIDR block"

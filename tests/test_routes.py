@@ -11,13 +11,15 @@ from alle import routes
 
 
 def test_domains_are_normalized():
-    assert routes.normalize_value("domain", " API.Google.COM. ") == "api.google.com"
+    assert (
+        routes.normalize_value("domain_suffix", " API.Google.COM. ") == "api.google.com"
+    )
     assert routes.normalize_value("domain_suffix", "Netflix.com") == "netflix.com"
 
 
-def test_wildcard_domain_is_redirected_to_suffix():
-    with pytest.raises(routes.RuleError, match="--domain-suffix google.com"):
-        routes.normalize_value("domain", "*.google.com")
+def test_wildcard_domain_is_redundant_and_rejected():
+    with pytest.raises(routes.RuleError, match="always match subdomains"):
+        routes.normalize_value("domain_suffix", "*.google.com")
 
 
 @pytest.mark.parametrize(
@@ -59,10 +61,11 @@ def test_inferred_domains_default_to_suffix_regardless_of_label_count():
     )
 
 
-def test_explicit_domain_type_opts_into_exact_matching():
-    # An explicit matcher_type is honored — the rare host-only exact case.
+def test_legacy_domain_type_is_read_as_suffix():
+    # The legacy exact "domain" type (old bundles, old API clients) is an
+    # alias — alle has one domain semantic, the domain and its subdomains.
     assert routes.infer_matcher("api.openai.com", "domain") == (
-        "domain",
+        "domain_suffix",
         "api.openai.com",
     )
     assert routes.infer_matcher("netflix.com", "domain_suffix") == (
@@ -98,23 +101,22 @@ def _rule(rid, mtype, value):
     return {"id": rid, "type": mtype, "value": value, "target": "direct"}
 
 
-def test_suffix_shadows_exact_and_deeper_suffix():
+def test_suffix_shadows_deeper_suffix():
     rules = [
         _rule("r1", "domain_suffix", "google.com"),
-        _rule("r2", "domain", "api.google.com"),  # covered — dead code
+        _rule("r2", "domain_suffix", "api.google.com"),  # covered — dead code
         _rule("r3", "domain_suffix", "maps.google.com"),  # covered
-        _rule("r4", "domain", "agoogle.com"),  # dot boundary: NOT covered
+        _rule("r4", "domain_suffix", "agoogle.com"),  # dot boundary: NOT covered
     ]
     assert routes.shadowed_by(rules) == {"r2": "r1", "r3": "r1"}
 
 
-def test_exact_does_not_shadow_the_suffix():
+def test_duplicate_suffix_is_shadowed():
     rules = [
-        _rule("r1", "domain", "google.com"),  # exact first
-        _rule("r2", "domain_suffix", "google.com"),  # still matches subdomains
-        _rule("r3", "domain", "google.com"),  # duplicate exact — dead
+        _rule("r1", "domain_suffix", "google.com"),
+        _rule("r2", "domain_suffix", "google.com"),  # duplicate — dead
     ]
-    assert routes.shadowed_by(rules) == {"r3": "r1"}
+    assert routes.shadowed_by(rules) == {"r2": "r1"}
 
 
 def test_cidr_supernet_shadows_subnet_only_within_family():
@@ -129,7 +131,7 @@ def test_cidr_supernet_shadows_subnet_only_within_family():
 
 def test_match_all_shadows_everything_after_it():
     rules = [
-        _rule("r1", "domain", "a.com"),
+        _rule("r1", "domain_suffix", "a.com"),
         _rule("r2", "all", ""),
         _rule("r3", "domain_suffix", "b.com"),
         _rule("r4", "all", ""),
@@ -149,7 +151,7 @@ def test_earliest_covering_rule_is_reported():
     rules = [
         _rule("r1", "domain_suffix", "com"),
         _rule("r2", "domain_suffix", "google.com"),
-        _rule("r3", "domain", "api.google.com"),
+        _rule("r3", "domain_suffix", "api.google.com"),
     ]
     assert routes.shadowed_by(rules) == {"r2": "r1", "r3": "r1"}
 
@@ -170,7 +172,7 @@ def test_lan_direct_does_not_shadow_a_public_cidr_or_a_domain_rule():
     assert not routes.shadowed_by_lan_direct(
         _rule("r2", "domain_suffix", "netflix.com")
     )
-    assert not routes.shadowed_by_lan_direct(_rule("r3", "domain", "10.0.0.1"))
+    assert not routes.shadowed_by_lan_direct(_rule("r3", "domain_suffix", "10.0.0.1"))
     # a CIDR wider than the LAN range (not a subnet) is not shadowed
     assert not routes.shadowed_by_lan_direct(_rule("r4", "ip_cidr", "10.0.0.0/7"))
 

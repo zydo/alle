@@ -225,6 +225,11 @@ def _normalize_rulesets(data: dict) -> None:
     except missing names inherit a target-derived display name. Mixed old/new
     files are rare but safe: old rows become their own runs without disturbing
     existing grouped blocks.
+
+    Matcher types are normalized too: the legacy exact ``domain`` type reads
+    as ``domain_suffix`` — alle has one domain semantic (the domain and its
+    subdomains), so an old exact rule gains subdomain matching instead of
+    keeping a second, subtly different behavior alive.
     """
     router = data.setdefault("router", _router_blank())
     rules = router.setdefault("rules", [])
@@ -235,6 +240,8 @@ def _normalize_rulesets(data: dict) -> None:
     legacy_rsid = ""
     legacy_name = ""
     for rule in rules:
+        if rule.get("type") == "domain":  # legacy exact matcher
+            rule["type"] = "domain_suffix"
         if rule.get("ruleset"):
             rule.setdefault("ruleset_name", _target_name(str(rule.get("target", ""))))
             last_legacy_target = object()

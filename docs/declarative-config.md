@@ -200,10 +200,10 @@ router:
     - name: Work traffic
       target: nordvpn/united_states_new_york_1   # <provider>/<channel-id>, direct, or block
       matchers:
-        - github.com                   # 2 labels -> suffix match (*.github.com)
-        - api.example.com              # 3+ labels -> exact domain
+        - github.com                   # domain -> github.com + *.github.com
+        - api.example.com              # domains always cover their subdomains
         - 10.8.0.0/16                  # IP/CIDR -> ip_cidr
-        - {type: domain, value: cdn.example.com}   # explicit form
+        - {type: domain_suffix, value: cdn.example.com}   # explicit form
     - name: Streaming via California
       target: protonvpn/wg_us_ca_842
       matchers: [netflix.com, hulu.com]

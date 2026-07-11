@@ -554,6 +554,23 @@ def test_wgless_channel_resolves_via_token_and_matchers_infer(monkeypatch):
     ]
 
 
+def test_legacy_explicit_domain_type_imports_as_suffix(monkeypatch):
+    # Old exported bundles may carry the removed exact type as
+    # {type: domain, …}: it imports as domain_suffix (one domain semantic).
+    legacy = HANDWRITTEN.replace(
+        "matchers: [netflix.com, 10.8.0.0/16, api.example.com]",
+        "matchers: [{type: domain, value: api.example.com}]",
+    )
+
+    def factory(provider, creds):
+        return lambda country, city="": wg("7.7.7.7")
+
+    monkeypatch.setattr(bundle, "provider_resolver", factory)
+    bundle.apply_import(legacy)
+    types = [(r["type"], r["value"]) for r in Store.load().rules()]
+    assert types == [("domain_suffix", "api.example.com")]
+
+
 def test_wgless_channel_keeps_existing_params_when_location_unchanged(monkeypatch):
     store = Store.load()
     store.add_provider("nordvpn")

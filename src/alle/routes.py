@@ -7,11 +7,16 @@ A rule is **one matcher plus a target**, stored in ``state.json`` under
 for the ordering footgun is the shadow lint here: a rule that can never match
 because an earlier rule strictly covers it is flagged, not silently dead.
 
-MVP matcher vocabulary (one per rule): ``domain`` (exact), ``domain_suffix``
-(the domain and its subdomains, dot-boundary), ``ip_cidr``, and ``all`` (the
-catch-all that makes "VPN by default" a one-liner). Targets are extensible
-strings: ``<provider>/<channel_id>``, ``direct``, or ``block`` today; future
-forms (``group:…``) join without a state migration.
+Matcher vocabulary (one per rule): ``domain_suffix`` — the one domain matcher,
+matching the domain itself *and* its subdomains (dot-boundary, so
+``example.co.uk`` never bleeds into ``otherexample.co.uk``) — ``ip_cidr``, and
+``all`` (the catch-all that makes "VPN by default" a one-liner). There is
+deliberately no exact-only domain type: one semantic keeps rules predictable,
+and the legacy ``domain`` (exact) type is read as ``domain_suffix`` wherever
+it can still appear (old state files, old bundles, explicit API type
+overrides). Targets are extensible strings: ``<provider>/<channel_id>``,
+``direct``, or ``block`` today; future forms (``group:…``) join without a
+state migration.
 """
 
 from __future__ import annotations
@@ -56,9 +61,8 @@ class RuleError(Exception):
 def normalize_domain(value: str) -> str:
     v = value.strip().lower().rstrip(".")
     if v.startswith("*."):
-        raise RuleError(
-            f"{value!r}: use --domain-suffix {v[2:]} instead of a '*.' wildcard"
-        )
+        # domain matchers already cover subdomains — the wildcard is redundant
+        raise RuleError(f"{value!r}: use {v[2:]} — domains always match subdomains")
     if not v or not _DOMAIN_RE.match(v):
         raise RuleError(f"{value!r} is not a valid domain name")
     return v
@@ -68,7 +72,7 @@ def normalize_value(matcher_type: str, value: str) -> str:
     """Canonicalize a matcher value (or raise :class:`RuleError`)."""
     if matcher_type == "all":
         return ""
-    if matcher_type in ("domain", "domain_suffix"):
+    if matcher_type == "domain_suffix":
         return normalize_domain(value)
     if matcher_type == "ip_cidr":
         try:
@@ -83,15 +87,16 @@ def normalize_value(matcher_type: str, value: str) -> str:
 def infer_matcher(value: str, matcher_type: str | None = None) -> tuple[str, str]:
     """Infer and normalize a ruleset matcher from one user-facing entry.
 
-    Explicit ``matcher_type`` remains available for advanced overrides. Without
-    it, CIDR/IP-looking entries become ``ip_cidr``; every domain defaults to
-    ``domain_suffix`` — "netflix.com" routes the domain *and* its subdomains,
-    the common intent. (The old two-label heuristic made a registrable domain
-    like ``example.co.uk`` — three labels — an *exact* match, so its subdomains
-    silently bypassed the rule.) Pass an explicit ``domain`` type for the rare
-    host-only case where suffix matching would be too broad.
+    Without an explicit ``matcher_type``, CIDR/IP-looking entries become
+    ``ip_cidr`` and everything else must be a domain — always
+    ``domain_suffix``, matching the domain *and* its subdomains (the common
+    intent, and the only domain semantic alle has). The legacy exact
+    ``domain`` type is accepted as an alias and normalized to
+    ``domain_suffix``, so old bundles and API clients keep working.
     """
     raw = value.strip()
+    if matcher_type == "domain":  # legacy exact type — one domain matcher now
+        matcher_type = "domain_suffix"
     if matcher_type:
         return matcher_type, normalize_value(matcher_type, raw)
     if raw.lower() == "all":
@@ -159,9 +164,7 @@ def covers(a: dict, b: dict) -> bool:
         return True
     if tb == "all":
         return False
-    if ta == "domain":
-        return tb == "domain" and a["value"] == b["value"]
-    if ta == "domain_suffix" and tb in ("domain", "domain_suffix"):
+    if ta == "domain_suffix" and tb == "domain_suffix":
         # dot-boundary suffix semantics: google.com covers google.com + *.google.com
         return b["value"] == a["value"] or b["value"].endswith("." + a["value"])
     if ta == "ip_cidr" and tb == "ip_cidr":
