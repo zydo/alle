@@ -40,7 +40,11 @@ jobs:
           persist-credentials: false
           fetch-depth: 0 # full history so the scheduled sweep scans all commits
 
+      # False positives are handled in .gitleaks.toml (default ruleset + a
+      # narrow allowlist), which gitleaks picks up from the repo root.
       - name: Secret scan
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        # v3.0.0 = v2.3.9 on the node24 runtime (no behavior change); node20
+        # actions are removed from hosted runners in September 2026.
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

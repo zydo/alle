@@ -90,7 +90,7 @@ def test_snapshot_is_a_detached_copy():
 
 
 def test_unreadable_credentials_abort_instead_of_wiping():
-    credentials.set_("nordvpn", {"token": "tok_12345678"})
+    credentials.set_("nordvpn", {"token": "tok_test_token"})
     path = paths.state_dir() / "credentials.yaml"
     path.chmod(0)  # permission error ≠ absent file
     try:
@@ -101,5 +101,5 @@ def test_unreadable_credentials_abort_instead_of_wiping():
             credentials.set_("protonvpn", {"token": "x"})
     finally:
         path.chmod(0o600)
-    assert credentials.get("nordvpn") == {"token": "tok_12345678"}
+    assert credentials.get("nordvpn") == {"token": "tok_test_token"}
     assert list(paths.state_dir().glob("credentials.yaml.corrupt-*")) == []

@@ -1,0 +1,22 @@
+# Gitleaks config: the default ruleset plus a narrow false-positive allowlist.
+# Keep allowlist entries EXACT — each regex is anchored to one known-fake
+# literal, never a path or pattern broad enough to mask a real leak.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "known-fake test fixtures (present in git history)"
+regexTarget = "secret"
+regexes = [
+  # tests/test_credentials.py round-trip token fixture
+  '''^tok_12345678$''',
+  # tests/test_service_units.py provider-add token fixture
+  '''^abcdef123456$''',
+  # tests/test_cli.py WireGuard .conf fixtures — base64 of
+  # "XEGprivateKeyExampleValueAAAAAAA" / "...ExampleBase64PaddingSXo="
+  '''^WEVHcHJpdmF0ZUtleUV4YW1wbGVWYWx1ZUFBQUFBQUE=$''',
+  '''^WEVHcHJpdmF0ZUtleUV4YW1wbGVCYXNlNjRQYWRkaW5nU1hvPQ==$''',
+  # tests/test_auth_input.py credential-masking fixture
+  '''^nGx4SECRETa91k$''',
+]
