@@ -54,7 +54,10 @@ MAX_BODY_BYTES = 8192
 CHANNEL_DEADLINE = 15.0
 
 
-def _opener(port: int):
+def proxy_opener(port: int):
+    """A urllib opener that routes everything through the local proxy on
+    ``port`` — the one way alle drives traffic through a channel (shared with
+    the speed test in :mod:`alle.throughput`)."""
     proxy = f"http://127.0.0.1:{port}"
     handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
     return urllib.request.build_opener(handler)
@@ -109,7 +112,7 @@ def probe_channel(
     by ``timeout``, and the whole channel by ``deadline``, so one dead channel
     can never cost ``sources × timeout`` wall clock.
     """
-    opener = _opener(port)
+    opener = proxy_opener(port)
     attempted: list[str] = []
     last_reason = "no valid IP"
     started = time.monotonic()

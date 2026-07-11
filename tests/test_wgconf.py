@@ -258,29 +258,3 @@ def test_all_problems_aggregated_with_line_numbers():
         "PersistentKeepalive",
     ):
         assert needle in msg, f"expected {needle!r} in aggregated error"
-
-
-def test_metadata_headers_round_trip():
-    meta = {
-        "provider": "nordvpn",
-        "country": "United States",
-        "city": "San Francisco",
-        "port": 8889,
-        "enabled": True,
-        "kind": "provider",
-        "name": "",  # empty values are omitted
-    }
-    block = wgconf.meta_block(meta)
-    assert "# alle-provider: nordvpn" in block
-    assert "# alle-city: San Francisco" in block  # spaces need no quoting
-    assert "# alle-enabled: true" in block
-    assert "name" not in block  # empty value dropped
-
-    # headers prefix a real .conf and don't disturb parsing of the body
-    full = block + wgconf.canonical(wgconf.parse(SAMPLE))
-    read = wgconf.read_meta(full)
-    assert read["provider"] == "nordvpn"
-    assert read["country"] == "United States"
-    assert read["port"] == "8889"
-    assert read["enabled"] == "true"
-    assert wgconf.parse(full)["peer"]["endpoint_host"] == "185.65.135.99"

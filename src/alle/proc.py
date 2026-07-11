@@ -134,15 +134,6 @@ def verify(rec: dict, markers: tuple[str, ...]) -> bool:
     return cmd is not None and any(m in cmd for m in markers)
 
 
-def alive_matching(pid: int, markers: tuple[str, ...]) -> bool:
-    """True iff ``pid`` is a live process whose command line contains a marker.
-
-    The weaker, command-line-only check — used when no start-time record
-    exists. Prefer :func:`verify` with a spawn-time :func:`record`.
-    """
-    return verify({"pid": pid, "start": None}, markers)
-
-
 def write_pidfile(path: Path, pid: int) -> None:
     """Persist a spawn-time identity record for later :func:`read_pidfile`."""
     path.write_text(json.dumps(record(pid)))

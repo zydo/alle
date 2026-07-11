@@ -272,6 +272,70 @@ def test_logout_revokes_every_session(live):
     assert st == 200
 
 
+def test_corrupt_revocation_file_fails_closed(live):
+    # web_revocation.json records a security decision (sign-out): if it turns
+    # unreadable, every outstanding session dies (fail closed) instead of
+    # signed-out sessions silently coming back (fail open).
+    base, secret = live
+    cookie = _session_cookie(base, secret)
+    st, _, _ = _req(
+        base + "/api/v1/status", headers={"Host": _canon(), "Cookie": cookie}
+    )
+    assert st == 200  # the session works …
+
+    server._revocation_path().write_text("{not json")
+    st, _, _ = _req(
+        base + "/api/v1/status", headers={"Host": _canon(), "Cookie": cookie}
+    )
+    assert st == 401  # … and dies the moment the revocation record is unreadable
+    # bearer access (the persistent secret) is unaffected
+    st, _, _ = _req(base + "/api/v1/status", headers=_bearer(secret))
+    assert st == 200
+
+    # a fresh sign-in heals the file (durable rewrite) and works again
+    healed = _session_cookie(base, secret)
+    st, _, _ = _req(
+        base + "/api/v1/status", headers={"Host": _canon(), "Cookie": healed}
+    )
+    assert st == 200
+    assert server._read_revoked_at() is not None  # readable again
+
+
+def test_logout_survives_as_a_complete_durable_file(live):
+    # revocation goes through the durable-write path: after a logout the file
+    # is a complete, parseable record (never a torn write_text)
+    base, secret = live
+    _session_cookie(base, secret)
+    st, _, _ = _req(
+        base + "/api/v1/logout", method="POST", headers=_bearer(secret), data={}
+    )
+    assert st == 200
+    assert server._read_revoked_at() > 0
+
+
+def test_bearer_mutation_needs_no_origin_header(live):
+    # Programmatic Bearer clients (curl, scripts) are not browsers: no page can
+    # attach an Authorization header cross-origin, so the CSRF Origin
+    # requirement applies to the cookie path only.
+    base, secret = live
+    st, _, _ = _req(
+        base + "/api/v1/logout", method="POST", headers=_bearer(secret), data={}
+    )
+    assert st == 200
+
+
+def test_cookie_mutation_without_origin_is_still_refused(live):
+    base, secret = live
+    cookie = _session_cookie(base, secret)
+    st, body, _ = _req(
+        base + "/api/v1/logout",
+        method="POST",
+        headers={"Host": _canon(), "Cookie": cookie},
+        data={},
+    )
+    assert st == 403 and "origin" in json.loads(body)["error"]
+
+
 def test_aged_session_is_rolled_on_activity(live):
     base, secret = live
     # a session past half its idle window (issued in the past, still valid)

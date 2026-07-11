@@ -1,16 +1,19 @@
 """Shared filesystem primitives: interprocess file locks and durable atomic
 replacement.
 
-Every read-modify-write store (``state.json``, ``credentials.yaml``, the
-location cache) serialises its writers with :func:`locked` and persists with
-:func:`write_durably`, so the on-disk file is always either the old complete
-version or the new complete version — never a torn write — and, once a write
-returns, it survives a crash or power loss (both the file's bytes and its
-directory entry are fsynced).
+Every read-modify-write store — ``state.json``, ``credentials.yaml``, the
+location cache, the setup journal, the generated endpoint contracts
+(``control_api.json``/``clash_api.json``), the login-token store, the session
+revocation record — serialises its writers with :func:`locked` and persists
+with :func:`write_durably`, so the on-disk file is always either the old
+complete version or the new complete version — never a torn write — and, once
+a write returns, it survives a crash or power loss (both the file's bytes and
+its directory entry are fsynced).
 """
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from contextlib import contextmanager
@@ -87,3 +90,39 @@ def write_durably(
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
+
+def generated_endpoint(
+    path: Path,
+    validate: Callable[[object], dict | None],
+    generate: Callable[[], dict],
+) -> dict:
+    """Read a generated JSON contract file, or mint and publish a fresh one.
+
+    The shared read-or-generate primitive behind ``control_api.json`` and
+    ``clash_api.json``: read, generate, and publish all happen under one
+    interprocess lock, so two callers racing to first-generate agree on one
+    endpoint (both return it) instead of each minting a different one and
+    clobbering the file. ``validate`` maps the parsed JSON to the endpoint
+    dict, or ``None`` for a missing/shape-wrong file — which ``generate``
+    then replaces wholesale. Publishing goes through :func:`write_durably`
+    (0600 — these files carry secrets), so a reader never sees a half-written
+    file and a crash mid-write keeps the previous one.
+    """
+    with locked(path.with_name(path.name + ".lock")):
+        cfg = None
+        try:
+            cfg = validate(json.loads(path.read_text()))
+        except (ValueError, OSError):
+            pass
+        if cfg is not None:
+            return cfg
+        fresh = generate()
+        write_durably(
+            path,
+            lambda f: (json.dump(fresh, f, indent=2), f.write("\n")),
+            prefix=f".{path.stem}-",
+            suffix=path.suffix,
+            mode=0o600,
+        )
+        return fresh

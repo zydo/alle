@@ -62,9 +62,14 @@ Served by the daemon on `127.0.0.1` only. Defenses, layer by layer:
 - **Sessions** — `HttpOnly; SameSite=Strict` cookies, idle-limited (30
   minutes without activity), rolled while a tab is open, capped at 12 hours
   from sign-in. The masthead's **Sign out** revokes every session
-  immediately (persisted, so it survives daemon restarts); the Bearer secret
+  immediately (persisted durably, so it survives daemon restarts; if the
+  revocation record ever turns unreadable, verification fails closed —
+  every session dies until the next sign-in rewrites it); the Bearer secret
   is unaffected.
-- **CSRF** — mutations additionally require a same-origin `Origin` header.
+- **CSRF** — cookie-authenticated mutations additionally require a same-origin
+  `Origin` header. Bearer-authenticated requests are exempt: no browser
+  attaches an `Authorization` header cross-origin, so scripts and `curl` can
+  mutate without faking a browser origin.
 - **Readiness proof** — before opening a sign-in link, `alle ui` challenges
   the port with a nonce and requires an HMAC answer, so a foreign process
   squatting the port never receives a tokenized URL.

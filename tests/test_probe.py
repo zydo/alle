@@ -47,7 +47,7 @@ class _FakeOpener:
 
 def _patch_opener(monkeypatch, responses) -> _FakeOpener:
     opener = _FakeOpener(responses)
-    monkeypatch.setattr(probe, "_opener", lambda port: opener)
+    monkeypatch.setattr(probe, "proxy_opener", lambda port: opener)
     return opener
 
 

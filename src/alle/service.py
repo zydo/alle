@@ -317,10 +317,6 @@ def _provider_removal_plan(providers: list[str]) -> list[dict]:
     return plan
 
 
-def provider_remove(provider: str) -> dict:
-    return provider_remove_many([provider])["providers"][0]
-
-
 def provider_remove_many(providers: list[str], dry_run: bool = False) -> dict:
     planned = _provider_removal_plan(providers)
     if dry_run:
@@ -701,16 +697,6 @@ def channel_remove_many(
         applog.log(f"removed channel {item['provider']}/{item['channel']}")
     daemon.ensure_running()
     return {"channels": planned, "dry_run": False}
-
-
-def channel_remove(provider: str, channel_id: str) -> dict:
-    result = channel_remove_many([channel_id], provider)
-    removed = result["channels"][0]
-    return {
-        "provider": removed["provider"],
-        "display_name": removed["display_name"],
-        "channel": removed["channel"],
-    }
 
 
 def channel_set_label(ref: str, label: str, provider: str | None = None) -> dict:

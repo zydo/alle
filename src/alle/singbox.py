@@ -169,6 +169,16 @@ def _clash_api_path() -> Path:
     return paths.state_dir() / "clash_api.json"
 
 
+def _valid_clash_api(cfg) -> dict | None:
+    """The validated endpoint dict, or None if ``cfg`` is missing/malformed."""
+    if not isinstance(cfg, dict):
+        return None
+    address, secret_ = cfg.get("address"), cfg.get("secret")
+    if isinstance(address, str) and address and isinstance(secret_, str) and secret_:
+        return {"address": address, "secret": secret_}
+    return None
+
+
 def clash_api() -> dict:
     """The local Clash API endpoint: ``{"address": "127.0.0.1:<port>", "secret"}``.
 
@@ -179,38 +189,18 @@ def clash_api() -> dict:
     The port is allocated from the OS instead of hard-coded so two users (or
     two ``ALLE_HOME``\\ s) on one machine don't fight over the same port.
 
-    Read, generate, and publish happen under one lock, so concurrent callers
-    agree on one endpoint; publishing uses a fsynced temp file + atomic rename
-    (via :func:`alle.fsio.write_durably`), so a reader never sees a half-written
-    file.
+    Locking and durable publishing live in :func:`alle.fsio.generated_endpoint`
+    — concurrent callers agree on one endpoint, and a reader never sees a
+    half-written file.
     """
-    p = _clash_api_path()
-    with fsio.locked(p.with_name(p.name + ".lock")):
-        try:
-            cfg = json.loads(p.read_text())
-            if isinstance(cfg, dict):
-                address, secret_ = cfg.get("address"), cfg.get("secret")
-                if (
-                    isinstance(address, str)
-                    and address
-                    and isinstance(secret_, str)
-                    and secret_
-                ):
-                    return {"address": address, "secret": secret_}
-        except (OSError, ValueError):
-            pass
+
+    def generate() -> dict:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
-        fresh = {"address": f"127.0.0.1:{port}", "secret": secrets.token_hex(16)}
-        fsio.write_durably(
-            p,
-            lambda f: (json.dump(fresh, f, indent=2), f.write("\n")),
-            prefix=".clash_api-",
-            suffix=".json",
-            mode=0o600,
-        )
-        return fresh
+        return {"address": f"127.0.0.1:{port}", "secret": secrets.token_hex(16)}
+
+    return fsio.generated_endpoint(_clash_api_path(), _valid_clash_api, generate)
 
 
 def forget_clash_api() -> None:

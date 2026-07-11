@@ -33,18 +33,6 @@ def test_provider_remove_many_requires_at_least_one_provider():
     assert "at least one provider is required" in str(exc.value)
 
 
-def test_provider_remove_legacy_wrapper_removes_one_provider():
-    store = service.Store.load()
-    store.add_provider("nordvpn")
-
-    assert service.provider_remove("nordvpn") == {
-        "provider": "nordvpn",
-        "display_name": "NordVPN",
-        "channels_removed": 0,
-    }
-    assert not service.Store.load().has_provider("nordvpn")
-
-
 def test_provider_remove_many_dedupes_and_dry_run_does_not_mutate():
     store = service.Store.load()
     store.add_provider("nordvpn")
@@ -154,15 +142,3 @@ def test_channel_remove_many_scoped_all_requires_existing_channels():
         service.channel_remove_many([], provider="nordvpn", all_=True)
 
     assert "no channels under NordVPN" in str(exc.value)
-
-
-def test_channel_remove_legacy_wrapper_returns_single_row():
-    store = service.Store.load()
-    store.add_provider("nordvpn")
-    store.add_channel("nordvpn", "Japan", "", dict(WG))
-
-    assert service.channel_remove("nordvpn", "japan_1") == {
-        "provider": "nordvpn",
-        "display_name": "NordVPN",
-        "channel": "japan_1",
-    }

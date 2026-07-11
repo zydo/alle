@@ -74,8 +74,8 @@ def test_remove_channel_keeps_provider():
     store = Store.load()
     store.add_provider("nordvpn")
     ch = store.add_channel("nordvpn", "US", "", dict(WG))
-    assert store.remove_channel("nordvpn", ch.id) is True
-    assert store.remove_channel("nordvpn", ch.id) is False
+    assert store.remove_channels([("nordvpn", ch.id)]) == [("nordvpn", ch.id)]
+    assert store.remove_channels([("nordvpn", ch.id)]) == []
     after = Store.load()
     assert after.has_provider("nordvpn")  # provider stays even at 0 channels
     assert after.provider_channels("nordvpn") == []
@@ -86,7 +86,7 @@ def test_remove_provider_cascades_channels():
     store.add_provider("nordvpn")
     store.add_channel("nordvpn", "US", "", dict(WG))
     store.add_channel("nordvpn", "UK", "", dict(WG))
-    assert store.remove_provider("nordvpn") == 2
+    assert store.remove_providers(["nordvpn"]) == {"nordvpn": 2}
     assert not Store.load().has_provider("nordvpn")
 
 
@@ -440,14 +440,15 @@ def test_referenced_channel_cannot_be_removed():
     _rule(store, "domain_suffix", "netflix.com", f"nordvpn/{ch.id}")
 
     with pytest.raises(ReferencedError) as exc:
-        store.remove_channel("nordvpn", ch.id)
+        store.remove_channels([("nordvpn", ch.id)])
     assert f"nordvpn/{ch.id}" in exc.value.blockers
     with pytest.raises(ReferencedError):
-        store.remove_provider("nordvpn")
+        store.remove_providers(["nordvpn"])
     assert Store.load().get_channel("nordvpn", ch.id) is not None  # untouched
 
     store.remove_rules(["r1"])
-    assert store.remove_channel("nordvpn", ch.id) is True  # unreferenced → fine
+    # unreferenced → fine
+    assert store.remove_channels([("nordvpn", ch.id)]) == [("nordvpn", ch.id)]
 
 
 def test_killswitch_round_trips():

@@ -31,6 +31,8 @@ import time
 import urllib.request
 from collections.abc import Callable
 
+from alle.probe import proxy_opener
+
 # 50 MB per fetch — Cloudflare rejects much larger single requests, so the
 # download test loops fetches until DOWNLOAD_SECONDS is up rather than asking
 # for one huge object. Backups are large static objects on independent
@@ -58,12 +60,6 @@ UPLOAD_BYTES = 8 * 1024 * 1024  # payload pushed for the upload test
 LATENCY_SAMPLES = 5  # tiny requests; the fastest one wins
 _CHUNK = 65536
 _USER_AGENT = "alle-speedtest/1"
-
-
-def _opener(port: int):
-    proxy = f"http://127.0.0.1:{port}"
-    handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
-    return urllib.request.build_opener(handler)
 
 
 class Cancelled(Exception):
@@ -182,7 +178,7 @@ def run(
     returns true the run aborts (a streaming client that disconnected should not
     keep driving transfers). A cancelled phase yields ``None`` for that metric.
     """
-    opener = _opener(port)
+    opener = proxy_opener(port)
 
     def _phase(name: str) -> None:
         if progress is not None:

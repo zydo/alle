@@ -4,7 +4,7 @@ The daemon owns runtime reconciliation and probing for the CLI today and future
 Web UI / desktop clients. It keeps the single sing-box process matched to
 ``state.json`` and continuously probes every channel's connectivity.
 
-It does two jobs on a single loop:
+Its single 1 Hz loop drives four duties:
 
 1. **Reconcile** — when the config-relevant part of ``state.json`` changes (a
    channel added/removed/relocated), rebuild the one sing-box config and restart
@@ -12,7 +12,14 @@ It does two jobs on a single loop:
    trigger.
 2. **Heartbeat probe** — every ``PROBE_INTERVAL`` seconds, route a tiny request
    through each channel's proxy to record its exit IP + latency (or a failure)
-   back into ``state.json``. This is what ``alle status`` reads.
+   back into ``state.json``. This is what ``alle status`` reads. Runs (with
+   auto-reconnect) on its own worker thread so a slow pass never delays a
+   reconcile.
+3. **Traffic sampling** — every ``METRICS_INTERVAL`` seconds, read the Clash
+   API's live connections and bank per-channel byte deltas (see ``metrics``).
+4. **Supervision** — every ``SUPERVISE_INTERVAL`` seconds, restart an
+   unexpectedly-exited sing-box with capped exponential backoff and publish
+   its runtime health into ``applier.info.json``.
 
 It is auto-started by CLI mutations (and by ``alle start``) when not already
 running, runs detached with a pidfile, and owns the single sing-box process for

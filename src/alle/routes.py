@@ -127,6 +127,24 @@ def describe(rule: dict) -> str:
 # ---- shadow lint -------------------------------------------------------------
 
 
+def _subnet_of(inner, outer) -> bool:
+    """True iff ``inner`` is a subnet of ``outer``, same address family only.
+
+    Paired isinstance (not a version compare) so type checkers narrow the
+    ``IPv4Network | IPv6Network`` union that ``subnet_of()`` won't accept
+    mixed; mixed families never overlap.
+    """
+    if isinstance(inner, ipaddress.IPv4Network) and isinstance(
+        outer, ipaddress.IPv4Network
+    ):
+        return inner.subnet_of(outer)
+    if isinstance(inner, ipaddress.IPv6Network) and isinstance(
+        outer, ipaddress.IPv6Network
+    ):
+        return inner.subnet_of(outer)
+    return False
+
+
 def covers(a: dict, b: dict) -> bool:
     """True if rule ``a`` matches a superset (or all) of what ``b`` matches —
     i.e. an ``a`` evaluated earlier makes ``b`` unreachable.
@@ -147,19 +165,9 @@ def covers(a: dict, b: dict) -> bool:
         # dot-boundary suffix semantics: google.com covers google.com + *.google.com
         return b["value"] == a["value"] or b["value"].endswith("." + a["value"])
     if ta == "ip_cidr" and tb == "ip_cidr":
-        na = ipaddress.ip_network(a["value"])
-        nb = ipaddress.ip_network(b["value"])
-        # paired isinstance (not a version compare) so type checkers narrow the
-        # IPv4Network | IPv6Network union that subnet_of() won't accept mixed
-        if isinstance(na, ipaddress.IPv4Network) and isinstance(
-            nb, ipaddress.IPv4Network
-        ):
-            return nb.subnet_of(na)
-        if isinstance(na, ipaddress.IPv6Network) and isinstance(
-            nb, ipaddress.IPv6Network
-        ):
-            return nb.subnet_of(na)
-        return False  # mixed families never overlap
+        return _subnet_of(
+            ipaddress.ip_network(b["value"]), ipaddress.ip_network(a["value"])
+        )
     return False
 
 
@@ -195,24 +203,7 @@ def shadowed_by_lan_direct(rule: dict) -> bool:
         net = ipaddress.ip_network(rule["value"])
     except ValueError:
         return False
-    for cidr in LAN_DIRECT_CIDRS:
-        lan = ipaddress.ip_network(cidr)
-        # Paired isinstance (not a version compare) so type checkers narrow the
-        # IPv4Network | IPv6Network union that subnet_of() won't accept mixed;
-        # the two families are checked separately, each returning on a match.
-        if (
-            isinstance(net, ipaddress.IPv4Network)
-            and isinstance(lan, ipaddress.IPv4Network)
-            and net.subnet_of(lan)
-        ):
-            return True
-        if (
-            isinstance(net, ipaddress.IPv6Network)
-            and isinstance(lan, ipaddress.IPv6Network)
-            and net.subnet_of(lan)
-        ):
-            return True
-    return False
+    return any(_subnet_of(net, ipaddress.ip_network(cidr)) for cidr in LAN_DIRECT_CIDRS)
 
 
 def shadow_label(shadowed_by: str) -> str:

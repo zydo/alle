@@ -31,7 +31,7 @@ def test_signature_tracks_channel_lifecycle():
     after_add = _sig()
     assert after_add != empty
 
-    store.remove_channel("nordvpn", ch.id)
+    store.remove_channels([("nordvpn", ch.id)])
     assert _sig() == empty  # removing it returns to the empty signature
 
 

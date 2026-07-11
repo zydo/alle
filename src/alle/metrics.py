@@ -8,10 +8,11 @@ process, so a tiny database beats hammering ``state.json``. Everything else
 The Clash API only reports *live* connections, each with a lifetime-cumulative
 ``upload``/``download`` counter that vanishes when the connection closes and
 resets when sing-box restarts. So there is no running total to read — the daemon
-samples ``/connections`` every probe cycle and the :class:`Accumulator` turns the
-per-connection counters into monotonic deltas, which it folds into the durable
-per-channel totals here. Short-lived connections that open and close entirely
-between two samples are missed; for cumulative usage that approximation is fine.
+samples ``/connections`` every couple of seconds (``daemon.METRICS_INTERVAL``)
+and the :class:`Accumulator` turns the per-connection counters into monotonic
+deltas, which it folds into the durable per-channel totals here. Short-lived
+connections that open and close entirely between two samples are missed; for
+cumulative usage that approximation is fine.
 
 Two correctness rules keep the totals monotonic:
 

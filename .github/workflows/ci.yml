@@ -21,6 +21,14 @@ jobs:
       - run: uv sync --all-extras
       - name: Check lint
         run: uv run ruff check
+      - name: Check format
+        run: uv run ruff format --check
+      # The same package smoke publish gates on: catch sdist/wheel/README
+      # regressions pre-merge instead of on the release tag.
+      - name: Package smoke (build + metadata/README render)
+        run: |
+          uv build
+          uvx twine check dist/*
 
   test:
     runs-on: ubuntu-latest

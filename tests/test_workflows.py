@@ -85,6 +85,21 @@ def test_publish_runs_full_suite_before_building():
         assert needle in runs, f"publish build job missing gate step: {needle!r}"
 
 
+def test_ci_gates_match_the_publish_gate():
+    """Every static gate publish runs must also run in CI — format drift or a
+    packaging regression must fail pre-merge, not the release job at tag time."""
+    wf = _load("ci.yml")
+    runs = " ".join(step.get("run", "") for _job, step in _steps(wf))
+    for needle in (
+        "ruff check",
+        "ruff format --check",
+        "pytest",
+        "uv build",
+        "twine check",
+    ):
+        assert needle in runs, f"ci missing gate step: {needle!r}"
+
+
 def test_publish_reuses_the_one_built_artifact():
     wf = _load("publish.yml")
     assert "build" in wf["jobs"]["publish-pypi"]["needs"]

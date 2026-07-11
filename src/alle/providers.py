@@ -9,7 +9,7 @@ WireGuard parameters:
   provider and is wired end-to-end.
 * ``config`` — portal-only providers (e.g. ProtonVPN) that hand out a WireGuard
   ``.conf``. There is no token; you add the provider so channels can be imported
-  under it via ``channels add <name> --config <file>`` (Phase 1 in progress).
+  under it via ``channels add <name> --config <file>``.
 
 Everything the engine needs for a functional provider — derive the account key,
 list locations, resolve a location to a peer — comes straight from the provider's

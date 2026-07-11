@@ -17,23 +17,27 @@ def test_command_of_reads_a_live_process():
     assert sys.executable.rsplit("/", 1)[-1].split(".")[0] in cmd  # e.g. "python"
 
 
-def test_alive_matching_requires_a_marker_hit():
+def test_marker_fallback_requires_a_marker_hit():
+    # a record with no start time falls back to the command-line marker check
     cmd = proc.command_of(os.getpid())
     assert cmd is not None
     token = cmd.split()[0]  # our own interpreter path always matches
-    assert proc.alive_matching(os.getpid(), (token,)) is True
-    assert proc.alive_matching(os.getpid(), ("definitely-not-in-argv",)) is False
+    assert proc.verify({"pid": os.getpid(), "start": None}, (token,)) is True
+    assert (
+        proc.verify({"pid": os.getpid(), "start": None}, ("definitely-not-in-argv",))
+        is False
+    )
 
 
-def test_alive_matching_rejects_dead_pids():
+def test_marker_fallback_rejects_dead_pids():
     child = subprocess.Popen(["sleep", "0"])
     child.wait()  # reaped — the PID no longer exists
-    assert proc.alive_matching(child.pid, ("sleep",)) is False
+    assert proc.verify({"pid": child.pid, "start": None}, ("sleep",)) is False
 
 
-def test_alive_matching_rejects_nonsense_pids():
-    assert proc.alive_matching(0, ("x",)) is False
-    assert proc.alive_matching(-1, ("x",)) is False
+def test_marker_fallback_rejects_nonsense_pids():
+    assert proc.verify({"pid": 0, "start": None}, ("x",)) is False
+    assert proc.verify({"pid": -1, "start": None}, ("x",)) is False
 
 
 def test_start_time_of_reads_a_live_process():

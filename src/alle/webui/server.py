@@ -17,8 +17,9 @@ CSRF have burned loopback apps before):
   sent to every other local web app): literal-host page loads redirect to the
   canonical host and the session cookie is only ever minted there. Programmatic
   Bearer access still works on any loopback host.
-* Mutating requests must carry a same-origin ``Origin`` — CSRF defense, on top
-  of the ``SameSite=Strict`` session cookie.
+* Cookie-authenticated mutations must carry a same-origin ``Origin`` — CSRF
+  defense, on top of the ``SameSite=Strict`` session cookie. Bearer requests
+  are exempt: no browser attaches an Authorization header cross-origin.
 * The persistent secret is only ever a Bearer header; browsers authenticate with
   a single-use login token exchanged for an HttpOnly cookie (see ``auth``);
   sessions idle out, roll on activity, and are revocable via logout.
@@ -115,7 +116,7 @@ class _JobLimiter:
     """Per-kind size-1 semaphores bounding expensive operations.
 
     A single-user loopback server should never run two of the *same* expensive
-    job at once — a second speed test, bundle import, token refresh, or locations
+    job at once — a second speed test, bundle import/restore, or provider token
     refresh while one is in flight conflicts with the first (shared state, the
     one sing-box process, the same network resolver). The limiter serializes
     each kind: a second concurrent request of that kind is rejected (503) rather
@@ -218,39 +219,25 @@ def control_api() -> dict:
     Generated once (0600) and kept — the port is a *contract* so the UI URL is
     stable and bookmarkable, and a fixed value to pin Host/Origin against.
     ``host`` is the per-installation browser hostname (see :func:`_mint_host`);
-    a pre-existing file without one is upgraded.
+    a file that fails validation (missing ``host``, wrong shape, unparseable)
+    is regenerated wholesale — a fresh port, secret, and hostname.
 
-    Read, generate, and publish all happen under one lock, so two callers racing
-    to first-generate agree on one endpoint (both return it) instead of each
-    minting a different port and clobbering the file. Publishing goes through a
-    private temp file that is fsynced and atomically renamed — a reader never
-    sees a half-written file, and a crash mid-write keeps the previous one.
+    Locking and durable publishing live in :func:`alle.fsio.generated_endpoint`
+    — concurrent first-generators agree on one endpoint, and a reader never
+    sees a half-written file.
     """
-    p = _config_path()
-    with fsio.locked(p.with_name(p.name + ".lock")):
-        cfg = None
-        try:
-            cfg = _valid_control_api(json.loads(p.read_text()))
-        except (ValueError, OSError):
-            pass
-        if cfg is not None:
-            return cfg
+
+    def generate() -> dict:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
-        fresh = {
+        return {
             "address": f"127.0.0.1:{port}",
             "secret": secrets.token_hex(32),
             "host": _mint_host(),
         }
-        fsio.write_durably(
-            p,
-            lambda f: (json.dump(fresh, f, indent=2), f.write("\n")),
-            prefix=".control_api-",
-            suffix=".json",
-            mode=0o600,
-        )
-        return fresh
+
+    return fsio.generated_endpoint(_config_path(), _valid_control_api, generate)
 
 
 def _canonical_host(api: dict | None = None) -> str:
@@ -317,21 +304,70 @@ def _revocation_path() -> Path:
     return paths.state_dir() / "web_revocation.json"
 
 
-def revoked_at() -> int:
-    """The persisted logout time: sessions issued before it are dead."""
+def _read_revoked_at() -> int | None:
+    """The persisted logout time: 0 when never revoked (file absent), ``None``
+    when the file exists but cannot be read or parsed — callers fail closed."""
+    p = _revocation_path()
     try:
-        return int(json.loads(_revocation_path().read_text()).get("revoked_at", 0))
-    except (OSError, ValueError, AttributeError):
+        text = p.read_text()
+    except FileNotFoundError:
         return 0
+    except OSError:
+        return None
+    try:
+        value = json.loads(text).get("revoked_at", 0)
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return value
+
+
+_revocation_warned = False
+
+
+def revoked_at() -> int:
+    """The logout time sessions are verified against: issued at or before it
+    means dead.
+
+    Fails closed: an unreadable or corrupt revocation file reads as "revoked
+    just now" — killing every outstanding session — never as "never revoked".
+    The file records a security decision (sign-out), and losing it must not
+    silently resurrect signed-out sessions. The next sign-in heals the file
+    (see ``_set_session_cookie``).
+    """
+    global _revocation_warned
+    value = _read_revoked_at()
+    if value is None:
+        if not _revocation_warned:
+            _revocation_warned = True
+            applog.log(
+                "web ui: web_revocation.json is unreadable — failing closed "
+                "(all sessions revoked until the next sign-in rewrites it)"
+            )
+        import time
+
+        return int(time.time())
+    _revocation_warned = False
+    return value
 
 
 def revoke_sessions(now: int) -> None:
-    """Persist a logout: every session issued before ``now`` stops verifying.
+    """Persist a logout: every session issued at or before ``now`` stops
+    verifying.
 
     Survives daemon restarts (sessions themselves are stateless, so revocation
-    must not be in-memory only). Not a secret — plain 0644 is fine.
+    must not be in-memory only) and is written durably (temp, fsync, atomic
+    rename): a torn or lost write here would silently resurrect signed-out
+    sessions, so it gets the same treatment as every other security-relevant
+    store. The content is not a secret — just an epoch.
     """
-    _revocation_path().write_text(json.dumps({"revoked_at": int(now)}))
+    fsio.write_durably(
+        _revocation_path(),
+        lambda f: json.dump({"revoked_at": int(now)}, f),
+        prefix=".web_revocation-",
+        suffix=".json",
+    )
 
 
 # ---- body field validation -------------------------------------------------
@@ -544,9 +580,14 @@ class _Handler(BaseHTTPRequestHandler):
     def _set_session_cookie(self) -> dict:
         import time
 
+        now = int(time.time())
+        if _read_revoked_at() is None:
+            # Unreadable/corrupt revocation file: heal it fail-closed — every
+            # session from before this sign-in stays revoked, and the durable
+            # rewrite makes the file readable again.
+            revoke_sessions(now)
         # mint strictly after any persisted revocation, so a re-login in the
         # same second as a logout is not swallowed by it
-        now = int(time.time())
         cookie = auth.make_session(
             self.secret, now=now, issued=max(now, revoked_at() + 1)
         )
@@ -631,7 +672,13 @@ class _Handler(BaseHTTPRequestHandler):
     def _mutate_checked(self, method: str):
         if not self._host_ok():
             return self._json(403, {"error": "bad host"})
-        if not self._origin_ok():  # CSRF: mutating requests must be same-origin
+        # CSRF applies to the cookie path only: a browser cannot attach an
+        # Authorization header cross-origin, so a Bearer-authenticated request
+        # (curl, scripts) needs no Origin; everything else must be same-origin.
+        if (
+            not auth.check_bearer(self.secret, self.headers.get("Authorization"))
+            and not self._origin_ok()
+        ):
             return self._json(403, {"error": "bad origin"})
         path = urlparse(self.path).path
         if method == "POST" and path == "/api/v1/login":
@@ -1194,8 +1241,9 @@ class _BoundedServer(ThreadingHTTPServer):
 def build_server() -> ThreadingHTTPServer:
     """Create the control server bound to the contract port (not yet serving).
 
-    Wires the handler's credentials from ``control_api.json`` and resets the
-    single-use-token set. Raises ``OSError`` if the port cannot be bound.
+    Wires the handler's credentials from ``control_api.json`` and its persisted
+    login-token store (``web_consumed.json`` — consumption survives restarts).
+    Raises ``OSError`` if the port cannot be bound.
     """
     api = control_api()
     host, port = api["address"].split(":")

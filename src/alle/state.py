@@ -293,6 +293,28 @@ class ReferencedError(RuntimeError):
         super().__init__("channel(s) are referenced by routing rules")
 
 
+def _check_permutation(current: list[str], proposed: list[str], noun: str) -> None:
+    """Require ``proposed`` to be a full permutation of ``current`` — no
+    duplicates, no unknown ids, none missing — or raise ``ValueError`` naming
+    every offender (``noun`` is "rule" or "ruleset")."""
+    seen: set[str] = set()
+    dupes: list[str] = []
+    for rid in proposed:
+        if rid in seen and rid not in dupes:
+            dupes.append(rid)
+        seen.add(rid)
+    if dupes:
+        raise ValueError(f"duplicate {noun} id(s): {', '.join(dupes)}")
+    current_set = set(current)
+    proposed_set = set(proposed)
+    unknown = [rid for rid in proposed if rid not in current_set]
+    if unknown:
+        raise ValueError(f"unknown {noun} id(s): {', '.join(unknown)}")
+    missing = [rid for rid in current if rid not in proposed_set]
+    if missing:
+        raise ValueError(f"missing {noun} id(s): {', '.join(missing)}")
+
+
 def _rules_referencing(data: dict, refs: set[tuple[str, str]]) -> dict[str, list[dict]]:
     """``"provider/cid" -> [rule, …]`` for rules targeting any of ``refs``."""
     out: dict[str, list[dict]] = {}
@@ -461,15 +483,6 @@ class Store:
             data["providers"].setdefault(provider, {"channels": {}})
         self.data = _read_raw()
 
-    def remove_provider(self, provider: str) -> int:
-        """Remove a provider and all its channels. Returns channels removed.
-
-        Raises :class:`ReferencedError` if any of its channels is still the
-        target of a routing rule (restrict-only removal — checked inside the
-        transaction so a rule added concurrently cannot slip through).
-        """
-        return self.remove_providers([provider])[provider]
-
     def remove_providers(self, providers: list[str]) -> dict[str, int]:
         """Remove several providers (and all their channels) in ONE transaction.
 
@@ -597,11 +610,6 @@ class Store:
                 ch.pop("reconnect", None)
         self.data = _read_raw()
         return self.get_channel(provider, cid), created  # type: ignore[return-value]
-
-    def remove_channel(self, provider: str, cid: str) -> bool:
-        """Remove one channel. Raises :class:`ReferencedError` if a routing rule
-        still targets it (restrict-only removal, enforced in the transaction)."""
-        return bool(self.remove_channels([(provider, cid)]))
 
     def remove_channels(self, refs: list[tuple[str, str]]) -> list[tuple[str, str]]:
         """Remove several channels in ONE transaction; returns those removed.
@@ -920,22 +928,7 @@ class Store:
             _ruleset_blocks(rules)
             current = [str(rule.get("id")) for rule in rules]
             proposed = [str(i) for i in ids]
-            seen: set[str] = set()
-            dupes: list[str] = []
-            for rid in proposed:
-                if rid in seen and rid not in dupes:
-                    dupes.append(rid)
-                seen.add(rid)
-            if dupes:
-                raise ValueError(f"duplicate rule id(s): {', '.join(dupes)}")
-            current_set = set(current)
-            proposed_set = set(proposed)
-            unknown = [rid for rid in proposed if rid not in current_set]
-            if unknown:
-                raise ValueError(f"unknown rule id(s): {', '.join(unknown)}")
-            missing = [rid for rid in current if rid not in proposed_set]
-            if missing:
-                raise ValueError(f"missing rule id(s): {', '.join(missing)}")
+            _check_permutation(current, proposed, "rule")
             changed = proposed != current
             by_id = {str(rule.get("id")): rule for rule in rules}
             ordered = [by_id[rid] for rid in proposed]
@@ -953,22 +946,7 @@ class Store:
             blocks = _ruleset_blocks(rules)
             current = [block["id"] for block in blocks]
             proposed = [str(i) for i in ids]
-            seen: set[str] = set()
-            dupes: list[str] = []
-            for rsid in proposed:
-                if rsid in seen and rsid not in dupes:
-                    dupes.append(rsid)
-                seen.add(rsid)
-            if dupes:
-                raise ValueError(f"duplicate ruleset id(s): {', '.join(dupes)}")
-            current_set = set(current)
-            proposed_set = set(proposed)
-            unknown = [rsid for rsid in proposed if rsid not in current_set]
-            if unknown:
-                raise ValueError(f"unknown ruleset id(s): {', '.join(unknown)}")
-            missing = [rsid for rsid in current if rsid not in proposed_set]
-            if missing:
-                raise ValueError(f"missing ruleset id(s): {', '.join(missing)}")
+            _check_permutation(current, proposed, "ruleset")
             changed = proposed != current
             by_id = {block["id"]: block["rules"] for block in blocks}
             router["rules"] = [rule for rsid in proposed for rule in by_id[rsid]]
