@@ -1,6 +1,11 @@
 // The sign-in flow: post the pasted token/secret to /api/v1/login, which
 // exchanges it for an HttpOnly session cookie. Kept as an external module so
 // the page's CSP can require script-src 'self' (no inline script).
+import { followSystem, bindToggle } from "./theme.js";
+
+followSystem();
+bindToggle(document.getElementById("theme"));
+
 const form = document.getElementById("form");
 const err = document.getElementById("err");
 form.addEventListener("submit", async (e) => {

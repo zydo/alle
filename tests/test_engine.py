@@ -178,6 +178,126 @@ def test_lan_direct_defaults_on_when_key_is_absent():
     } in config["route"]["rules"]
 
 
+def test_tun_inbound_and_dns_shape():
+    import sys as _sys
+
+    router = _router()
+    router["tun"] = True
+    config, errors = Engine(_store(router=router))._build_config()
+    assert errors == {}
+    tun = next(i for i in config["inbounds"] if i["tag"] == "in-tun")
+    expected = {
+        "type": "tun",
+        "tag": "in-tun",
+        "interface_name": Engine._tun_interface_name(),
+        # the v6 address is the leak fix: auto_route seizes the v6 default
+        # route so IPv6 is captured (then rejected) instead of bypassing
+        "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+        "mtu": 1400,
+        "auto_route": True,
+        "strict_route": True,
+        "stack": "system",
+    }
+    if _sys.platform == "linux":  # upstream-recommended, Linux-only field
+        expected["auto_redirect"] = True
+    assert tun == expected
+    assert config["dns"] == {
+        "servers": [
+            # no detour: dialed directly — never via a channel, never a LAN
+            # resolver (an explicit direct detour is a sing-box runtime error)
+            {"type": "udp", "tag": "dns-remote", "server": "1.1.1.1"}
+        ],
+        "strategy": "ipv4_only",
+    }
+    assert config["route"]["default_domain_resolver"] == "dns-remote"
+    assert config["route"]["auto_detect_interface"] is True
+
+
+def test_tun_off_leaves_the_explicit_proxy_config_untouched():
+    config, _ = Engine(_store(router=_router()))._build_config()
+    assert all(i["type"] != "tun" for i in config["inbounds"])
+    assert "dns" not in config
+    assert "default_domain_resolver" not in config["route"]
+    assert "auto_detect_interface" not in config["route"]
+
+
+def test_tun_joins_the_same_rule_table_without_duplicating_it():
+    router = _router(
+        ("domain_suffix", "netflix.com", "nordvpn/us_1"),
+        killswitch=True,
+    )
+    router["tun"] = True
+    store = _store(("nordvpn", "us_1", 8888, "US", "", dict(WG)), router=router)
+    config, errors = Engine(store)._build_config()
+    assert errors == {}
+    rules = config["route"]["rules"]
+    both = ["in-router", "in-tun"]
+    # the per-channel exact rule stays pinned to its own inbound (never demoted)
+    assert rules[0] == {"inbound": ["in-nordvpn-us_1"], "outbound": "out-nordvpn-us_1"}
+    assert rules[1] == {"inbound": both, "action": "sniff"}
+    # DNS hijack is tun-only and precedes LAN-direct, so a query to a LAN
+    # resolver is answered by alle, not leaked
+    assert rules[2] == {
+        "inbound": ["in-tun"],
+        "protocol": "dns",
+        "action": "hijack-dns",
+    }
+    assert rules[3] == {
+        "inbound": both,
+        "ip_cidr": list(routes.LAN_DIRECT_CIDRS),
+        "outbound": "direct",
+    }
+    # IPv6 leak fix: captured v6 is rejected (IPv4-only providers can't carry
+    # it) — after LAN-direct so local v6 stays reachable, before user rules so
+    # a catch-all can't steer v6 into an IPv4-only channel
+    assert rules[4] == {
+        "inbound": ["in-tun"],
+        "ip_cidr": ["::/0"],
+        "action": "reject",
+    }
+    assert rules[5] == {
+        "inbound": both,
+        "domain_suffix": ["netflix.com"],
+        "outbound": "out-nordvpn-us_1",
+    }
+    assert rules[6] == {"inbound": both, "action": "reject"}  # system-wide killswitch
+    assert len(rules) == 7  # one shared table — no second rule set
+
+
+def test_tun_without_router_port_still_gets_the_rule_table():
+    router = _router(("domain_suffix", "a.com", "direct"), port=0)
+    router["tun"] = True
+    config, errors = Engine(_store(router=router))._build_config()
+    assert errors == {}
+    assert [i["tag"] for i in config["inbounds"]] == ["in-tun"]
+    rules = config["route"]["rules"]
+    assert {"inbound": ["in-tun"], "action": "sniff"} in rules
+    assert {
+        "inbound": ["in-tun"],
+        "domain_suffix": ["a.com"],
+        "outbound": "direct",
+    } in rules
+
+
+def test_tun_interface_name_is_platform_aware(monkeypatch):
+    import alle.engine as engine_mod
+
+    monkeypatch.setattr(engine_mod.sys, "platform", "darwin")
+    assert Engine._tun_interface_name() == "utun225"  # Darwin only accepts utunN
+    monkeypatch.setattr(engine_mod.sys, "platform", "linux")
+    assert Engine._tun_interface_name() == "alle-tun"
+
+
+def test_tun_auto_redirect_is_linux_only(monkeypatch):
+    import alle.engine as engine_mod
+
+    engine = Engine(_store())
+    monkeypatch.setattr(engine_mod.sys, "platform", "linux")
+    assert engine._tun_inbound()["auto_redirect"] is True
+    monkeypatch.setattr(engine_mod.sys, "platform", "darwin")
+    assert "auto_redirect" not in engine._tun_inbound()
+
+
 def test_unallocated_router_port_means_no_router_inbound():
     store = _store(
         ("nordvpn", "us_1", 8888, "US", "", dict(WG)), router=_router(port=0)

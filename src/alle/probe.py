@@ -102,18 +102,25 @@ def probe_channel(
     Returns a status dict suitable for ``state.json``::
 
         {"ok": bool, "at": epoch, "latency_ms": float|None,
-         "ip": str|None, "error": str|None}
+         "ip": str|None, "error": str|None, "detail": str|None}
 
     The first source to return a valid public IP wins (its round trip is the
     reported latency); a source is treated as failed when the request raises,
-    times out, or yields an empty / non-IP / non-public / oversized body. A
-    clear error naming the sources tried is recorded only once all of them
-    fail *or* the overall ``deadline`` is exhausted — each request is bounded
-    by ``timeout``, and the whole channel by ``deadline``, so one dead channel
-    can never cost ``sources × timeout`` wall clock.
+    times out, or yields an empty / non-IP / non-public / oversized body.
+
+    Failures collapse to a few short ``error`` categories (``proxy closed``,
+    ``timeout``, ``no valid IP``) for table/status cells; the verbose
+    explanation — which sources were tried and the last exception — is in
+    ``detail`` for the log. The categories map to the two real failure modes:
+    ``proxy closed`` means the channel's local SOCKS port refused the
+    connection (sing-box didn't start the inbound — e.g. the channel failed to
+    build), while ``timeout`` means traffic entered the tunnel but nothing came
+    back (an unreachable server *or* a bad WireGuard key — the handshake is
+    silent, so the two are indistinguishable here).
     """
     opener = proxy_opener(port)
     attempted: list[str] = []
+    mode: str | None = None  # "closed" | "timeout" | "no_ip" — the dominant cause
     last_reason = "no valid IP"
     started = time.monotonic()
     for name, url in IP_ECHO_SOURCES:
@@ -130,7 +137,12 @@ def probe_channel(
             ) as r:
                 body = r.read(MAX_BODY_BYTES).decode(errors="replace")
         except Exception as e:  # noqa: BLE001 — any failure means "try the next source"
-            last_reason = _reason(e)
+            last_reason = _verbose_reason(e)
+            cls = _classify(e)
+            if cls == "closed":
+                mode = "closed"  # definitive: the inbound isn't listening
+            elif cls == "timeout":
+                mode = mode or "timeout"
             continue
         ip = _extract_ip(name, body)
         if ip:
@@ -141,20 +153,70 @@ def probe_channel(
                 "latency_ms": round(latency, 1),
                 "ip": ip,
                 "error": None,
+                "detail": None,
             }
+        mode = mode or "no_ip"  # got a response, but not a valid public IP
         last_reason = "no valid IP"
+    if mode is None:
+        # Only reachable when the deadline fired before a classifiable failure;
+        # that is itself a timeout through the tunnel.
+        mode = "timeout"
     return {
         "ok": False,
         "at": int(time.time()),
         "latency_ms": None,
         "ip": None,
-        "error": f"all IP sources failed ({', '.join(attempted)}); last: {last_reason}",
+        "error": _ERROR_LABEL[mode],
+        "detail": f"all IP sources failed ({', '.join(attempted)}); last: {last_reason}",
     }
 
 
-def _reason(e: Exception) -> str:
-    """Short human label for a probe failure (drives the status column)."""
+_ERROR_LABEL = {
+    "closed": "proxy closed",
+    "timeout": "timeout",
+    "no_ip": "no valid IP",
+}
+
+# Short table/status labels for a probe result. Kept here (next to the
+# categories) so every surface — `alle test`, `alle status`, the Web UI —
+# renders the same word for the same failure.
+_STATE_LABEL = {
+    "proxy closed": "Proxy closed",
+    "timeout": "Timeout",
+    "no valid IP": "No valid IP",
+    "stopped": "Stopped",
+}
+
+
+def state_label(probe: dict | None) -> str:
+    """One short word for a probe result, for tables and status lines:
+
+    ``Healthy`` / ``Stopped`` / ``Timeout`` / ``Proxy closed`` / ``No valid IP``
+    / ``Failed``. ``None`` (no probe yet) → ``Pending``."""
+    if not probe:
+        return "Pending"
+    if probe.get("ok"):
+        return "Healthy"
+    return _STATE_LABEL.get((probe.get("error") or "failed").lower(), "Failed")
+
+
+def _classify(e: Exception) -> str:
+    """Bucket a probe exception: ``closed`` (local SOCKS port refused/reset),
+    ``timeout`` (connected but no timely response through the tunnel), or
+    ``other``. ``URLError`` carries the real cause in ``.reason``."""
+    reason = getattr(e, "reason", e)
+    text = f"{type(reason).__name__} {reason}".lower()
+    if isinstance(reason, ConnectionError) or "refused" in text or "reset" in text:
+        return "closed"
+    if isinstance(reason, TimeoutError) or "timeout" in text or "timed out" in text:
+        return "timeout"
+    return "other"
+
+
+def _verbose_reason(e: Exception) -> str:
+    """The verbose per-attempt reason carried in ``detail`` for the log."""
     name = type(e).__name__
     if "timed out" in str(e).lower() or name in ("timeout", "TimeoutError"):
         return "timeout"
-    return name
+    reason = getattr(e, "reason", None)
+    return f"{name}: {reason}" if reason else name

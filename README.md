@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="src/alle/assets/wordmark.svg" alt="alle" width="320">
+  <img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/wordmark.svg" alt="alle" width="320">
 </p>
 
 <p align="center">
@@ -12,7 +12,7 @@
 A universal VPN client that manages multiple VPN connections with rule-based routing.
 
 <p align="center">
-  <img src="src/alle/assets/webui.png" alt="alle Web UI dashboard" width="900">
+  <img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/webui.png" alt="alle Web UI dashboard" width="900">
 </p>
 
 # Why alle
@@ -55,6 +55,19 @@ Under the hood, `alle` manages one
 one local proxy inbound routed through one WireGuard VPN peer. Channels can come
 from different providers, so a NordVPN exit and a Proton VPN `.conf` import can
 run at the same time.
+
+**System-wide VPN (TUN mode).** The above is per-app by design — you point each
+app at the proxy it needs. For a whole-machine VPN that captures *all* traffic
+(raw sockets, UDP, every app) through the same routing rules, enable TUN mode
+with `alle tun on`. It needs a **one-time** privilege grant and then no sudo
+for daily use: `sudo alle helper install` on macOS (a root LaunchDaemon owns
+sing-box while tun is on), or `sudo setcap cap_net_admin,cap_net_raw+ep
+"$(alle version --singbox-path)"` on Linux. See
+[TUN mode](docs/cli-reference.md#alle-tun-onoff) and the
+[runbook](docs/tun-runbook.md); the rest of `alle` stays no-sudo. Note: while
+TUN mode is on, **IPv6 is blocked, not leaked** — the supported providers'
+WireGuard configs are IPv4-only (their restriction), so rather than let IPv6
+bypass the VPN and expose your home address, alle captures and rejects it.
 
 ## Current status
 

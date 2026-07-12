@@ -14,10 +14,20 @@ network I/O (through each proxy) and writes the result back into the store.
 from __future__ import annotations
 
 import re
+import sys
 import time
 
 from alle import applog, probe, routes, singbox
-from alle.constants import OUTBOUND_PREFIX, ROUTER_INBOUND_TAG
+from alle.constants import (
+    OUTBOUND_PREFIX,
+    ROUTER_INBOUND_TAG,
+    TUN_ADDRESS,
+    TUN_ADDRESS_V6,
+    TUN_DNS_TAG,
+    TUN_DNS_UPSTREAM,
+    TUN_INBOUND_TAG,
+    TUN_MTU,
+)
 from alle.providers import ProviderError
 from alle.state import Channel, Store
 
@@ -56,6 +66,10 @@ def _probe_detail(ref: str, result: dict) -> str:
     detail = f"{ref} {state}"
     if result.get("error") and result.get("error") != state:
         detail += f" {result['error']}"
+    # the verbose explanation (sources tried, last exception) rides the log,
+    # not the table — keeps the STATE column to a brief category word.
+    if result.get("detail"):
+        detail += f" — {result['detail']}"
     return detail
 
 
@@ -136,7 +150,62 @@ class Engine:
             "endpoints": endpoints,
             "route": {"rules": rules, "final": "direct"},
         }
+        if self.store.router.get("tun"):
+            # alle owns resolution in TUN mode: hijacked queries are answered
+            # from this upstream, dialed direct (see constants.TUN_DNS_UPSTREAM
+            # for the stance). default_domain_resolver is required alongside a
+            # dns section since sing-box 1.12; auto_detect_interface keeps
+            # sing-box's own sockets bound to the physical interface (loop
+            # safety). Both are tun-only so the explicit-proxy config stays
+            # byte-identical.
+            # No detour on the server: sing-box dials it directly by default
+            # and rejects an explicit detour to a plain direct outbound at
+            # runtime ("makes no sense") even though `check` accepts it.
+            config["dns"] = {
+                "servers": [
+                    {
+                        "type": "udp",
+                        "tag": TUN_DNS_TAG,
+                        "server": TUN_DNS_UPSTREAM,
+                    }
+                ],
+                # ipv4_only: the supported providers' WireGuard is IPv4-only,
+                # so AAAA answers would only feed connections the ::/0 reject
+                # (the IPv6 leak fix) then blocks — don't hand them out.
+                "strategy": "ipv4_only",
+            }
+            config["route"]["default_domain_resolver"] = TUN_DNS_TAG
+            config["route"]["auto_detect_interface"] = True
         return config, errors
+
+    @staticmethod
+    def _tun_interface_name() -> str:
+        # Fixed name so teardown checks are deterministic. Darwin only accepts
+        # utun<N>; a high N stays clear of the kernel's low auto-assigned
+        # numbers (Tier 3 verifies the Darwin semantics).
+        return "utun225" if sys.platform == "darwin" else "alle-tun"
+
+    def _tun_inbound(self) -> dict:
+        inbound = {
+            "type": "tun",
+            "tag": TUN_INBOUND_TAG,
+            "interface_name": self._tun_interface_name(),
+            # The v6 address is the IPv6 LEAK FIX, not IPv6 support: it makes
+            # auto_route seize the v6 default route so IPv6 is captured (and
+            # then rejected — see the ::/0 rule) instead of bypassing the VPN
+            # out the physical interface. See constants.TUN_ADDRESS_V6.
+            "address": [TUN_ADDRESS, TUN_ADDRESS_V6],
+            "mtu": TUN_MTU,
+            "auto_route": True,
+            "strict_route": True,
+            "stack": "system",
+        }
+        if sys.platform == "linux":
+            # Upstream calls auto_redirect "always recommended" on Linux:
+            # better routing, higher performance than tproxy, and no conflicts
+            # between the TUN and Docker bridge networks. Linux-only field.
+            inbound["auto_redirect"] = True
+        return inbound
 
     def _router_config(
         self,
@@ -145,15 +214,24 @@ class Engine:
         built: set[tuple[str, str]],
         errors: dict[str, str],
     ) -> None:
-        """Append the always-on router entrypoint and its compiled rules.
+        """Append the shared-rule entry inbounds (router, tun) and the one
+        compiled rule table both share.
+
+        The router entrypoint and the tun inbound are two doors into the same
+        route table: every compiled rule lists both tags in its ``inbound``
+        (one source of truth — never a second rule set), while the per-channel
+        exact rules stay pinned to their own inbound ("never demoted").
 
         Layout (order is law): the per-channel exact rules already precede
         these; then a ``sniff`` action (the pinned sing-box dropped inbound
-        sniffing — IP-dialing apps need it for domain rules), the built-in
-        LAN/local default-direct block (when ``lan_direct`` is on — ahead of
-        every user rule, so no catch-all can shadow it), the user rules in
-        stored order, and unmatched handling — a trailing ``reject`` when the
-        kill-switch is on, otherwise fall-through to ``route.final: direct``.
+        sniffing — IP-dialing apps need it for domain rules), the tun-only
+        DNS hijack (ahead of LAN-direct, so queries to a LAN resolver are
+        still answered by alle, not leaked), the built-in LAN/local
+        default-direct block (when ``lan_direct`` is on — ahead of every user
+        rule, so no catch-all can shadow it), the user rules in stored order,
+        and unmatched handling — a trailing ``reject`` when the kill-switch is
+        on (with tun active that is genuinely system-wide), otherwise
+        fall-through to ``route.final: direct``.
 
         Fail closed: a rule whose channel target is not in this build (removed
         behind our back, or the channel itself failed to build) compiles to
@@ -167,23 +245,55 @@ class Engine:
         """
         router = self.store.router
         port = int(router.get("port") or 0)
-        if not port:
-            return  # not yet allocated (first daemon start does it)
-        inbounds.append(
-            {
-                "type": "mixed",
-                "tag": ROUTER_INBOUND_TAG,
-                "listen": "127.0.0.1",
-                "listen_port": port,
-            }
-        )
-        rules.append({"inbound": [ROUTER_INBOUND_TAG], "action": "sniff"})
+        tun = bool(router.get("tun"))
+        entry: list[str] = []
+        if port:  # 0 until the first daemon start allocates it
+            inbounds.append(
+                {
+                    "type": "mixed",
+                    "tag": ROUTER_INBOUND_TAG,
+                    "listen": "127.0.0.1",
+                    "listen_port": port,
+                }
+            )
+            entry.append(ROUTER_INBOUND_TAG)
+        if tun:
+            inbounds.append(self._tun_inbound())
+            entry.append(TUN_INBOUND_TAG)
+        if not entry:
+            return
+        rules.append({"inbound": list(entry), "action": "sniff"})
+        if tun:
+            rules.append(
+                {
+                    "inbound": [TUN_INBOUND_TAG],
+                    "protocol": "dns",
+                    "action": "hijack-dns",
+                }
+            )
         if router.get("lan_direct", True):
             rules.append(
                 {
-                    "inbound": [ROUTER_INBOUND_TAG],
+                    "inbound": list(entry),
                     "ip_cidr": list(routes.LAN_DIRECT_CIDRS),
                     "outbound": "direct",
+                }
+            )
+        if tun:
+            # IPv6 leak fix — block, don't leak. The supported providers'
+            # WireGuard configs are IPv4-only, so IPv6 cannot ride the tunnel;
+            # without this rule (and the tun's v6 address that captures the
+            # traffic), IPv6 would silently bypass the VPN via the physical
+            # interface, exposing the home address. Placed after LAN-direct
+            # (link-local/ULA v6 to LAN devices stays reachable when that is
+            # on) and before user rules (a catch-all must not steer v6 into an
+            # IPv4-only channel). Tun-only: explicit-proxy mode never captured
+            # IPv6 in the first place.
+            rules.append(
+                {
+                    "inbound": [TUN_INBOUND_TAG],
+                    "ip_cidr": ["::/0"],
+                    "action": "reject",
                 }
             )
         # One domain semantic: every domain rule compiles to sing-box's
@@ -195,7 +305,7 @@ class Engine:
         }
         for rule in router.get("rules") or []:
             ref = f"rule {rule.get('id')}"
-            compiled: dict = {"inbound": [ROUTER_INBOUND_TAG]}
+            compiled: dict = {"inbound": list(entry)}
             mtype = rule.get("type")
             if mtype in matcher_fields:
                 compiled[matcher_fields[mtype]] = [rule.get("value")]
@@ -220,7 +330,7 @@ class Engine:
                 compiled["outbound"] = f"{OUTBOUND_PREFIX}{provider}-{cid}"
             rules.append(compiled)
         if router.get("killswitch"):
-            rules.append({"inbound": [ROUTER_INBOUND_TAG], "action": "reject"})
+            rules.append({"inbound": list(entry), "action": "reject"})
 
     # ---- reconcile ---------------------------------------------------------
     def reconcile(self) -> dict[str, str]:
@@ -262,9 +372,11 @@ class Engine:
                 result.detail or "sing-box failed at runtime"
             )
         if result.outcome is singbox.ApplyOutcome.APPLIED:
-            live = sum(1 for i in config["inbounds"] if i["tag"] != ROUTER_INBOUND_TAG)
-            router = "+ router" if len(config["inbounds"]) > live else "no router"
-            applog.log(f"reconciled sing-box: {live} channel(s) live, {router}")
+            tags = {i["tag"] for i in config["inbounds"]}
+            live = len(tags - {ROUTER_INBOUND_TAG, TUN_INBOUND_TAG})
+            router = "+ router" if ROUTER_INBOUND_TAG in tags else "no router"
+            tun = " + tun" if TUN_INBOUND_TAG in tags else ""
+            applog.log(f"reconciled sing-box: {live} channel(s) live, {router}{tun}")
         return errors
 
     def _recover_stolen_ports(self, err_text: str) -> bool:

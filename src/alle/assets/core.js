@@ -63,14 +63,33 @@ export function mbps(bps) {
 }
 
 // --- transient notifications ---
+// A leading status glyph (the kind's accent color) plus the message — reads as
+// a centered system HUD rather than floating text. The message is set via
+// textContent so it is never interpreted as HTML.
+const TOAST_ICONS = {
+  ok: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="10" r="8.2"/><path d="M6.4 10.4l2.4 2.4 4.8-5"/></svg>',
+  err: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="10" r="8.2"/><path d="M10 5.6v5"/><path d="M10 13.7v.5"/></svg>',
+  warn: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 2.7l7.6 13.1H2.4z"/><path d="M10 8.2v3.1"/><path d="M10 13.7v.4"/></svg>',
+};
+
 export function toast(msg, kind = "ok") {
   let host = $("toasts");
   if (!host) { host = node('<div id="toasts"></div>'); document.body.appendChild(host); }
   const t = node(`<div class="toast ${kind}"></div>`);
-  t.textContent = msg;
+  const ico = node(`<span class="toast-ico">${TOAST_ICONS[kind] || TOAST_ICONS.ok}</span>`);
+  const txt = document.createElement("span");
+  txt.className = "toast-msg";
+  txt.textContent = msg;
+  t.append(ico, txt);
+  t.title = "Click to dismiss";
   host.appendChild(t);
   requestAnimationFrame(() => t.classList.add("show"));
-  setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 250); }, 3400);
+  // Long messages (e.g. an error explaining a sudo workaround) need time to
+  // read — scale the hold with length, and let a click dismiss early.
+  const ms = Math.min(15000, Math.max(3400, 1500 + msg.length * 60));
+  const hide = () => { t.classList.remove("show"); setTimeout(() => t.remove(), 250); };
+  const timer = setTimeout(hide, ms);
+  t.onclick = () => { clearTimeout(timer); hide(); };
 }
 
 // --- modal: opens with a title + body HTML; returns { root, close }. ---
@@ -84,7 +103,13 @@ export function modal(title, bodyHTML) {
       </div>
     </div>`);
   document.body.appendChild(root);
-  const close = () => { root.remove(); document.removeEventListener("keydown", onKey); };
+  const close = () => {
+    if (root.classList.contains("leaving")) return;
+    root.classList.add("leaving");
+    document.removeEventListener("keydown", onKey);
+    // let the mirrored exit animation play before tearing the node down
+    setTimeout(() => root.remove(), 180);
+  };
   const onKey = (e) => { if (e.key === "Escape") close(); };
   root.querySelector(".x").onclick = close;
   root.addEventListener("click", (e) => { if (e.target === root) close(); });
@@ -117,8 +142,10 @@ export function confirmDialog(title, message, { confirmText = "Confirm", cancelT
         return;
       }
       done = true;
-      root.remove();
       document.removeEventListener("keydown", onKey);
+      root.classList.add("leaving");
+      // resolve immediately so app logic isn't delayed; only the teardown waits
+      setTimeout(() => root.remove(), 180);
       resolve(val);
     };
     const onKey = (e) => {

@@ -101,8 +101,9 @@ export function mount(v, ctx) {
         return;
       }
       if (!res.ok) {
-        let detail = `Request failed (${res.status})`;
-        try { detail = (await res.json()).error || detail; } catch (_e) { /* keep default */ }
+        const fallback = `Request failed (${res.status})`;
+        // two-arg then: a non-JSON error body falls back without a swallowed catch
+        const detail = await res.json().then((b) => b.error || fallback, () => fallback);
         toast(detail, "err");
         return;
       }
@@ -110,7 +111,7 @@ export function mount(v, ctx) {
       const blob = await res.blob();
       if (!mounted) return;
       const disp = res.headers.get("Content-Disposition") || "";
-      const m = disp.match(/filename="([^"]+)"/);
+      const m = /filename="([^"]+)"/.exec(disp);
       const a = document.createElement("a");
       const url = URL.createObjectURL(blob);
       a.href = url;

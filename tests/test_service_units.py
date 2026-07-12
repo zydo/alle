@@ -238,6 +238,9 @@ def test_start_stop_restart_and_logs_tail(monkeypatch):
     monkeypatch.setattr(
         service.daemon, "stop", lambda: events.append("daemon-stop") or True
     )
+    # isolate from the host's actual login-service plist: restart() branches on
+    # daemonctl.is_installed(), which otherwise reflects the host machine.
+    monkeypatch.setattr(service.daemonctl, "is_installed", lambda: False)
 
     assert service.start() == {"has_channels": True}
     assert service.stop() == {"was_running": True}

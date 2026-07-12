@@ -36,6 +36,7 @@ omit the prefix.
   - [`alle locations`](#alle-locations)
   - [`alle status`](#alle-status)
   - [`alle start` / `stop` / `restart`](#alle-start--stop--restart)
+  - [`alle tun [on|off]`](#alle-tun-onoff)
   - [`alle test`](#alle-test)
   - [`alle export [--out <file>]`](#alle-export---out-file)
   - [`alle import <file> [--replace] [--yes]`](#alle-import-file---replace---yes)
@@ -46,6 +47,7 @@ omit the prefix.
     - [`alle daemon install [--linger]`](#alle-daemon-install---linger)
     - [`alle daemon uninstall`](#alle-daemon-uninstall)
     - [`alle daemon status [--json]`](#alle-daemon-status---json)
+  - [`alle helper`](#alle-helper)
   - [`alle version`](#alle-version)
   - [Output conventions](#output-conventions)
   - [Exit codes](#exit-codes)
@@ -309,14 +311,21 @@ There is deliberately no exact-only domain matcher — one semantic keeps rules
 predictable. `routes ls` flags any rule that can never match because an
 earlier rule (or the built-in LAN block, when on) already covers it.
 
-**DNS is not routed for you — mind DNS leakage.** alle routes by destination
-(IP/CIDR/domain), it does not intercept the system resolver. An app that
-resolves a hostname *locally* and then connects by IP can leak which host it is
-contacting through the local DNS query, and a hostname resolved to a sinkhole
-address by a system-wide TUN VPN on the same host can defeat a domain rule. To
-keep name resolution inside the tunnel, point apps at the proxy with **remote
-DNS** — `socks5h://` (not `socks5://`) or an HTTP proxy that resolves remotely —
-so sing-box resolves the destination through the tunnel, not the host.
+**DNS depends on the mode — mind DNS leakage.**
+
+- *Explicit-proxy mode (the default):* alle routes by destination
+  (IP/CIDR/domain), it does not intercept the system resolver. An app that
+  resolves a hostname *locally* and then connects by IP can leak which host it
+  is contacting through the local DNS query, and a hostname resolved to a
+  sinkhole address by another system-wide TUN VPN on the same host can defeat
+  a domain rule. To keep name resolution away from the host resolver, point
+  apps at the proxy with **remote DNS** — `socks5h://` (not `socks5://`) or an
+  HTTP proxy that resolves remotely — so sing-box resolves the destination,
+  not the host.
+- *[TUN mode](#alle-tun-onoff):* alle **owns the resolver** — plain DNS from
+  every app is hijacked and answered by sing-box, so the `socks5h://` advice
+  becomes moot and local-resolver leakage disappears. See the tun section for
+  where the upstream query goes (a public resolver, dialed direct).
 
 The entrypoint's port is shown by `alle status` and by `routes ls`; it is
 allocated on the first daemon start and then never changes.
@@ -422,9 +431,10 @@ alle routes killswitch on
 alle routes killswitch
 ```
 
-- Applies to the **router entrypoint only** — per-channel ports are unaffected.
-  (Commercial VPN apps use "kill switch" for a system-wide block; alle's becomes
-  system-wide only once your system points at the router.)
+- Applies to the router entrypoint **and**, when [TUN mode](#alle-tun-onoff) is
+  on, to all system traffic — per-channel ports are always unaffected.
+  (Commercial VPN apps use "kill switch" for a system-wide block; alle's is
+  system-wide exactly when TUN mode is on.)
 - `alle status` and `routes ls` show `unmatched → block — kill-switch ON` while
   active, so it's always visible why unmatched traffic fails.
 
@@ -454,7 +464,8 @@ Notes:
 
 - The built-in rules are fixed — they cannot be edited or removed individually;
   this toggle is the whole surface. They never appear in `alle routes ls`.
-- Applies to the **router entrypoint only**; per-channel ports are unaffected.
+- Applies to the router entrypoint **and**, when [TUN mode](#alle-tun-onoff) is
+  on, to all system traffic; per-channel ports are unaffected.
 - DNS is deliberately **not** excluded from the tunnel: sending plain DNS direct
   by default would leak browsing activity, so DNS traffic stays subject to your
   rules.
@@ -520,6 +531,111 @@ alle start
 alle restart
 alle stop
 ```
+
+---
+
+## `alle tun [on|off]`
+
+System-wide VPN mode: sing-box creates a TUN device and takes over the
+system's default route, so **all** system traffic — every app, raw sockets,
+UDP — enters the same routing rules the router entrypoint uses. Run without an
+argument to show the current state.
+
+```bash
+alle tun on
+alle tun
+alle tun off
+```
+
+- **One rule table, two doors.** The tun joins the router entrypoint's
+  compiled rules (built-in LAN-direct block, your rulesets, unmatched
+  handling) — nothing is duplicated, and per-channel proxy ports plus the
+  router port keep working unchanged. With tun on, `alle routes killswitch on`
+  is genuinely system-wide.
+- **Privilege: one-time install, then no sudo.** Creating the TUN device is
+  privileged, so `alle tun on` refuses unless one of these holds (the helper
+  is the intended steady state; the others are fallbacks):
+  - **macOS — privileged helper (recommended).** Install it **once**:
+
+    ```bash
+    sudo alle helper install
+    ```
+
+    This registers a root LaunchDaemon that owns sing-box while tun mode is on.
+    After this single install, `alle tun on` (and the Web UI / companion
+    toggle) works as your normal user with **no password, ever** — it
+    survives reboots (launchd starts the helper at boot). Remove it with
+    `sudo alle helper uninstall`; check it with `alle helper status`. See
+    `docs/security.md` for the helper's hard scope.
+
+  - **Linux — setcap (no root, recommended).** Grant the pinned sing-box
+    binary the capability once; then `alle tun on` works as your normal user
+    with an unprivileged daemon — no root process anywhere:
+
+    ```bash
+    sudo setcap cap_net_admin,cap_net_raw+ep "$(alle version --singbox-path)"
+    sudo alle restart   # re-exec sing-box so it picks up the capability
+    ```
+
+    Re-run both after any sing-box version bump (the pinned path changes, and
+    a SIGHUP reload does not re-acquire the cap). Verified in the Tier 2
+    sandbox.
+
+  - **Any platform — sudo one-off (fallback).** If you haven't installed the
+    helper (macOS) or setcap (Linux), sing-box must run as root for the
+    toggle. Stop any user-level daemon first, then run under sudo against your
+    normal state directory:
+
+    ```bash
+    alle stop
+    sudo ALLE_HOME="$HOME/.alle" alle tun on
+    ```
+
+    The rest of the alle CLI is **not** sudo-only — only this one-off tun
+    enable needs it, and the helper/setcap paths exist to avoid even that.
+
+- **DNS is owned by alle in TUN mode.** Plain DNS from any app is hijacked
+  and answered by sing-box; the upstream is `1.1.1.1` over UDP, dialed
+  **direct** — never a LAN resolver, and (in v1) never a channel: with
+  multiple channels there is no single "the tunnel" to prefer, so resolution
+  goes direct even under the kill-switch (rule matching and endpoint dialing
+  need it). Apps doing their own encrypted DNS (DoH/DoT) are ordinary traffic,
+  subject to your rules like anything else.
+- **No IPv6 while on the VPN — blocked, not leaked (a provider restriction).**
+  The supported providers' WireGuard configs are **IPv4-only** (NordVPN and
+  Proton VPN ship no IPv6 tunnel addressing), so IPv6 *cannot* be carried
+  through the tunnel — that is their restriction, not alle's. The honest
+  options are to leak IPv6 around the VPN or to block it; alle blocks it:
+  with tun on, the v6 default route is captured into the tun and all IPv6 is
+  rejected (`curl -6` fails with connection reset; your home IPv6 never
+  appears on IP-check sites). LAN-direct still passes local IPv6
+  (link-local/ULA) when enabled, DNS is `ipv4_only` so apps rarely even try
+  v6, and IPv6 returns to normal the moment tun is off. If a future provider
+  ships IPv6 WireGuard endpoints, real IPv6-over-VPN becomes possible.
+- **Kill-switch + tun blocks alle's own provider calls.** Only sing-box's own
+  sockets bypass the tun; the alle daemon's provider API traffic (NordVPN
+  server re-resolution on reconnect, `alle locations --refresh`) is ordinary
+  direct egress, so with both tun **and** the kill-switch on it is blocked
+  like any other unmatched traffic (verified live in the sandbox). Channels
+  keep flowing — WireGuard runs inside sing-box — but automatic reconnect
+  cannot fetch a replacement server until a rule allows it or the kill-switch
+  is lifted.
+- **Crash behavior (honest asterisk).** Enforcement lives in the sing-box
+  process. If it crashes, the utun and its routes vanish and the kernel falls
+  back to the physical route — traffic fails **open** for the ~2s supervision
+  window until sing-box restarts. A firewall-anchored always-on kill-switch is
+  future hardening.
+- **Trying it safely: `alle tun on --trial <seconds>`.** Arms a detached
+  watchdog *before* activation (the `iptables-apply` pattern): unless you run
+  `alle tun confirm` within the window, TUN mode reverts off automatically —
+  even if your SSH session died with the network. `alle tun` shows the
+  pending trial; a plain `alle tun on`/`off` supersedes it.
+- **Recovery.** `alle tun off` (reconciles the tun away); if the CLI is
+  broken, `alle stop` — a cleanly killed sing-box always restores the routes.
+  Do **not** `pkill sing-box`: the daemon restarts it with the same tun config
+  within ~2s. Full ordered runbook (read it before the first activation):
+  [docs/tun-runbook.md](tun-runbook.md).
+- `alle status` shows a `TUN` line while active.
 
 ---
 
@@ -812,6 +928,33 @@ alle-proxy` (or `pipx upgrade`) never needs to touch it, and a supervised daemon
 notices the new version and restarts itself onto it within ~30s. For an
 unsupervised daemon, `alle status` prints a one-line warning when the running
 daemon is older than the CLI (`run alle restart to pick up the upgrade`).
+
+---
+
+## `alle helper`
+
+`alle helper install` · `alle helper uninstall` · `alle helper status`
+
+The privileged TUN helper — macOS only (Linux uses `setcap`, no helper). It is
+the one-time grant that makes [`alle tun on`](#alle-tun-onoff) need no sudo:
+install once, and the helper (a root LaunchDaemon) owns sing-box while tun mode
+is on, so `tun on`/`off` and the Web UI toggle run as your normal user with no
+password, across reboots.
+
+```bash
+sudo alle helper install     # one-time; then `alle tun on` needs no sudo
+alle helper status           # is it installed and answering?
+sudo alle helper uninstall   # remove it (tun on then needs the sudo fallback)
+```
+
+- `install`/`uninstall` need root (they write `/Library/LaunchDaemons/`); run
+  them under `sudo`. `status` does not. The helper serves the user behind
+  `sudo` (`SUDO_UID`) over a unix socket, authenticated by peer uid.
+- The helper is deliberately minimal — it only launches/stops/reloads sing-box
+  against the fixed config path; it never parses state or sees credentials. See
+  `docs/security.md` for the trust model.
+- The signed, GUI-installed variant (SMAppService inside the `.app`) is deferred
+  to Phase 8; this launchd helper is the no-signing steady state.
 
 ---
 

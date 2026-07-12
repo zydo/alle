@@ -101,10 +101,12 @@ def test_all_sources_fail(monkeypatch):
     assert r["ok"] is False
     assert r["ip"] is None
     assert r["latency_ms"] is None
-    assert "all IP sources failed" in r["error"]
+    # error is a short category; the verbose "all sources failed …" is in detail
+    assert r["error"] == "no valid IP"
+    assert "all IP sources failed" in r["detail"]
     for name in ("cloudflare-trace", "icanhazip", "ipify"):
-        assert name in r["error"]
-    assert "maintenance" not in r["error"]  # response bodies are not leaked
+        assert name in r["detail"]
+    assert "maintenance" not in r["detail"]  # response bodies are not leaked
     assert len(opener.requested) == 3
 
 
@@ -180,6 +182,8 @@ def test_channel_deadline_stops_trying_remaining_sources(monkeypatch):
     r = probe.probe_channel(8888, deadline=0.001)
     monkeypatch.setattr(probe.time, "monotonic", real_monotonic)
     assert r["ok"] is False
-    assert "deadline" in r["error"]
+    # the deadline firing is recorded in the verbose detail (the short error is
+    # the failure category — "proxy closed" here, since the first source refused)
+    assert "deadline" in r["detail"]
     # only the first source was attempted before the deadline ran out
     assert len(opener.requested) < len(probe.IP_ECHO_SOURCES)

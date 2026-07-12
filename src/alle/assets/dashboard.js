@@ -21,6 +21,12 @@ const SHELL = `
         <span class="entry-label">Router Entrypoint</span>
         <span class="entry-div" aria-hidden="true"></span>
         <span class="entry-addr"><span class="scheme">http://</span><span id="entry-addr"></span><span class="entry-copy">${COPY}</span></span>
+        <span class="entry-tun">
+          <span class="entry-bead" id="tun-bead" aria-hidden="true"></span>
+          <span class="entry-label">TUN</span>
+          <span class="tun-pop" id="tun-note" role="tooltip"></span>
+          <span class="toggle" id="tun-toggle" role="button" tabindex="0" aria-label="Toggle system-wide TUN mode" aria-describedby="tun-note"><span class="toggle-knob"></span></span>
+        </span>
       </div>
     </section>
     <section class="dash-panel dash-panel-channels rise">
@@ -53,9 +59,12 @@ export function mount(view, ctx) {
   view.innerHTML = SHELL;
   el = {
     entry: view.querySelector("#entry"), entryAddr: view.querySelector("#entry-addr"),
+    tunToggle: view.querySelector("#tun-toggle"), tunNote: view.querySelector("#tun-note"),
+    tunBead: view.querySelector("#tun-bead"),
     channels: view.querySelector("#channels"), routes: view.querySelector("#routes"),
     probeAll: null, speedAll: null,
   };
+  el.tunToggle.onclick = toggleTun;
   view.addEventListener("click", (e) => {
     const t = e.target.closest("[data-copy]");
     if (t?.dataset.copy) { copy(t.dataset.copy); e.stopPropagation(); }
@@ -99,6 +108,36 @@ function renderEntry(s) {
     addr.classList.remove("copyable");
     addr.title = "";
   }
+  renderTun(r);
+}
+
+function renderTun(r) {
+  const on = !!r.tun;
+  el.tunToggle.classList.toggle("on", on);
+  el.tunBead.classList.toggle("live", on);
+  // The scope framing lives here: with tun on, the kill-switch (unmatched →
+  // block) is genuinely system-wide, and the user must see that shift.
+  let note = "Off — only apps pointed at the proxy ports are routed";
+  if (on) {
+    note = r.killswitch
+      ? "On — all system traffic follows the rules; kill-switch is system-wide"
+      : "On — all system traffic follows the rules; unmatched goes direct";
+  }
+  el.tunNote.textContent = note;
+}
+
+async function toggleTun() {
+  const enabled = !status?.router?.tun;
+  const res = await api.post("/api/v1/tun", { enabled });
+  if (!res.ok) { toast(res.error, "err"); return; }
+  if (status) status.router = res.data.router || status.router;
+  router = res.data.router || router;
+  renderEntry(status);
+  renderRoutes();
+  refreshStatus();
+  toast(enabled
+    ? "TUN mode on — all system traffic now follows the routing rules."
+    : "TUN mode off — only traffic pointed at the proxy ports is routed.");
 }
 
 async function copy(text) {
@@ -138,12 +177,35 @@ function chanRow(c) {
   const key = chanKey(c);
   const m = measured.get(key) || {};
   const speed = m.speed_result || {};
+  // No STATE column (space is tight): when a channel is not healthy, show its
+  // short state word in the IP cell instead of leaving it blank — the verbose
+  // reason is the cell's tooltip. Healthy/pending-with-no-IP-yet stays empty.
+  const okStates = new Set(["Active", "Healthy", "Pending", ""]);
+  const st = c.state || "";
+  const showState = st && !okStates.has(st);
+  // Compact the state word for the narrow IP cell (the full form is the tooltip):
+  // "Reconnecting (4)" → "Reconnecting", "Reconnect failed" → "Failed".
+  // Plain string ops (no regex): drop a trailing "(...)" suffix if present.
+  let shortSt = st;
+  if (shortSt.endsWith(")")) {
+    const open = shortSt.lastIndexOf("(");
+    if (open > 0) shortSt = shortSt.slice(0, open).trimEnd();
+  }
+  if (shortSt === "Reconnect failed") shortSt = "Failed";
+  const probeDetail = c.probe?.detail;
+  const tip = probeDetail ? `${st} — ${probeDetail}` : st;
+  let ipCell = `<span class="ip"></span>`;
+  if (m.ip) {
+    ipCell = `<span class="ip copyable" data-copy="${esc(m.ip)}" title="Click to copy">${esc(m.ip)}</span>`;
+  } else if (showState) {
+    ipCell = `<span class="ip chan-state warn" title="${esc(tip)}">${esc(shortSt)}</span>`;
+  }
   return `<div class="row dashchan body" data-provider="${esc(c.provider)}" data-id="${esc(c.name)}">
     <span class="chan-label"><button class="name edit" data-label="${esc(c.label || "")}" title="Rename">${esc(c.label || c.name)}</button>
       <div class="ref">${esc(key)}</div></span>
     <span class="loc" title="${esc(loc(c))}">${esc(loc(c))}</span>
     <span class="port copyable" data-copy="http://127.0.0.1:${esc(c.port_number)}" title="Click to copy">${esc(c.port)}</span>
-    <span class="ip${m.ip ? " copyable" : ""}"${m.ip ? ` data-copy="${esc(m.ip)}" title="Click to copy"` : ""}>${esc(m.ip || "")}</span>
+    ${ipCell}
     <span class="lat">${isSet(m.latency_ms) ? `${esc(m.latency_ms)} ms` : ""}</span>
     <span class="mono">${isSet(m.sent) ? bytes(m.sent) : ""}</span>
     <span class="mono">${isSet(m.received) ? bytes(m.received) : ""}</span>
@@ -164,7 +226,7 @@ function renderChannels() {
     el.channels.innerHTML = `<div class="grid">${addRow}</div>`;
     return;
   }
-  const head = `<div class="row dashchan head"><span>Channel</span><span>Location</span><span>Port</span><span>IP</span><span>Latency</span><span>Sent</span><span>Received</span><span>Down SPD</span><span>Up SPD</span><span class="row-actions channel-actions channel-all-actions"><button class="icon-btn" id="probe-all" title="Probe all" aria-label="Probe all" data-probe-all>◉</button><button class="icon-btn" id="speed-all" title="Speed test all" aria-label="Speed test all" data-speed-all>${GAUGE}</button></span></div>`;
+  const head = `<div class="row dashchan head"><span>Channel</span><span>Location</span><span>Port</span><span>IP</span><span>Latency</span><span>Sent</span><span>Received</span><span>Down SPD</span><span>Up SPD</span><span class="row-actions channel-actions channel-all-actions"><button class="icon-btn" id="probe-all" title="Probe All" aria-label="Probe all" data-probe-all>◉</button><button class="icon-btn" id="speed-all" title="Speed Test All" aria-label="Speed test all" data-speed-all>${GAUGE}</button></span></div>`;
   el.channels.innerHTML = `<div class="grid">${head}${chans.map(chanRow).join("")}${addRow}</div>`;
   syncHeaderBusy();
 }
@@ -188,6 +250,7 @@ async function runTest(channel, speed) {
   renderChannels();
   try {
     if (speed) {
+      toast("Speed Test In Progress.");
       await runSpeedStream(channel);
     } else {
       const res = await api.post("/api/v1/test", { speed: false, channel: channel ? channel.name : null });
@@ -216,7 +279,7 @@ async function runSpeedStream(channel) {
   const res = await startSpeedStream(channel);
   if (!res) return;                 // network/401/non-stream error already toasted
   if (await consumeSpeedStream(res.body)) return;  // mid-stream error already toasted
-  toast("Speed test complete.");
+  toast("Speed Test Complete.");
   refreshStatus();
 }
 

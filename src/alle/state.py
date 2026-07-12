@@ -164,10 +164,17 @@ def _blank() -> dict:
 
 def _router_blank() -> dict:
     """The router entrypoint's state: contract port (0 = not yet allocated),
-    the explicit kill-switch flag, the built-in LAN-direct toggle, and the
-    ordered rule list. ``lan_direct`` defaults **on** — readers must treat an
-    absent key as True so pre-existing state files inherit the default."""
-    return {"port": 0, "killswitch": False, "lan_direct": True, "rules": []}
+    the explicit kill-switch flag, the built-in LAN-direct toggle, the TUN-mode
+    flag, and the ordered rule list. ``lan_direct`` defaults **on** — readers
+    must treat an absent key as True so pre-existing state files inherit the
+    default. ``tun`` defaults off; absent reads as False."""
+    return {
+        "port": 0,
+        "killswitch": False,
+        "lan_direct": True,
+        "tun": False,
+        "rules": [],
+    }
 
 
 def _rule_num(rule: dict) -> int:
@@ -975,6 +982,13 @@ class Store:
             data.setdefault("router", _router_blank())["lan_direct"] = bool(enabled)
         self.data = _read_raw()
 
+    def set_tun(self, enabled: bool) -> None:
+        """Toggle system-wide TUN mode. The flag is config-relevant (it moves
+        ``config_signature``), so the daemon reconciles sing-box on the flip."""
+        with transaction() as data:
+            data.setdefault("router", _router_blank())["tun"] = bool(enabled)
+        self.data = _read_raw()
+
     def rules_referencing(self, refs: set[tuple[str, str]]) -> dict[str, list[dict]]:
         """``"provider/cid" -> [rule, …]`` from this snapshot (plan-time view;
         the authoritative check re-runs inside the removal transaction)."""
@@ -1206,15 +1220,21 @@ def config_signature(data: dict) -> str:
         if chans:  # an empty provider produces no inbounds, so it can't move the config
             relevant[provider] = chans
     router = data.get("router") or {}
-    if router.get("port") or router.get("rules") or router.get("killswitch"):
+    if (
+        router.get("port")
+        or router.get("rules")
+        or router.get("killswitch")
+        or router.get("tun")
+    ):
         # "_router" cannot collide: provider keys are bare lowercase words.
-        # lan_direct only matters once the router inbound exists (port set),
-        # which the condition above already guarantees whenever it could
-        # change the compiled config.
+        # lan_direct only matters once a shared-rule inbound exists (router
+        # port set, or tun on), which the condition above already guarantees
+        # whenever it could change the compiled config.
         relevant["_router"] = {
             "port": router.get("port"),
             "killswitch": bool(router.get("killswitch")),
             "lan_direct": bool(router.get("lan_direct", True)),
+            "tun": bool(router.get("tun")),
             "rules": [
                 {
                     "id": rule.get("id"),

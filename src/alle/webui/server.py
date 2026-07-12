@@ -1126,6 +1126,15 @@ class _Handler(BaseHTTPRequestHandler):
             return self._call(
                 service.routes_lan_direct, _bool_field(body, "enabled", required=True)
             )
+        if method == "POST" and seg == ["tun"]:
+            # `enabled` is required and strictly boolean, same contract as the
+            # kill switch: a missing field must never silently flip TUN mode.
+            # The service's privilege gate surfaces as a 400 whose message the
+            # UI shows verbatim (the documented sudo path).
+            _fields(body, "enabled")
+            return self._call(
+                service.tun_mode, _bool_field(body, "enabled", required=True)
+            )
         if method == "DELETE" and len(seg) == 2 and seg[0] == "routes":
             return self._call(service.routes_remove, [seg[1]])
         if method == "POST" and seg == ["test"]:

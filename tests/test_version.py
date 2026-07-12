@@ -11,13 +11,16 @@ def test_version_falls_back_when_package_metadata_is_missing(monkeypatch):
     class PackageNotFoundError(Exception):
         pass
 
-    metadata = types.ModuleType("importlib.metadata")
-    metadata.PackageNotFoundError = PackageNotFoundError
-
     def missing(_name):
         raise PackageNotFoundError
 
-    metadata.version = missing
+    metadata = types.ModuleType("importlib.metadata")
+    # a ModuleType has no declared attributes, so set them via setattr —
+    # same runtime effect, without tripping the type checker
+    monkeypatch.setattr(
+        metadata, "PackageNotFoundError", PackageNotFoundError, raising=False
+    )
+    monkeypatch.setattr(metadata, "version", missing, raising=False)
     monkeypatch.setitem(sys.modules, "importlib.metadata", metadata)
 
     module = runpy.run_path("src/alle/__init__.py")

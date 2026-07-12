@@ -73,7 +73,10 @@ def host_platform() -> str:
     return key
 
 
-def _bin_path() -> Path:
+def bin_path() -> Path:
+    """Where the pinned sing-box lives (whether or not it's downloaded yet).
+    Public: the CLI prints it (``alle version --singbox-path``) and the TUN
+    privilege gate inspects its file capabilities."""
     return paths.state_dir() / "bin" / f"sing-box@{SINGBOX_VERSION}"
 
 
@@ -101,7 +104,7 @@ def ensure_binary() -> Path:
     """
     key = host_platform()
     expected = SINGBOX_SHA256[key]
-    target = _bin_path()
+    target = bin_path()
     if target.exists():
         if _sha256_file(target) == expected:
             return target
@@ -249,17 +252,58 @@ class Runner:
     """Owns the one sing-box daemon, addressed by a pidfile so it survives a
     CLI process exit while channels keep running."""
 
-    def __init__(self) -> None:
+    def __init__(self, local_only: bool = False) -> None:
         self.config_path = _config_path()
         self.log_path = _log_path()
         self._check_error = ""  # stderr of the last failed `sing-box check`
+        # local_only skips all helper delegation: used by the privileged helper
+        # itself, which IS the privileged actor and would otherwise recurse
+        # (Runner → helper.request → helper's Runner → helper.request …).
+        self.local_only = local_only
+
+    def _ownership(self) -> tuple[str | None, int | None]:
+        """Who owns the live sing-box, and its pid: ``("local", pid)`` for a
+        user-owned process, ``("helper", pid)`` for one the privileged helper
+        is running as root, or ``(None, None)``.
+
+        Local is checked FIRST because it is the common case (explicit-proxy
+        mode, tun off): the pidfile read is cheap and local, and it avoids a
+        helper round-trip on every running_pid/probe/status_snapshot call. The
+        helper is consulted only when no local sing-box is live — which is
+        exactly when tun mode is on and the process is root-owned (the user
+        pidfile read returns None then, because os.kill on a root pid gets
+        EPERM, which proc.verify reads as "not ours").
+        """
+        local = proc.read_pidfile(_pid_path(), ("sing-box",))
+        if local is not None:
+            return ("local", local)
+        if self.local_only:
+            return (None, None)
+        h = self._helper_owned_pid()
+        return ("helper", h) if h else (None, None)
 
     def running_pid(self) -> int | None:
-        # PID-recycling guard: believe the pidfile only if the process behind
-        # the number matches the identity recorded at spawn (kernel start time;
-        # see alle.proc), so a stale file can neither report a dead daemon as
-        # running nor let stop() kill a stranger.
-        return proc.read_pidfile(_pid_path(), ("sing-box",))
+        return self._ownership()[1]
+
+    def _helper_owned_pid(self) -> int | None:
+        """The pid of a sing-box the privileged helper is running, or None.
+
+        None covers every non-tun situation: no helper installed, helper
+        installed but idle (tun off), the helper unreachable, or local_only
+        mode (the helper itself using a Runner — it must not ask itself).
+        When it returns a pid, the live sing-box is root-owned and *only* the
+        helper can signal it — callers must delegate start/stop/reload.
+        """
+        if self.local_only:
+            return None
+        from alle import helper
+
+        st = helper.request("status")
+        if st.get("ok") and st.get("running"):
+            pid = st.get("pid")
+            if isinstance(pid, int):
+                return pid
+        return None
 
     def is_running(self) -> bool:
         return self.running_pid() is not None
@@ -304,6 +348,22 @@ class Runner:
                     except SingBoxError:
                         pass  # reported as rejected; supervision keeps retrying
             return ApplyResult(ApplyOutcome.REJECTED, self._check_error)
+        # Privileged-helper delegation: a tun inbound needs root, which only
+        # the helper can provide; and once the helper owns sing-box only it
+        # can signal the process. So the apply path forks on whether this
+        # config wants the helper AND the helper is installed. Everything
+        # else — config write, `check`, the Clash-API health probe — is
+        # uid-agnostic and stays local either way.
+        from alle import helper as helper_mod
+
+        has_tun = any(i.get("type") == "tun" for i in config.get("inbounds", []))
+        want_helper = has_tun and not self.local_only and helper_mod.reachable()
+        if want_helper:
+            return self._apply_via_helper(helper_mod)
+        # Turning tun off while the helper owns a root sing-box: stop it via
+        # the helper (the user can't signal it), then proceed locally.
+        if self._ownership()[0] == "helper":
+            helper_mod.request("stop")
         if self.is_running():
             if self.reload() and self._verify_healthy():  # noqa: S1066
                 return ApplyResult(ApplyOutcome.APPLIED)  # reloaded in place
@@ -317,6 +377,37 @@ class Runner:
             return ApplyResult(
                 ApplyOutcome.RUNTIME_FAILED,
                 "sing-box started but its control API did not become reachable",
+            )
+        return ApplyResult(ApplyOutcome.APPLIED)
+
+    def _apply_via_helper(self, helper_mod) -> ApplyResult:
+        """Apply the already-written, already-checked config through the
+        privileged helper (tun mode on).
+
+        The helper is the only thing that can run sing-box as root, so a local
+        user sing-box — if one is still up from before tun was enabled — must
+        be stopped first (two sing-boxes would fight over the same ports).
+        Then reload if the helper already owns a live process, else start.
+        """
+        # Clear any user-owned sing-box directly via the pidfile; the helper
+        # path must not go through the helper-aware stop() (which would delegate
+        # for a process the helper doesn't own).
+        if proc.read_pidfile(_pid_path(), ("sing-box",)) is not None:
+            self._stop_local()
+        if self._ownership()[0] == "helper":
+            helper_mod.request("reload")
+            if self._verify_healthy():
+                return ApplyResult(ApplyOutcome.APPLIED)
+            helper_mod.request("stop")  # reload didn't take — cold start
+        r = helper_mod.request("start")
+        if not r.get("ok"):
+            return ApplyResult(
+                ApplyOutcome.RUNTIME_FAILED, r.get("error", "helper start failed")
+            )
+        if not self._verify_healthy():
+            return ApplyResult(
+                ApplyOutcome.RUNTIME_FAILED,
+                "the helper started sing-box but its control API is unreachable",
             )
         return ApplyResult(ApplyOutcome.APPLIED)
 
@@ -392,7 +483,19 @@ class Runner:
             )
 
     def stop(self) -> None:
-        pid = self.running_pid()
+        # Only the helper can stop a root sing-box it owns; a user SIGTERM
+        # would get EPERM. Delegate when it owns the process.
+        from alle import helper as helper_mod
+
+        owner, _pid = self._ownership()
+        if owner == "helper":
+            helper_mod.request("stop")
+            return
+        self._stop_local()
+
+    def _stop_local(self) -> None:
+        """Stop a user-owned sing-box by pidfile (no helper involvement)."""
+        pid = proc.read_pidfile(_pid_path(), ("sing-box",))
         if pid is None:
             _pid_path().unlink(missing_ok=True)
             _started_path().unlink(missing_ok=True)
@@ -402,7 +505,7 @@ class Runner:
         except OSError:  # exited between the liveness check and the signal
             pass
         for _ in range(40):
-            if self.running_pid() is None:
+            if proc.read_pidfile(_pid_path(), ("sing-box",)) is None:
                 break
             time.sleep(0.1)
         else:
@@ -443,8 +546,15 @@ class Runner:
         return True
 
     def reload(self) -> bool:
-        """Tell a running sing-box to reload its config in place (SIGHUP)."""
-        pid = self.running_pid()
+        """Tell a running sing-box to reload its config in place (SIGHUP).
+
+        Delegates to the helper when it owns the process (a user SIGHUP would
+        get EPERM on a root sing-box)."""
+        from alle import helper as helper_mod
+
+        owner, pid = self._ownership()
+        if owner == "helper":
+            return bool(helper_mod.request("reload").get("reloaded", False))
         if pid is None:
             return False
         try:
@@ -501,6 +611,15 @@ class Runner:
         connection counters reset with the process, so a sample from a new
         generation must re-baseline instead of being read as counter deltas.
         """
+        owner, _pid = self._ownership()
+        if owner == "helper":
+            from alle import helper as helper_mod
+
+            st = helper_mod.request("status")
+            if st.get("ok") and st.get("running"):
+                gen = st.get("generation")
+                if gen:
+                    return gen
         try:
             text = _pid_path().read_text()
         except OSError:

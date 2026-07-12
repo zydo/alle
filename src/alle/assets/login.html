@@ -4,13 +4,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#fbfcfb" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0e1416" media="(prefers-color-scheme: dark)">
   <title>alle — sign in</title>
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <script src="/theme-init.js"></script>
   <link rel="stylesheet" href="/style.css">
 </head>
 
 <body>
+  <button id="theme" class="icon-btn theme-corner" type="button" aria-label="Toggle appearance"></button>
   <div class="login-wrap">
     <form class="login" id="form">
       <div class="wordmark">

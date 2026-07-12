@@ -7,6 +7,7 @@ structured Python data; it deliberately does not print, prompt, or exit.
 
 from __future__ import annotations
 
+import sys
 from fnmatch import fnmatchcase
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from alle import (
     locations,
     metrics,
     paths,
+    probe as probe_mod,
     routes,
     singbox,
     throughput,
@@ -746,6 +748,7 @@ def _router_info(store: Store) -> dict:
         "rule_count": len(rules_),
         "killswitch": killswitch,
         "lan_direct": bool(router.get("lan_direct", True)),
+        "tun": bool(router.get("tun")),
         "unmatched": "block" if killswitch else "direct",
     }
 
@@ -1035,6 +1038,226 @@ def routes_killswitch(enable: bool | None = None) -> dict:
     return {"changed": enable is not None, "router": _router_info(store)}
 
 
+def _process_uid(pid: int) -> int | None:
+    """Best-effort uid of a live process (POSIX ``ps``); None when unknowable."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "uid=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+        return int(out) if out else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+_TUN_HELPER_HINT = (
+    "install it once, then `alle tun on` needs no sudo:\n  sudo alle helper install"
+)
+
+_TUN_SETCAP_HINT = (
+    "grant the binary the capability once, then no root:\n"
+    '  sudo setcap cap_net_admin,cap_net_raw+ep "$(alle version --singbox-path)"'
+    " && sudo alle restart"
+)
+
+_TUN_SUDO_HINT = 'one-off: alle stop && sudo ALLE_HOME="$HOME/.alle" alle tun on'
+
+
+def _tun_privilege_hint() -> str:
+    if sys.platform == "darwin":
+        return _TUN_HELPER_HINT + "\nOr " + _TUN_SUDO_HINT
+    if sys.platform == "linux":
+        return _TUN_SETCAP_HINT + "\nOr " + _TUN_SUDO_HINT
+    return _TUN_SUDO_HINT
+
+
+def _singbox_has_net_admin() -> bool:
+    """True when the pinned sing-box binary carries CAP_NET_ADMIN (Linux only).
+
+    Verified in Tier 2 (`scripts/tun-sandbox/setcap-smoke.sh`): a sing-box
+    binary with ``cap_net_admin+ep`` creates the tun and rewrites routes as an
+    ordinary user, so a root daemon is not required. Prefers ``getcap`` (exact)
+    and falls back to the presence of the ``security.capability`` xattr.
+    """
+    import os
+    import subprocess
+
+    if sys.platform != "linux":
+        return False
+    path = str(singbox.bin_path())
+    if not os.path.exists(path):
+        return False
+    try:
+        out = subprocess.run(
+            ["getcap", path], capture_output=True, text=True, timeout=5
+        ).stdout
+        if "cap_net_admin" in out:
+            return True
+    except (OSError, subprocess.TimeoutExpired):
+        pass  # getcap absent — fall through to the xattr probe
+    try:
+        return bool(os.getxattr(path, "security.capability"))  # type: ignore[attr-defined]
+    except OSError:
+        return False
+
+
+def _require_tun_privileges() -> None:
+    """Refuse to enable TUN mode unless sing-box can create the TUN device.
+
+    The utun/TUN device is created by sing-box. Three ways it can have the
+    privilege (checked in preference order):
+
+    - **privileged helper installed** (macOS) — the root LaunchDaemon owns
+      sing-box while tun is on, so the user daemon needs no privilege itself;
+      this is the steady state after `sudo alle helper install`;
+    - **root** — a live daemon must already be root; with none running, this
+      process would spawn it, so our own euid decides (the macOS one-off path);
+    - **Linux file capability** — a pinned sing-box with ``cap_net_admin+ep``
+      can create the tun as an ordinary user, so who runs it is irrelevant.
+
+    The check runs *before* touching state, so an unprivileged daemon without
+    any of these is never left chasing a config it can only fail to apply.
+    """
+    import os
+
+    from alle import helper as helper_mod
+
+    if helper_mod.reachable():
+        return  # the helper will run sing-box as root — no privilege needed here
+    if _singbox_has_net_admin():
+        return  # Linux setcap path — no root anywhere required
+    info = daemon.daemon_info()
+    if info is None:
+        if os.geteuid() == 0:
+            return
+        raise ServiceError(
+            "TUN needs the privileged helper (or root) — " + _tun_privilege_hint()
+        )
+    if _process_uid(int(info["pid"])) == 0:
+        return
+    raise ServiceError(
+        "TUN needs the privileged helper (or root) — " + _tun_privilege_hint()
+    )
+
+
+def _set_tun(enable: bool) -> dict:
+    """Flip the tun flag and reconcile — shared by the plain toggle and the
+    trial path (which arms its watchdog first and must not touch markers)."""
+    store = Store.load()
+    if enable:
+        _require_tun_privileges()
+    store.set_tun(enable)
+    applog.log(
+        "TUN mode "
+        + (
+            "enabled: system traffic enters the shared route table"
+            if enable
+            else "disabled: explicit proxy entrypoints only"
+        )
+    )
+    daemon.ensure_running()
+    return {"changed": True, "router": _router_info(store)}
+
+
+def tun_mode(enable: bool | None = None) -> dict:
+    """Set (or with ``None`` just report) system-wide TUN mode."""
+    if enable is None:
+        return {
+            "changed": False,
+            "router": _router_info(Store.load()),
+            "trial": _tun_trial_read(),
+        }
+    # An explicit on/off is a human decision: it supersedes any pending trial
+    # (the watchdog finds no marker and does nothing).
+    _tun_trial_path().unlink(missing_ok=True)
+    return _set_tun(enable)
+
+
+def _tun_trial_path() -> Path:
+    return paths.state_dir() / "tun.trial"
+
+
+def _tun_trial_read() -> dict | None:
+    """The pending trial marker ``{nonce, deadline}``, or None."""
+    import json
+
+    try:
+        data = json.loads(_tun_trial_path().read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _spawn_tun_watchdog(seconds: int, nonce: str) -> None:
+    """A detached process that reverts the trial after ``seconds``.
+
+    Deliberately independent of the CLI process *and* the daemon: it survives
+    a hung terminal, a dropped SSH session, and a daemon crash. It flips
+    state.json (never a bare pkill — supervision would restart sing-box with
+    the same tun config within ~2s) and lets the daemon reconcile the tun
+    away.
+    """
+    daemon.spawn_detached(
+        "import time\n"
+        f"time.sleep({int(seconds)!r})\n"
+        "from alle import service\n"
+        f"service.tun_trial_expire({nonce!r})\n"
+    )
+
+
+def tun_trial_arm(seconds: int) -> dict:
+    """Enable TUN mode with a dead-man's switch (the iptables-apply pattern).
+
+    The watchdog is armed *before* activation, so there is no instant in
+    which tun is on without the revert pending. Unless
+    :func:`tun_trial_confirm` removes the marker within the window, the
+    watchdog flips tun off in state.json and the daemon reconciles.
+    """
+    import json
+    import secrets
+    import time
+
+    if not 5 <= seconds <= 3600:
+        raise ServiceError("--trial takes a window of 5 to 3600 seconds.")
+    _require_tun_privileges()  # fail before arming anything
+    nonce = secrets.token_hex(8)
+    deadline = int(time.time()) + seconds
+    _tun_trial_path().write_text(json.dumps({"nonce": nonce, "deadline": deadline}))
+    _spawn_tun_watchdog(seconds, nonce)
+    result = _set_tun(True)
+    applog.log(f"TUN trial armed: reverts in {seconds}s unless confirmed")
+    return {**result, "trial": {"seconds": seconds, "deadline": deadline}}
+
+
+def tun_trial_confirm() -> dict:
+    """Keep tun on: remove the trial marker so the watchdog does nothing."""
+    path = _tun_trial_path()
+    if _tun_trial_read() is None:
+        raise ServiceError("no TUN trial is pending.")
+    path.unlink(missing_ok=True)
+    applog.log("TUN trial confirmed: keeping TUN mode on")
+    return {"confirmed": True, "router": _router_info(Store.load())}
+
+
+def tun_trial_expire(nonce: str) -> bool:
+    """Watchdog entry: revert TUN mode if *this* trial is still unconfirmed.
+
+    The nonce guard means a stale watchdog from an earlier, superseded trial
+    can never revert a newer one. True if a revert happened.
+    """
+    data = _tun_trial_read()
+    if not data or data.get("nonce") != nonce:
+        return False
+    _tun_trial_path().unlink(missing_ok=True)
+    applog.log("TUN trial expired without confirmation: reverting TUN mode off")
+    _set_tun(False)
+    return True
+
+
 def setup_export() -> dict:
     """The whole setup as a declarative bundle (text + counts for the summary).
 
@@ -1166,7 +1389,7 @@ def status_snapshot() -> dict:
             latency = None
             ip = None
         elif probe:
-            state = (probe.get("error") or "failed").capitalize()
+            state = probe_mod.state_label(probe)
             latency = None
             ip = None
         else:
@@ -1245,13 +1468,12 @@ def _daemon_info() -> dict:
 
 def _test_row(channel, probe: dict, traffic: dict) -> dict:
     healthy = bool(probe.get("ok"))
+    state = probe_mod.state_label(probe)
     if healthy:
-        state = "Healthy"
         latency = probe.get("latency_ms")
         ip = probe.get("ip") or None
         error = None
     else:
-        state = "Stopped" if probe.get("error") == "stopped" else "Failed"
         latency = None
         ip = None
         error = probe.get("error") or "probe failed"
@@ -1269,6 +1491,7 @@ def _test_row(channel, probe: dict, traffic: dict) -> dict:
         "latency_ms": latency,
         "ip": ip,
         "error": error,
+        "detail": probe.get("detail") if not healthy else None,
         "probe": probe,
         # Cumulative traffic totals ride along on every test row: `alle test`
         # is the one per-channel table, so the durable counters (see
@@ -1514,3 +1737,43 @@ def daemon_uninstall() -> dict:
 def daemon_status() -> dict:
     """Login-service + running-daemon status for ``alle daemon status``."""
     return {"service": daemonctl.status(), "daemon": _daemon_info()}
+
+
+# ---- privileged tun helper (macOS root LaunchDaemon) -------------------------
+
+
+def helper_install() -> dict:
+    """Install the root tun helper (``sudo alle helper install``).
+
+    The thin service wrapper: the privilege/root checks live in
+    :mod:`alle.helperctl` so they are testable without going through the CLI.
+    """
+    from alle import helperctl
+
+    try:
+        return helperctl.install()
+    except helperctl.HelperCtlError as e:
+        raise ServiceError(str(e)) from e
+
+
+def helper_uninstall() -> dict:
+    from alle import helperctl
+
+    try:
+        return helperctl.uninstall()
+    except helperctl.HelperCtlError as e:
+        raise ServiceError(str(e)) from e
+
+
+def helper_status() -> dict:
+    from alle import helperctl
+    from alle import helper as helper_mod
+
+    s = helperctl.status()
+    # Annotate with whether the helper is actually answering right now, so
+    # `alle helper status` distinguishes "installed but crashed" from "live".
+    if s.get("installed"):
+        s["reachable"] = helper_mod.ping().get("ok", False)
+    else:
+        s["reachable"] = False
+    return s

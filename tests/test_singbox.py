@@ -136,6 +136,130 @@ def test_apply_runtime_failure_when_control_api_never_answers(monkeypatch):
     assert "control API" in result.detail
 
 
+# ---- privileged-helper delegation (tun mode) --------------------------------
+
+
+class _FakeHelper:
+    """A stateful stand-in for alle.helper: tracks whether it 'owns' sing-box
+    and records the request stream, so apply's on/off transitions can be
+    asserted without a real helper or sing-box."""
+
+    def __init__(self, *, owning=False):
+        self._owning = owning
+        self.calls: list[str] = []
+
+    def reachable(self) -> bool:
+        return True
+
+    def request(self, cmd, **fields):
+        self.calls.append(cmd)
+        if cmd == "status":
+            return (
+                {"ok": True, "running": True, "pid": 777, "generation": "777/s"}
+                if self._owning
+                else {"ok": True, "running": False}
+            )
+        if cmd == "start":
+            self._owning = True
+            return {"ok": True, "pid": 777, "generation": "777/s"}
+        if cmd == "stop":
+            self._owning = False
+            return {"ok": True}
+        if cmd == "reload":
+            return {"ok": True, "reloaded": True}
+        return {"ok": False, "error": "nope"}
+
+
+def _wire_helper(monkeypatch, fake):
+    import alle.helper as helper_mod
+
+    monkeypatch.setattr(helper_mod, "reachable", fake.reachable)
+    monkeypatch.setattr(helper_mod, "request", fake.request)
+
+
+def _tun_cfg():
+    return {"inbounds": [{"type": "tun", "tag": "in-tun"}], "route": {}}
+
+
+def test_apply_tun_on_delegates_start_to_helper(monkeypatch):
+    r = _runner()
+    r.config_path.write_text('{"old": true}')
+    fake = _FakeHelper(owning=False)
+    _wire_helper(monkeypatch, fake)
+    monkeypatch.setattr(r, "check", lambda: True)
+    monkeypatch.setattr(r, "_verify_healthy", lambda: True)
+    stopped: list[int] = []
+    monkeypatch.setattr(r, "_stop_local", lambda: stopped.append(1))
+    # no local pidfile → _stop_local not called
+    monkeypatch.setattr(singbox.proc, "read_pidfile", lambda *a, **k: None)
+    assert _outcome(r.apply(_tun_cfg())) is singbox.ApplyOutcome.APPLIED
+    assert "start" in fake.calls and "stop" not in fake.calls
+    assert stopped == []  # nothing local to clear
+
+
+def test_apply_tun_on_stops_a_local_sing_box_before_helper_start(monkeypatch):
+    r = _runner()
+    r.config_path.write_text('{"old": true}')
+    fake = _FakeHelper(owning=False)
+    _wire_helper(monkeypatch, fake)
+    monkeypatch.setattr(r, "check", lambda: True)
+    monkeypatch.setattr(r, "_verify_healthy", lambda: True)
+    stopped: list[int] = []
+    monkeypatch.setattr(r, "_stop_local", lambda: stopped.append(1))
+    monkeypatch.setattr(singbox.proc, "read_pidfile", lambda *a, **k: 123)  # local up
+    assert _outcome(r.apply(_tun_cfg())) is singbox.ApplyOutcome.APPLIED
+    assert stopped == [1]  # the user sing-box was cleared before helper start
+    assert "start" in fake.calls
+
+
+def test_apply_tun_reload_via_helper_when_already_owned(monkeypatch):
+    r = _runner()
+    r.config_path.write_text('{"old": true}')
+    fake = _FakeHelper(owning=True)  # helper already running sing-box
+    _wire_helper(monkeypatch, fake)
+    monkeypatch.setattr(r, "check", lambda: True)
+    monkeypatch.setattr(r, "_verify_healthy", lambda: True)
+    monkeypatch.setattr(singbox.proc, "read_pidfile", lambda *a, **k: None)
+    assert _outcome(r.apply(_tun_cfg())) is singbox.ApplyOutcome.APPLIED
+    assert "reload" in fake.calls and "start" not in fake.calls  # in-place
+
+
+def test_apply_tun_off_stops_helper_then_restarts_locally(monkeypatch):
+    r = _runner()
+    r.config_path.write_text('{"old": true}')
+    fake = _FakeHelper(owning=True)  # tun was on, helper owns root sing-box
+    _wire_helper(monkeypatch, fake)
+    monkeypatch.setattr(r, "check", lambda: True)
+    monkeypatch.setattr(r, "_verify_healthy", lambda: True)
+    restarted: list[int] = []
+    monkeypatch.setattr(r, "restart", lambda: restarted.append(1))
+    # no local sing-box running after the helper stop
+    monkeypatch.setattr(singbox.proc, "read_pidfile", lambda *a, **k: None)
+    assert (
+        _outcome(r.apply({"inbounds": [], "route": {}})) is singbox.ApplyOutcome.APPLIED
+    )
+    assert "stop" in fake.calls  # root sing-box stopped via the helper
+    assert restarted == [1]  # then a local user sing-box started
+
+
+def test_running_pid_and_stop_delegate_when_helper_owns(monkeypatch):
+    r = _runner()
+    fake = _FakeHelper(owning=True)
+    _wire_helper(monkeypatch, fake)
+    assert r.running_pid() == 777  # helper's pid, not the pidfile
+    r.stop()
+    assert fake.calls[-1] == "stop"
+    assert fake._owning is False
+
+
+def test_running_pid_falls_to_pidfile_when_helper_idle(monkeypatch):
+    r = _runner()
+    fake = _FakeHelper(owning=False)  # helper installed but not running sing-box
+    _wire_helper(monkeypatch, fake)
+    monkeypatch.setattr(singbox.proc, "read_pidfile", lambda *a, **k: 42)
+    assert r.running_pid() == 42  # local pidfile wins when helper owns nothing
+
+
 def test_apply_bad_config_is_not_cold_started(monkeypatch):
     r = _runner()
     monkeypatch.setattr(r, "running_pid", lambda: None)  # nothing running

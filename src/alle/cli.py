@@ -510,10 +510,62 @@ def cmd_routes_killswitch(args):
         if router["killswitch"]
         else "off — unmatched router traffic goes direct (no VPN)"
     )
-    print(
-        f"Kill-switch {state}.\n"
-        "  Applies to the router entrypoint only; per-channel ports are unaffected."
+    scope = (
+        # With tun on, the whole system enters the same rule table, so the
+        # unmatched->block boundary is genuinely system-wide.
+        "Applies system-wide (TUN mode is on); per-channel ports are unaffected."
+        if router.get("tun")
+        else "Applies to the router entrypoint only; per-channel ports are unaffected."
     )
+    print(f"Kill-switch {state}.\n  {scope}")
+
+
+def cmd_tun(args):
+    if args.state == "confirm":
+        service.tun_trial_confirm()
+        print("TUN trial confirmed — TUN mode stays on.")
+        return
+    if args.trial is not None:
+        if args.state != "on":
+            raise service.ServiceError("--trial only applies to: alle tun on")
+        result = service.tun_trial_arm(args.trial)
+        print(
+            f"TUN mode ON — trial window: {result['trial']['seconds']}s.\n"
+            "  Keep it:  alle tun confirm\n"
+            "  No confirmation -> TUN mode reverts off automatically\n"
+            "  (the safety net for remote/SSH sessions and first bring-up)."
+        )
+        return
+    enable = {"on": True, "off": False}.get(args.state)
+    result = service.tun_mode(enable)
+    router = result["router"]
+    if enable is None and result.get("trial"):
+        import time
+
+        left = max(0, int(result["trial"].get("deadline", 0)) - int(time.time()))
+        print(
+            f"TUN trial pending — reverts off in ~{left}s unless confirmed:\n"
+            "  alle tun confirm"
+        )
+    if router["tun"]:
+        unmatched = (
+            "unmatched traffic is BLOCKED (kill-switch is system-wide)"
+            if router["killswitch"]
+            else "unmatched traffic goes direct — no kill-switch"
+        )
+        print(
+            "TUN mode ON — all system traffic enters the routing rules;\n"
+            f"  {unmatched}.\n"
+            "  Enforcement lives in the sing-box process: if it crashes, the\n"
+            "  system falls back to the physical route (fails open) for the\n"
+            "  ~2s supervision window."
+        )
+    else:
+        print(
+            "TUN mode off — only traffic pointed at the proxy ports is routed\n"
+            "(per-channel ports and the router entrypoint keep working).\n"
+            "Enable:  alle tun on  (needs root)"
+        )
 
 
 # ---- locations -------------------------------------------------------------
@@ -855,6 +907,11 @@ def cmd_logs(args):
 
 
 def cmd_version(args):
+    if getattr(args, "singbox_path", False):
+        from alle import singbox
+
+        print(singbox.bin_path())
+        return
     print(__version__)
 
 
@@ -889,6 +946,63 @@ def cmd_daemon_status(args):
 
 def cmd_applier(args):
     daemon.run_applier()
+
+
+# ---- privileged tun helper --------------------------------------------------
+
+
+def cmd_helper_install(args):
+    result = service.helper_install()
+    verb = "Reinstalled" if result.get("reinstalled") else "Installed"
+    print(f"{verb} the privileged tun helper (root LaunchDaemon).")
+    print(f"  Plist: {result['plist']}")
+    print(f"  Serves uid {result['serves_uid']} over {result['socket']}.")
+    print(
+        "  It runs as root, starts at boot, and is alive now. After this one\n"
+        "  install, `alle tun on` needs no sudo — the helper owns sing-box\n"
+        "  while tun mode is on."
+    )
+
+
+def cmd_helper_uninstall(args):
+    result = service.helper_uninstall()
+    if result.get("removed"):
+        print("Removed the privileged tun helper (root LaunchDaemon).")
+        print("  `alle tun on` now needs the sudo path again until reinstalled.")
+    else:
+        print("No privileged tun helper is installed.")
+
+
+def cmd_helper_status(args):
+    s = service.helper_status()
+    if args.json:
+        print(output.json_text(s))
+    else:
+        print(_helper_status_text(s))
+
+
+def _helper_status_text(s: dict) -> str:
+    if not s.get("supported"):
+        return f"Privileged helper unsupported on {s.get('platform')}."
+    if not s.get("installed"):
+        return (
+            "No privileged tun helper installed. tun on uses the sudo path.\n"
+            "Install once:  sudo alle helper install"
+        )
+    state = "running" if s.get("reachable") else "installed but not answering"
+    return (
+        f"Privileged helper installed ({state}).\n"
+        f"  Plist: {s['plist']}\n  Socket: {s['socket']}"
+    )
+
+
+# ---- helper-run (hidden): the LaunchDaemon body -----------------------------
+
+
+def cmd_helper_run(args):
+    from alle import helper
+
+    sys.exit(helper.run_daemon())
 
 
 # ---- parser ----------------------------------------------------------------
@@ -1149,6 +1263,25 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "restart", help="stop then start (reload after upgrades/config)"
     ).set_defaults(func=cmd_restart)
+    tn = sub.add_parser(
+        "tun",
+        help="system-wide VPN mode: a TUN device routes ALL system traffic "
+        "through the routing rules (needs root)",
+    )
+    tn.add_argument(
+        "state",
+        nargs="?",
+        choices=["on", "off", "confirm"],
+        help="omit to show the current state; 'confirm' keeps a --trial on",
+    )
+    tn.add_argument(
+        "--trial",
+        type=int,
+        metavar="SECONDS",
+        help="with 'on': auto-revert unless `alle tun confirm` runs within the "
+        "window (5-3600s) — survives dropped SSH sessions",
+    )
+    tn.set_defaults(func=cmd_tun)
     ui = sub.add_parser("ui", help="open the Web UI dashboard in your browser")
     ui.add_argument(
         "--no-open",
@@ -1236,13 +1369,41 @@ def build_parser() -> argparse.ArgumentParser:
     ds.add_argument("--json", action="store_true", help="print machine-readable JSON")
     ds.set_defaults(func=cmd_daemon_status)
 
-    sub.add_parser("version", help="print alle's version").set_defaults(
-        func=cmd_version
+    ve = sub.add_parser("version", help="print alle's version")
+    ve.add_argument(
+        "--singbox-path",
+        action="store_true",
+        help="print the pinned sing-box binary path (e.g. for setcap on Linux)",
     )
+    ve.set_defaults(func=cmd_version)
 
     sub.add_parser("applier").set_defaults(
         func=cmd_applier
     )  # internal: the daemon body
+
+    # privileged tun helper (macOS): root LaunchDaemon that owns sing-box in
+    # tun mode, installed once via sudo so `alle tun on` never needs sudo again.
+    hp = sub.add_parser(
+        "helper",
+        help="install/remove the privileged tun helper (root LaunchDaemon, "
+        "macOS; `sudo alle helper install` once, then `alle tun on` needs no "
+        "sudo)",
+    )
+    hp.set_defaults(func=_show_help(hp))
+    hp_sub = hp.add_subparsers(dest="helper_command")
+    hp_sub.add_parser(
+        "install", help="install the root helper (run under sudo)"
+    ).set_defaults(func=cmd_helper_install)
+    hp_sub.add_parser(
+        "uninstall", help="remove the root helper (run under sudo)"
+    ).set_defaults(func=cmd_helper_uninstall)
+    hs = hp_sub.add_parser("status", help="show whether the helper is installed")
+    hs.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    hs.set_defaults(func=cmd_helper_status)
+
+    sub.add_parser("helper-run").set_defaults(
+        func=cmd_helper_run
+    )  # internal: the helper daemon body
 
     return p
 

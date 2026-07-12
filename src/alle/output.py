@@ -248,15 +248,25 @@ def _latency(ms: float | int | None) -> str:
 
 
 def _state_cell(c: dict) -> str:
-    """Health with the failure reason folded in, mirroring ``alle status``:
-    ``Healthy`` when the probe succeeded, ``Stopped`` when the runtime is down,
-    otherwise the probe's error reason (capitalized), falling back to ``Failed``."""
-    if c["healthy"]:
+    """The brief state word for the STATE column — never the verbose error.
+
+    Rows carry a ready ``state`` label (``Healthy`` / ``Stopped`` / ``Timeout``
+    / …). The verbose explanation lives in ``detail`` (the log / ``--json``),
+    not jammed into the table — a long error here used to blow the column width."""
+    return c.get("state") or _state_from_error(c)
+
+
+def _state_from_error(c: dict) -> str:
+    if c.get("healthy"):
         return "Healthy"
-    err = c.get("error") or ""
+    err = (c.get("error") or "").lower()
     if err == "stopped":
         return "Stopped"
-    return (err[:1].upper() + err[1:]) if err else "Failed"
+    return {
+        "proxy closed": "Proxy closed",
+        "timeout": "Timeout",
+        "no valid ip": "No valid IP",
+    }.get(err, "Failed")
 
 
 def test_result(data: dict) -> str:
@@ -455,6 +465,11 @@ def status(snapshot: dict) -> str:
             f"  Router    {_router_where(router)} — {_router_mode(router)}"
             "  (details: alle routes ls)"
         )
+        if router.get("tun"):
+            lines.append(
+                "  TUN       ON — all system traffic follows the routing rules"
+                "  (disable: alle tun off)"
+            )
     if snapshot.get("web_ui"):
         lines.append(f"  Web UI    {snapshot['web_ui']}  (open it: alle ui)")
     if not channels:

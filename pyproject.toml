@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "alle-proxy"
-version = "0.1.4"
+version = "0.1.5"
 description = "A universal VPN client that manages multiple VPN connections with rule-based routing."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,6 +21,13 @@ classifiers = [
 ]
 dependencies = ["pyyaml>=6.0", "pycountry>=23.12"]
 
+# The menu-bar companion is an optional extra: the base package stays CLI-only
+# (no GUI deps). `pip install alle-proxy[tray]` adds the v1 rumps tray, macOS
+# only. The thin-client core (alle.companion) has no third-party deps and ships
+# in the base package so it is always importable/testable.
+[project.optional-dependencies]
+tray = ["rumps>=0.4; sys_platform == 'darwin'"]
+
 [project.urls]
 Homepage = "https://github.com/zydo/alle"
 Issues = "https://github.com/zydo/alle/issues"
@@ -28,6 +35,9 @@ Issues = "https://github.com/zydo/alle/issues"
 [project.scripts]
 alle = "alle.cli:main"
 alled = "alle.daemon:run_applier"
+
+[project.gui-scripts]
+alle-tray = "alle.tray:main"
 
 [tool.hatch.build]
 # Keep local-only roadmap notes out of every release artifact (sdist + wheel).
@@ -37,9 +47,9 @@ exclude = ["ROADMAP*.md"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/alle"]
-# The dashboard screenshot ships in the sdist so it renders on the PyPI project
-# page (PyPI rewrites relative README image paths to files.pythonhosted.org),
-# but the Web UI never serves it, so omit it from the installed wheel.
+# The README references the dashboard screenshot via an absolute URL, so PyPI
+# renders it without needing the file shipped in the distribution. The Web UI
+# never serves it, so keep it out of the installed wheel.
 exclude = ["src/alle/assets/webui.png"]
 
 [tool.ruff]

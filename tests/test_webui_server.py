@@ -310,7 +310,8 @@ def test_logout_survives_as_a_complete_durable_file(live):
         base + "/api/v1/logout", method="POST", headers=_bearer(secret), data={}
     )
     assert st == 200
-    assert server._read_revoked_at() > 0
+    revoked_at = server._read_revoked_at()
+    assert revoked_at is not None and revoked_at > 0
 
 
 def test_bearer_mutation_needs_no_origin_header(live):
@@ -969,6 +970,39 @@ def test_killswitch_requires_a_strict_boolean(live):
     )
     assert st == 400 and "missing required field" in json.loads(body)["error"]
     assert Store.load().router.get("killswitch") is True  # still untouched
+
+
+def test_tun_endpoint_toggles_and_gates_on_privileges(live, monkeypatch):
+    base, secret = live
+    origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    monkeypatch.setattr(service.daemon, "ensure_running", lambda: None)
+    monkeypatch.setattr(service.daemon, "daemon_info", lambda: None)
+
+    # unprivileged enable → 400 carrying the documented sudo path, state untouched
+    monkeypatch.setattr("os.geteuid", lambda: 501)
+    st, body, _ = _req(
+        base + "/api/v1/tun", method="POST", headers=origin, data={"enabled": True}
+    )
+    assert st == 400 and "privileged helper" in json.loads(body)["error"]
+    assert Store.load().router["tun"] is False
+
+    # privileged enable flips the flag and reports it in router info
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    st, body, _ = _req(
+        base + "/api/v1/tun", method="POST", headers=origin, data={"enabled": True}
+    )
+    assert st == 200 and json.loads(body)["router"]["tun"] is True
+
+    # disabling never needs privileges — recovery must always be possible
+    monkeypatch.setattr("os.geteuid", lambda: 501)
+    st, body, _ = _req(
+        base + "/api/v1/tun", method="POST", headers=origin, data={"enabled": False}
+    )
+    assert st == 200 and json.loads(body)["router"]["tun"] is False
+
+    # strict boolean contract, same as the kill switch
+    st, body, _ = _req(base + "/api/v1/tun", method="POST", headers=origin, data={})
+    assert st == 400 and "missing required field" in json.loads(body)["error"]
 
 
 def test_unknown_body_fields_are_rejected(live):

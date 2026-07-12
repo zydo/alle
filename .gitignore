@@ -13,5 +13,6 @@ coverage.xml
 htmlcov/
 .DS_Store
 .firecrawl/
-# Local-only roadmap/audit notes — never committed, never shipped.
+.tun-sandbox-cache/
+# Local-only notes
 ROADMAP*.md

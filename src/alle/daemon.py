@@ -155,21 +155,15 @@ def in_daemon_process() -> bool:
     return running_pid() == os.getpid()
 
 
-def schedule_lifecycle(action: str, delay: float = 0.35) -> None:
-    """Run stop/restart shortly after the Web UI response has been flushed."""
-    if action not in {"stop", "restart"}:
-        raise ValueError(f"unsupported lifecycle action {action!r}")
+def spawn_detached(code: str) -> None:
+    """Run ``code`` in a detached interpreter: its own session, output to the
+    applier log, daemon markers scrubbed — so the child outlives its spawner
+    and never mistakes itself for (or recurses into) the daemon."""
     env = dict(os.environ)
     env.pop("ALLE_APPLIER", None)
     env.pop("ALLE_SERVICE", None)
     log = paths.state_dir() / "applier.log"
     applog.rotate_if_needed(log, applog.MAX_LOG_BYTES)
-    code = (
-        "import time\n"
-        f"time.sleep({delay!r})\n"
-        "from alle import service\n"
-        f"service.{action}()\n"
-    )
     with open(log, "ab") as lf:
         subprocess.Popen(
             [sys.executable, "-c", code],
@@ -179,6 +173,18 @@ def schedule_lifecycle(action: str, delay: float = 0.35) -> None:
             start_new_session=True,
             env=env,
         )
+
+
+def schedule_lifecycle(action: str, delay: float = 0.35) -> None:
+    """Run stop/restart shortly after the Web UI response has been flushed."""
+    if action not in {"stop", "restart"}:
+        raise ValueError(f"unsupported lifecycle action {action!r}")
+    spawn_detached(
+        "import time\n"
+        f"time.sleep({delay!r})\n"
+        "from alle import service\n"
+        f"service.{action}()\n"
+    )
 
 
 def ensure_running() -> None:

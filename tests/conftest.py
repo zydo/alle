@@ -13,6 +13,11 @@ import pytest
 def _isolated_state(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         monkeypatch.setenv("ALLE_HOME", os.path.join(tmp, "state"))
+        # Point the privileged-helper socket at a path nothing binds, so no
+        # test ever sees a host's real helper (which would make helper.request
+        # succeed and the tun privilege gate / singbox running_pid take the
+        # helper path instead of the code path under test).
+        monkeypatch.setenv("ALLE_HELPER_SOCKET", os.path.join(tmp, "nope.sock"))
         yield
 
 

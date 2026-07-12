@@ -32,3 +32,35 @@ OUTBOUND_PREFIX = "out-"
 # tags (in-<provider>-<id>): provider keys are registry words, and tag_to_ref
 # ignores two-part tags, so stats/metrics never mistake it for a channel.
 ROUTER_INBOUND_TAG = "in-router"
+
+# The OS-level tun inbound. Two-part tag, same collision-safety as in-router.
+TUN_INBOUND_TAG = "in-tun"
+# Interface address for the TUN device. /30 in a range nothing routable uses;
+# validated live in the Tier 2 sandbox.
+TUN_ADDRESS = "172.19.0.1/30"  # noqa: S1313
+# IPv6 prefix for the TUN device (a ULA /126). Its purpose is the LEAK FIX,
+# not IPv6 transport: giving the tun a v6 address makes auto_route seize the
+# IPv6 default route too, so IPv6 traffic enters the tun instead of bypassing
+# the VPN out the physical interface. Once captured it is REJECTED (see the
+# engine's ::/0 rule): the supported providers' WireGuard configs are
+# IPv4-only, so IPv6 cannot be carried through the tunnel — blocking it is
+# the honest behavior ("no IPv6 while on the VPN"), the alternative is a
+# silent leak of the user's home IPv6. Real IPv6-over-VPN needs a provider
+# that ships IPv6 WireGuard endpoints; revisit when one is added.
+TUN_ADDRESS_V6 = "fdfe:dcba:9876::1/126"
+# Conservative MTU (validated in the Tier 2 sandbox): everything re-enters
+# sing-box in userspace anyway, so there is no gain in riding the 9000-byte
+# sing-box default and risking fragmentation through WireGuard endpoints.
+TUN_MTU = 1400
+
+# Where hijacked DNS goes in TUN mode. Decision: plain UDP
+# to a well-known public resolver, dialed directly (sing-box's default for a
+# DNS server with no detour) — never a LAN resolver (privacy stance: DNS is
+# deliberately excluded from LAN-direct) and, in v1, never a channel (with
+# multiple channels there is no "the tunnel" to prefer; a dns-via-channel
+# toggle is future work). Direct dialing also means resolution keeps working
+# under the kill-switch — required, since domain rules and endpoint dialing
+# need it; the kill-switch still blocks apps' own unhijacked resolver
+# traffic like any other unmatched flow.
+TUN_DNS_UPSTREAM = "1.1.1.1"  # noqa: S1313
+TUN_DNS_TAG = "dns-remote"

@@ -26,16 +26,73 @@ the same machine may be able to send traffic through your channels (and your
 provider account). alle assumes a single-user machine; don't run it where
 that assumption fails. (Tracked as backlog: per-installation proxy auth.)
 
+## TUN mode: the elevated trust surface
+
+Explicit-proxy mode (the default) runs entirely as your OS user and the
+boundary above is the whole story. **[TUN mode](cli-reference.md#alle-tun-onoff)
+widens it**, because creating the TUN device and rewriting the system route
+table is privileged. Two things change while TUN mode is on:
+
+- **A privileged component reads the generated config.** In the v1 model you
+  run sing-box as root (`sudo … alle tun on`), or on Linux grant the pinned
+  binary `cap_net_admin` (`setcap`, see the tun docs). Either way, a component
+  with more privilege than your user now reads the generated sing-box config —
+  and that config carries **WireGuard private keys** (see the table below). On
+  the sudo path the config is still the same `0400` file your user owns; root
+  can read it regardless, so this is a widening of *who* touches the keys, not
+  a new at-rest exposure. The Linux `setcap` path is narrower: the daemon
+  stays your unprivileged user, and only the *binary* holds the capability —
+  no root process is involved at all. Prefer `setcap` on Linux for that
+  reason.
+
+  On macOS the steady state is the **privileged tun helper** — a root
+  LaunchDaemon installed once by `sudo alle helper install` (see
+  `alle helper`). It removes the per-toggle sudo prompt: after install, `alle
+  tun on` from your normal user-level daemon asks the helper to run sing-box
+  as root, and no password is asked again. The helper is deliberately the
+  smallest root component that can hold the tun: it **only** launches, stops,
+  reloads, and status-checks sing-box against the single fixed config path
+  `$ALLE_HOME/singbox.json` — it never parses `state.json`, never runs the
+  engine, never sees credentials. The WireGuard keys still reach a root
+  process (sing-box itself, exactly as on the sudo path), but the helper adds
+  no second consumer of them. The helper authenticates each request by the
+  peer's kernel-verified uid (macOS `LOCAL_PEERCRED`), accepting only the one
+  installing user (and root); the protocol carries no file paths, so the
+  helper cannot be talked into `exec`-ing an arbitrary binary as root. Install
+  it only on a machine you trust the installing user on: anyone who can drive
+  the helper can ask root to run the pinned sing-box (nothing more, but that
+  is a real root-backed action).
+- **The tun captures every local user's traffic, not just yours.** A system
+  route table is machine-wide: once alle owns the default route, traffic from
+  **other OS users** on the machine is pulled through your channels and your
+  provider account too. This is the multi-user gap above, made materially
+  worse — it is no longer "another user *may* reach your proxy port," it is
+  "every user's traffic *is* on your tunnel by default." Do not enable tun
+  mode on a shared machine.
+- **IPv6 is blocked, not leaked.** The supported providers' WireGuard configs
+  are IPv4-only, so IPv6 cannot ride the tunnel. Leaving it alone would let
+  every IPv6 connection bypass the VPN and expose the home address next to
+  the VPN'd IPv4 — so the tun seizes the IPv6 default route too and rejects
+  what it captures ("no IPv6 while on the VPN"). LAN-direct still passes
+  local IPv6 when enabled; everything returns to normal when tun is off.
+
+**Kill-switch honesty.** With TUN mode on, enforcement still lives in the
+sing-box process. If it crashes, the tun and its routes vanish and the kernel
+falls back to the physical route — traffic fails **open** for the ~2s
+supervision window. A firewall-anchored always-on kill-switch (macOS PF
+anchor, Linux nftables that outlive the process) is future hardening, not part
+of the v1 model. See the tun runbook for the recovery path.
+
 ## Credentials at rest
 
-| Secret | Where | Protection |
-| --- | --- | --- |
-| Provider tokens | `~/.alle/credentials.yaml` | `0600`, never echoed back |
-| WireGuard private keys | `~/.alle/state.json`, generated sing-box config | `0600` / `0400` |
-| Web UI secret | `~/.alle/control_api.json` | `0600` |
-| sing-box stats secret | `~/.alle/clash_api.json` | `0600` |
-| Setup bundles (`alle export`) | wherever you save them | `0600` on export; **the file is a secret** |
-| Setup rollback journal | `~/.alle/setup-journal.json` | `0600`, transient — holds the pre-change credentials while a compound setup change (token update, bundle apply, provider removal) is in flight, and is used to roll them back if the change fails or crashes before committing |
+| Secret                        | Where                                           | Protection                                                                                                                                                                                                                     |
+| ----------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Provider tokens               | `~/.alle/credentials.yaml`                      | `0600`, never echoed back                                                                                                                                                                                                      |
+| WireGuard private keys        | `~/.alle/state.json`, generated sing-box config | `0600` / `0400`; in [TUN mode](#tun-mode-the-elevated-trust-surface) the generated config is additionally read by a root sing-box (sudo path) or a `cap_net_admin` binary (Linux setcap path)                                  |
+| Web UI secret                 | `~/.alle/control_api.json`                      | `0600`                                                                                                                                                                                                                         |
+| sing-box stats secret         | `~/.alle/clash_api.json`                        | `0600`                                                                                                                                                                                                                         |
+| Setup bundles (`alle export`) | wherever you save them                          | `0600` on export; **the file is a secret**                                                                                                                                                                                     |
+| Setup rollback journal        | `~/.alle/setup-journal.json`                    | `0600`, transient — holds the pre-change credentials while a compound setup change (token update, bundle apply, provider removal) is in flight, and is used to roll them back if the change fails or crashes before committing |
 
 ## The Web UI
 

@@ -99,19 +99,14 @@ def test_all_served_assets_present_in_wheel(built):
     assert not missing, f"served Web UI assets missing from wheel: {missing}"
 
 
-def test_readme_relative_images_ship_in_sdist(built):
-    """PyPI rewrites relative README image URLs to files.pythonhosted.org, but
-    only for files present in the sdist — so every relative image must ship."""
-    sdist, _ = built
-    sdist_names = _sdist_names(sdist)
+def test_readme_images_render_on_pypi():
+    """PyPI renders README images from absolute URLs (raw.githubusercontent); a
+    relative src would not render, now that screenshots aren't shipped in the
+    sdist. Guard against accidentally reintroducing a relative image path."""
     readme = (ROOT / "README.md").read_text()
     rel_srcs = [
         s
         for s in re.findall(r'src="([^"]+)"', readme)
         if not s.startswith(("http://", "https://"))
     ]
-    assert rel_srcs, "expected at least one relative README image"
-    for src in rel_srcs:
-        assert any(n.endswith(src) for n in sdist_names), (
-            f"README image {src!r} is not in the sdist — it will not render on PyPI"
-        )
+    assert not rel_srcs, f"relative README image srcs won't render on PyPI: {rel_srcs}"

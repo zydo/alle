@@ -5,6 +5,7 @@ import { $, api } from "./core.js";
 import * as dashboard from "./dashboard.js";
 import * as bundle from "./bundle.js";
 import * as logs from "./logs.js";
+import { followSystem, bindToggle } from "./theme.js";
 
 const pages = { "": dashboard, bundle, logs };
 const el = { pill: $("pill"), pillText: $("pill-text"), ver: $("ver"), banner: $("banner") };
@@ -27,7 +28,7 @@ function route() {
   const key = location.hash.replace(/^#\/?/, "");
   // Own-property check only: a hash like #/constructor or #/__proto__ must not
   // pick up an Object.prototype member (a truthy function) and crash mount().
-  const known = Object.prototype.hasOwnProperty.call(pages, key);
+  const known = Object.hasOwn(pages, key);
   const page = known ? pages[key] : dashboard;
   const activeKey = known ? key : "";
   current?.unmount?.();
@@ -64,5 +65,9 @@ $("logout").addEventListener("click", async () => {
 });
 
 globalThis.addEventListener("hashchange", route);
+// appearance: theme-init.js set the class before paint; keep following the OS
+// while unpinned and wire the masthead toggle.
+followSystem();
+bindToggle($("theme"));
 route();
 await scheduleNextTick();

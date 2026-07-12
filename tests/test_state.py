@@ -481,6 +481,15 @@ def test_killswitch_round_trips():
     assert Store.load().router["killswitch"] is True
 
 
+def test_tun_defaults_off_and_round_trips():
+    store = Store.load()
+    assert store.router["tun"] is False
+    store.set_tun(True)
+    assert Store.load().router["tun"] is True
+    store.set_tun(False)
+    assert Store.load().router["tun"] is False
+
+
 def test_lan_direct_defaults_on_and_round_trips():
     store = Store.load()
     assert store.router["lan_direct"] is True  # recommended default
@@ -518,7 +527,20 @@ def test_config_signature_tracks_router_changes():
     after_kill = config_signature(_read_raw())
     assert after_kill != after_rule
     store.set_lan_direct(False)
-    assert config_signature(_read_raw()) != after_kill  # LAN toggle reconciles too
+    after_lan = config_signature(_read_raw())
+    assert after_lan != after_kill  # LAN toggle reconciles too
+    store.set_tun(True)
+    assert config_signature(_read_raw()) != after_lan  # tun flip reconciles too
+
+
+def test_config_signature_tracks_tun_alone():
+    # tun can flip before the router port or any rule exists; the signature
+    # must still move so the daemon reconciles the tun inbound in/out.
+    from alle.state import _read_raw
+
+    empty = config_signature(_read_raw())
+    Store.load().set_tun(True)
+    assert config_signature(_read_raw()) != empty
 
 
 def test_config_signature_ignores_probe_results():

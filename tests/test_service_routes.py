@@ -224,6 +224,139 @@ def test_status_snapshot_carries_router_info():
     assert router["rule_count"] == 0
     assert router["unmatched"] == "direct"
     assert router["lan_direct"] is True
+    assert router["tun"] is False
+
+
+# ---- TUN mode ----------------------------------------------------------------
+
+
+def test_tun_mode_reports_without_touching_state():
+    report = service.tun_mode()
+    assert report["changed"] is False
+    assert report["router"]["tun"] is False
+
+
+def test_tun_on_requires_root(monkeypatch):
+    monkeypatch.setattr("alle.helper.reachable", lambda: False)
+    monkeypatch.setattr(service.daemon, "daemon_info", lambda: None)
+    monkeypatch.setattr("os.geteuid", lambda: 501)
+    with pytest.raises(service.ServiceError, match="privileged helper"):
+        service.tun_mode(True)
+    assert Store.load().router["tun"] is False  # gate fails before state moves
+    # the message points the user at installing the helper (the shipped path),
+    # not the stale "helper is planned" framing
+    with pytest.raises(service.ServiceError, match="sudo alle helper install"):
+        service.tun_mode(True)
+
+
+def test_tun_on_requires_a_root_daemon_when_one_is_running(monkeypatch):
+    monkeypatch.setattr("alle.helper.reachable", lambda: False)
+    monkeypatch.setattr(service.daemon, "daemon_info", lambda: {"pid": 4242})
+    monkeypatch.setattr(service, "_process_uid", lambda pid: 501)
+    with pytest.raises(service.ServiceError, match="privileged helper"):
+        service.tun_mode(True)
+
+
+def test_tun_on_allowed_when_singbox_has_net_admin(monkeypatch):
+    # The Linux setcap path: a capability on the binary means no root is
+    # needed anywhere, even with an unprivileged daemon running.
+    monkeypatch.setattr("alle.helper.reachable", lambda: False)
+    monkeypatch.setattr(service, "_singbox_has_net_admin", lambda: True)
+    monkeypatch.setattr(service.daemon, "daemon_info", lambda: {"pid": 4242})
+    monkeypatch.setattr(service, "_process_uid", lambda pid: 501)
+    monkeypatch.setattr("os.geteuid", lambda: 501)
+    on = service.tun_mode(True)
+    assert on["changed"] is True and on["router"]["tun"] is True
+
+
+def test_tun_root_error_mentions_setcap_on_linux(monkeypatch):
+    monkeypatch.setattr("alle.helper.reachable", lambda: False)
+    monkeypatch.setattr(service, "_singbox_has_net_admin", lambda: False)
+    monkeypatch.setattr(service.daemon, "daemon_info", lambda: None)
+    monkeypatch.setattr("os.geteuid", lambda: 501)
+    monkeypatch.setattr(service.sys, "platform", "linux")
+    with pytest.raises(service.ServiceError, match="setcap cap_net_admin"):
+        service.tun_mode(True)
+
+
+def test_tun_toggles_when_privileged(monkeypatch):
+    monkeypatch.setattr(service.daemon, "daemon_info", lambda: None)
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    on = service.tun_mode(True)
+    assert on["changed"] is True and on["router"]["tun"] is True
+    # disabling never needs privileges — it must always be possible
+    monkeypatch.setattr("os.geteuid", lambda: 501)
+    off = service.tun_mode(False)
+    assert off["changed"] is True and off["router"]["tun"] is False
+
+
+# ---- TUN trial (the iptables-apply pattern) -----------------------------------
+
+
+@pytest.fixture
+def rooted(monkeypatch):
+    """Pretend to be root with no daemon, and capture the watchdog spawn."""
+    spawned = []
+    monkeypatch.setattr(service.daemon, "daemon_info", lambda: None)
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    monkeypatch.setattr(
+        service,
+        "_spawn_tun_watchdog",
+        lambda secs, nonce: spawned.append((secs, nonce)),
+    )
+    return spawned
+
+
+def test_tun_trial_arms_watchdog_before_activation(rooted):
+    result = service.tun_trial_arm(60)
+    assert result["router"]["tun"] is True
+    marker = service._tun_trial_read()
+    assert marker and rooted == [(60, marker["nonce"])]
+    # the pending trial is visible in the plain report
+    assert service.tun_mode()["trial"]["nonce"] == marker["nonce"]
+
+
+def test_tun_trial_expire_reverts_only_the_matching_trial(rooted):
+    service.tun_trial_arm(60)
+    marker = service._tun_trial_read()
+    assert marker is not None
+    nonce = marker["nonce"]
+    assert service.tun_trial_expire("stale-nonce") is False  # superseded watchdog
+    assert Store.load().router["tun"] is True
+    assert service.tun_trial_expire(nonce) is True
+    assert Store.load().router["tun"] is False
+    assert service._tun_trial_read() is None
+    assert service.tun_trial_expire(nonce) is False  # already handled
+
+
+def test_tun_trial_confirm_keeps_tun_on(rooted):
+    service.tun_trial_arm(60)
+    marker = service._tun_trial_read()
+    assert marker is not None
+    nonce = marker["nonce"]
+    assert service.tun_trial_confirm()["confirmed"] is True
+    assert service.tun_trial_expire(nonce) is False  # watchdog finds no marker
+    assert Store.load().router["tun"] is True
+    with pytest.raises(service.ServiceError, match="no TUN trial is pending"):
+        service.tun_trial_confirm()
+
+
+def test_explicit_toggle_supersedes_a_pending_trial(rooted):
+    service.tun_trial_arm(60)
+    marker = service._tun_trial_read()
+    assert marker is not None
+    nonce = marker["nonce"]
+    service.tun_mode(False)  # a human decision clears the marker
+    assert service._tun_trial_read() is None
+    assert service.tun_trial_expire(nonce) is False
+
+
+def test_tun_trial_window_is_bounded(rooted):
+    with pytest.raises(service.ServiceError, match="5 to 3600"):
+        service.tun_trial_arm(2)
+    with pytest.raises(service.ServiceError, match="5 to 3600"):
+        service.tun_trial_arm(9999)
+    assert Store.load().router["tun"] is False  # nothing armed, nothing flipped
 
 
 # ---- restrict-only removal integrity ----------------------------------------------
@@ -324,6 +457,44 @@ def test_cli_routes_round_trip(channel, capsys):
 
     out = run_cli(["routes", "ls"], capsys)
     assert "No routing rulesets" in out
+
+
+def test_cli_tun_round_trip(monkeypatch, capsys):
+    out = run_cli(["tun"], capsys)
+    assert "TUN mode off" in out and "alle tun on" in out
+
+    monkeypatch.setattr(service.daemon, "daemon_info", lambda: None)
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    out = run_cli(["tun", "on"], capsys)
+    assert "TUN mode ON" in out and "no kill-switch" in out
+
+    # the kill-switch scope framing shifts to system-wide while tun is on
+    out = run_cli(["routes", "killswitch", "on"], capsys)
+    assert "Applies system-wide" in out
+    out = run_cli(["tun"], capsys)
+    assert "kill-switch is system-wide" in out
+
+    out = run_cli(["tun", "off"], capsys)
+    assert "TUN mode off" in out
+
+
+def test_cli_tun_trial_round_trip(monkeypatch, capsys):
+    monkeypatch.setattr(service.daemon, "daemon_info", lambda: None)
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    monkeypatch.setattr(service, "_spawn_tun_watchdog", lambda secs, nonce: None)
+
+    out = run_cli(["tun", "on", "--trial", "60"], capsys)
+    assert "trial window: 60s" in out and "alle tun confirm" in out
+
+    out = run_cli(["tun"], capsys)
+    assert "TUN trial pending" in out and "TUN mode ON" in out
+
+    out = run_cli(["tun", "confirm"], capsys)
+    assert "stays on" in out
+    assert Store.load().router["tun"] is True
+
+    with pytest.raises(SystemExit):
+        cli.main(["tun", "off", "--trial", "60"])  # --trial only applies to on
 
 
 def test_cli_blocked_channel_rm_shows_blockers(channel, capsys):

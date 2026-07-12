@@ -3,6 +3,7 @@
    like routing state rather than decoration. */
 
 :root {
+  color-scheme: light;
   --ink: #e7edf1;
   --ink-2: #d7e0e6;
   --panel: #fbfcfb;
@@ -19,8 +20,24 @@
   --down: #bd332b;
   --route: #6655df;
 
-  --mono: Arial, sans-serif;
-  --sans: Arial, sans-serif;
+  /* one voice for the whole interface — the platform system font (SF Pro on
+     macOS, Segoe UI on Windows), which ships its own optical sizing + tracking.
+     --mono resolves to the same family, so the chrome that used to ask for
+     "mono" (buttons, nav, eyebrows, addresses, table cells) now reads as a
+     single consistent voice; numeric alignment is preserved with tabular-nums.
+     --code is the only real monospace, reserved for the Logs viewer and inline
+     code where a character grid is functional, not decorative. */
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto,
+    system-ui, "Helvetica Neue", Arial, sans-serif;
+  --mono: var(--sans);
+  --code: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  /* elevation + dimming, centralized so dark mode can retune them in one place.
+     light surfaces throw a cool teal-tinted shadow; the scrim always darkens. */
+  --shadow-soft: 0 1px 2px rgba(23, 32, 31, .05);
+  --shadow-pop: 0 10px 30px rgba(23, 32, 31, .16);
+  --shadow-modal: 0 24px 56px -16px rgba(23, 32, 31, .30), 0 2px 6px rgba(23, 32, 31, .06);
+  --scrim: rgba(23, 32, 31, .45);
 
   --gap: 22px;
   --radius: 9px;
@@ -43,6 +60,8 @@ body {
   font-size: 14.5px;
   line-height: 1.48;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-optical-sizing: auto;
   letter-spacing: 0;
 }
 
@@ -86,8 +105,10 @@ textarea {
   justify-content: space-between;
   gap: var(--gap);
   padding: 14px 28px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
 }
 
 .wordmark-group {
@@ -111,6 +132,24 @@ textarea {
 
 .wordmark:hover .wordmark-img {
   opacity: .82;
+}
+
+/* the wordmark's letter gradient carries a dark-navy stop that vanishes on dark
+   surfaces; swap to a brighter cut of the same indigo→cyan identity. */
+:root.dark .wordmark-img {
+  content: url("/wordmark-dark.svg");
+}
+
+/* provider logos are tuned for light surfaces — NordVPN's slate wordmark and
+   Proton's navy half of the wordmark vanish on dark. Swap each to its white-
+   wordmark cut (icon untouched). Attribute-matched so any <img> using them,
+   now or later, picks up the dark variant. */
+:root.dark img[src$="/nordvpn.svg"] {
+  content: url("/nordvpn-dark.svg");
+}
+
+:root.dark img[src$="/protonvpn.svg"] {
+  content: url("/protonvpn-dark.svg");
 }
 
 .wordmark b {
@@ -149,7 +188,11 @@ textarea {
   padding: 7px 11px;
   border-radius: 7px;
   position: relative;
-  transition: color .15s, background .15s;
+  transition: color .15s, background .15s, transform .1s ease-out;
+}
+
+.nav a:active {
+  transform: scale(.96);
 }
 
 .nav a:hover {
@@ -179,7 +222,7 @@ textarea {
 }
 
 .github-link {
-  color: #1b1f24;
+  color: var(--text);
 }
 
 .github-link svg {
@@ -203,7 +246,7 @@ textarea {
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
-  transition: background .15s, border-color .15s, color .15s;
+  transition: background .15s, border-color .15s, color .15s, transform .1s ease-out;
 }
 
 .icon-btn .ico {
@@ -215,6 +258,10 @@ textarea {
 .icon-btn:hover {
   border-color: var(--line-2);
   background: var(--panel-2);
+}
+
+.icon-btn:active:not(:disabled) {
+  transform: scale(.92);
 }
 
 .icon-btn.danger:hover {
@@ -285,6 +332,7 @@ section+section {
   background: var(--panel);
   padding: 22px 24px;
   overflow: hidden;
+  box-shadow: var(--shadow-soft);
 }
 
 .entry::after {
@@ -301,7 +349,7 @@ section+section {
   font-family: var(--mono);
   font-size: 25px;
   font-weight: 700;
-  letter-spacing: 0;
+  letter-spacing: -0.011em;
   margin: 10px 0 0;
   color: var(--text);
   font-variant-numeric: tabular-nums;
@@ -335,11 +383,16 @@ section+section {
   border: 1px solid var(--line-2);
   background: var(--panel);
   color: var(--text);
-  transition: background .15s, border-color .15s, color .15s;
+  transition: background .15s, border-color .15s, color .15s, transform .1s ease-out;
 }
 
 .btn:hover {
   background: var(--panel-2);
+}
+
+/* respond the instant it's pressed — never wait for release */
+.btn:active:not(:disabled) {
+  transform: scale(.97);
 }
 
 .btn.primary {
@@ -706,7 +759,7 @@ input.relabel {
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
-  transition: border-color .15s, color .15s, background .15s, box-shadow .15s;
+  transition: border-color .15s, color .15s, background .15s, box-shadow .15s, transform .1s ease-out;
 }
 
 .rule-addrs .ct {
@@ -746,6 +799,10 @@ input.relabel {
   outline-offset: 2px;
 }
 
+.rule-addrs:active {
+  transform: scale(.97);
+}
+
 .dashboard-shell {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -780,6 +837,8 @@ input.relabel {
 
 .entry.compact {
   padding: 12px 16px;
+  /* the tun status pop hangs below the card edge */
+  overflow: visible;
 }
 
 .entry-row {
@@ -802,7 +861,7 @@ input.relabel {
   font-family: var(--mono);
   font-size: 25px;
   font-weight: 500;
-  letter-spacing: 0;
+  letter-spacing: -0.011em;
   color: var(--muted);
   white-space: nowrap;
 }
@@ -827,12 +886,77 @@ input.relabel {
   height: 18px;
 }
 
-.entry-row:hover .entry-copy {
+.entry-addr.copyable:hover .entry-copy {
   color: var(--brand);
+}
+
+/* tun control shares the entrypoint row, pinned to its right edge */
+.entry-tun {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  margin-left: auto;
+}
+
+.entry-tun .entry-bead {
+  background: var(--faint);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--faint) 14%, transparent);
+}
+
+.entry-tun .entry-bead.live {
+  background: var(--live);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 18%, transparent);
+}
+
+/* the dashboard's compact card runs a size down from the full entry card */
+.entry.compact .entry-label,
+.entry.compact .entry-addr {
+  font-size: 19px;
 }
 
 .entry.compact .entry-addr {
   margin-top: 0;
+}
+
+.entry.compact .entry-copy svg {
+  width: 15px;
+  height: 15px;
+}
+
+.entry.compact .entry-div {
+  height: 18px;
+}
+
+/* tun status pop — appears under the tun control on hover/keyboard focus */
+.tun-pop {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 40;
+  width: max-content;
+  max-width: 340px;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--panel) 84%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
+  box-shadow: var(--shadow-pop);
+  font-size: 13px;
+  color: var(--muted);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-4px);
+  transition: opacity .2s cubic-bezier(.2, .8, .2, 1), transform .2s cubic-bezier(.2, .8, .2, 1), visibility .2s;
+  pointer-events: none;
+}
+
+.entry-tun:hover .tun-pop,
+.entry-tun:focus-within .tun-pop {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
 }
 
 /* trailing "+" add row inside the channels and rules tables */
@@ -1261,7 +1385,11 @@ input.relabel {
   background: var(--ink-2);
   cursor: pointer;
   padding: 0;
-  transition: background .18s, border-color .18s;
+  transition: background .18s, border-color .18s, transform .1s ease-out;
+}
+
+.toggle:active {
+  transform: scale(.96);
 }
 
 .toggle .toggle-knob {
@@ -1272,7 +1400,10 @@ input.relabel {
   height: 19px;
   border-radius: 50%;
   background: var(--panel);
-  transition: left .18s cubic-bezier(.2, .7, .3, 1);
+  /* slide on the compositor, not layout: transform instead of left */
+  transform: translateX(0);
+  will-change: transform;
+  transition: transform .18s cubic-bezier(.2, .7, .3, 1);
 }
 
 .toggle.on {
@@ -1281,7 +1412,7 @@ input.relabel {
 }
 
 .toggle.on .toggle-knob {
-  left: 21px;
+  transform: translateX(19px);
 }
 
 .toggle.on.danger {
@@ -1324,7 +1455,7 @@ input.relabel {
   background: var(--panel);
   color: var(--text);
   cursor: pointer;
-  transition: border-color .15s, background .15s;
+  transition: border-color .15s, background .15s, transform .12s ease-out;
 }
 
 /* Gear in the tile corner: manage an added token provider's credential. */
@@ -1342,12 +1473,16 @@ input.relabel {
   background: var(--panel-2);
   color: var(--muted);
   cursor: pointer;
-  transition: color .15s, border-color .15s, background .15s;
+  transition: color .15s, border-color .15s, background .15s, transform .1s ease-out;
 }
 
 .prov-gear:hover {
   color: var(--text);
   border-color: var(--line-2);
+}
+
+.prov-gear:active {
+  transform: scale(.92);
 }
 
 .prov-gear:focus-visible {
@@ -1358,6 +1493,10 @@ input.relabel {
 .prov-tile:hover {
   border-color: var(--line-2);
   background: var(--panel-2);
+}
+
+.prov-tile:active {
+  transform: scale(.985);
 }
 
 .prov-tile:focus-visible {
@@ -1438,7 +1577,7 @@ input.relabel {
   max-height: 78vh;
   overflow: auto;
   white-space: pre-wrap;
-  font-family: var(--mono);
+  font-family: var(--code);
   font-size: 12px;
   line-height: 1.55;
   color: var(--text);
@@ -1455,9 +1594,9 @@ input.relabel {
   z-index: 60;
   display: grid;
   place-items: center;
-  background: color-mix(in srgb, var(--text) 42%, transparent);
+  background: var(--scrim);
   padding: 24px;
-  animation: fade .18s ease;
+  animation: fade .2s ease;
 }
 
 @keyframes fade {
@@ -1466,12 +1605,33 @@ input.relabel {
   }
 }
 
+@keyframes modalIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(.97);
+  }
+}
+
 .modal {
   width: min(460px, 100%);
   border: 1px solid var(--line-2);
-  border-radius: 12px;
+  border-radius: 14px;
   background: var(--panel);
-  animation: fade .16s ease;
+  box-shadow: var(--shadow-modal);
+  animation: modalIn .34s cubic-bezier(.2, .8, .2, 1);
+}
+
+/* dismiss along the mirrored path — scrim fades, surface settles back */
+.overlay.leaving {
+  animation: none;
+  opacity: 0;
+  transition: opacity .18s ease;
+}
+
+.overlay.leaving .modal {
+  animation: none;
+  transform: scale(.985);
+  transition: transform .18s cubic-bezier(.2, .8, .2, 1);
 }
 
 .modal-head {
@@ -1485,7 +1645,7 @@ input.relabel {
   margin: 0;
   font-size: 18px;
   line-height: 1.2;
-  letter-spacing: 0;
+  letter-spacing: -0.011em;
 }
 
 .modal-head .x {
@@ -1495,10 +1655,16 @@ input.relabel {
   font-size: 15px;
   cursor: pointer;
   padding: 4px;
+  border-radius: 6px;
+  transition: color .15s, transform .1s ease-out;
 }
 
 .modal-head .x:hover {
   color: var(--text);
+}
+
+.modal-head .x:active {
+  transform: scale(.88);
 }
 
 .modal-body {
@@ -1602,7 +1768,7 @@ input.relabel {
   font-family: var(--mono);
   font-size: 13px;
   color: var(--text);
-  background-color: #ffffff;
+  background-color: var(--panel);
   border: 1px solid var(--line-2);
   border-radius: 7px;
   padding: 11px 12px;
@@ -1616,7 +1782,7 @@ input.relabel {
   font-family: var(--mono);
   font-size: 13px;
   color: var(--text);
-  background-color: #ffffff;
+  background-color: var(--panel);
   border: 1px solid var(--line-2);
   border-radius: 7px;
   padding: 11px 12px;
@@ -1653,7 +1819,7 @@ select option {
   font-family: var(--mono);
   font-size: 13px;
   color: var(--text);
-  background-color: #ffffff;
+  background-color: var(--panel);
   border: 1px solid var(--line-2);
   border-radius: 7px;
   padding: 11px 12px;
@@ -1661,6 +1827,10 @@ select option {
   text-align: left;
   outline: none;
   transition: border-color .15s, background .15s;
+}
+
+.cselect-btn:active {
+  background-color: var(--panel-2);
 }
 
 .cselect-btn:focus-visible,
@@ -1699,8 +1869,11 @@ select option {
   display: none;
   grid-gap: 2px;
   border: 1px solid var(--line-2);
-  border-radius: 7px;
-  background: #ffffff;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
+  box-shadow: var(--shadow-pop);
   padding: 5px;
   max-height: 240px;
   overflow-y: auto;
@@ -1728,6 +1901,10 @@ select option {
 .cselect-opt:focus-visible {
   background: var(--panel-2);
   outline: none;
+}
+
+.cselect-opt:active {
+  background: var(--panel-3);
 }
 
 .cselect-opt.selected {
@@ -1814,43 +1991,87 @@ select option {
   white-space: nowrap;
 }
 
-/* ---- toasts ---- */
+/* ---- toasts: centered ephemeral HUD. The strip spans the viewport but passes
+   clicks through; only the toasts themselves catch the tap-to-dismiss. ---- */
 #toasts {
   position: fixed;
-  right: 22px;
-  bottom: 22px;
+  left: 0;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
   z-index: 80;
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 10px;
+  pointer-events: none;
+  padding: 0 16px;
+}
+
+#toasts .toast {
+  pointer-events: auto;
 }
 
 .toast {
-  font-size: 13px;
-  padding: 12px 16px;
-  border-radius: 8px;
-  border: 1px solid var(--line-2);
-  background: #ffffff;
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 13px;
+  font-size: 16px;
+  line-height: 1.35;
+  font-weight: 600;
+  padding: 18px 24px;
+  border-radius: 16px;
+  border: 1px solid color-mix(in srgb, var(--line-2) 55%, transparent);
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  backdrop-filter: blur(28px) saturate(180%);
+  box-shadow: var(--shadow-modal);
   color: var(--text);
   opacity: 0;
-  transition: opacity .2s;
-  max-width: 340px;
+  transform: translateY(6px) scale(.98);
+  transition: opacity .28s cubic-bezier(.2, .8, .2, 1), transform .28s cubic-bezier(.2, .8, .2, 1);
+  max-width: min(460px, calc(100vw - 32px));
+  cursor: pointer;
 }
 
 .toast.show {
   opacity: 1;
+  transform: none;
 }
 
-.toast.ok {
-  border-left: 3px solid var(--brand);
+.toast.show:active {
+  transform: scale(.98);
 }
 
-.toast.err {
-  border-left: 3px solid var(--down);
+.toast-ico {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin-top: 1px;
+  color: var(--brand);
 }
 
-.toast.warn {
-  border-left: 3px solid var(--warn);
+.toast-ico svg {
+  display: block;
+  width: 24px;
+  height: 24px;
+}
+
+.toast-msg {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.toast.ok .toast-ico {
+  color: var(--live);
+}
+
+.toast.err .toast-ico {
+  color: var(--down);
+}
+
+.toast.warn .toast-ico {
+  color: var(--warn);
 }
 
 .grid {
@@ -1889,7 +2110,7 @@ select option {
   font-weight: 700;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: #41514f;
+  color: var(--muted);
   white-space: nowrap;
 }
 
@@ -1899,7 +2120,7 @@ select option {
 }
 
 .row.body:hover {
-  background: #f4f8f7;
+  background: var(--panel-2);
   border-left: 3px solid color-mix(in srgb, var(--brand) 52%, transparent);
 }
 
@@ -1930,6 +2151,19 @@ select option {
 .ip {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
+}
+
+/* A non-healthy channel has no IP to show; display its short state word here
+   instead of an empty cell, tinted so failure is visible at a glance. Ellipsis
+   is the backstop so a long state never blows the row layout (full text on hover). */
+.ip.chan-state.warn {
+  color: var(--down);
+  font-weight: 600;
+  cursor: help;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .loc {
@@ -2017,7 +2251,7 @@ select option {
 }
 
 .empty code {
-  font-family: var(--mono);
+  font-family: var(--code);
   color: var(--brand);
   background: #0000;
   padding: 0 2px;
@@ -2031,7 +2265,9 @@ select option {
   align-items: center;
   gap: 10px;
   padding: 10px 28px;
-  background: color-mix(in srgb, var(--down) 10%, var(--panel));
+  background: color-mix(in srgb, var(--down) 14%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
   border-bottom: 1px solid color-mix(in srgb, var(--down) 30%, var(--line));
   color: var(--text);
   font-size: 13px;
@@ -2058,16 +2294,18 @@ select option {
 /* ---- entrance ---- */
 .rise {
   opacity: 0;
-  animation: rise .2s ease forwards;
+  transform: translateY(6px);
+  animation: rise .42s cubic-bezier(.2, .8, .2, 1) forwards;
 }
 
 .rise:nth-of-type(2) {
-  animation-delay: .06s;
+  animation-delay: .07s;
 }
 
 @keyframes rise {
   to {
     opacity: 1;
+    transform: none;
   }
 }
 
@@ -2283,15 +2521,6 @@ a {
     align-items: flex-start;
     flex-direction: column;
   }
-
-  #toasts {
-    left: 16px;
-    right: 16px;
-  }
-
-  .toast {
-    max-width: none;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2307,4 +2536,106 @@ a {
     opacity: 1;
     transform: none;
   }
+}
+
+/* reduced transparency: frost the translucent chrome into solid surfaces so
+   everything reads as opaque for users who ask for it. */
+@media (prefers-reduced-transparency: reduce) {
+
+  .masthead,
+  .tun-pop,
+  .toast,
+  .cselect-menu {
+    background: var(--panel);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  .banner {
+    background: color-mix(in srgb, var(--down) 14%, var(--panel));
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  .overlay {
+    background: color-mix(in srgb, var(--text) 55%, transparent);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+/* increased contrast: thicken the hairline borders that carry most of the
+   structure, so edges stay defined without touching the palette tokens. */
+@media (prefers-contrast: more) {
+
+  .entry,
+  .modal,
+  .toast,
+  .tun-pop,
+  .cselect-menu,
+  .cselect-btn,
+  .login,
+  .grid,
+  .provider-row,
+  .prov-tile,
+  .rule-addrs,
+  .field input,
+  .field select,
+  .field textarea {
+    border-width: 1.5px;
+  }
+}
+
+/* ---- dark appearance: retune every token so the same component grammar reads
+   correctly on dark surfaces. raised panels sit one step lighter than the page;
+   accents brighten for contrast; shadows go black, not muddy teal. Applied as a
+   single `.dark` class on <html>, set from localStorage or the OS preference by
+   theme-init.js before first paint (and toggleable from the masthead). ---- */
+:root.dark {
+  color-scheme: dark;
+
+  --ink: #0e1416;
+  --ink-2: #161d1f;
+  --panel: #1c2426;
+  --panel-2: #232c2e;
+  --panel-3: #2b3437;
+  --line: #323c3e;
+  --line-2: #4c5a5c;
+
+  --text: #e7edf1;
+  --muted: #9fb0ad;
+  --faint: #7a8c89;
+
+  --brand: #0a84ff;
+  --live: #2bbd9e;
+  --warn: #e0a050;
+  --down: #e5665c;
+  --route: #9a86ff;
+
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, .28);
+  --shadow-pop: 0 10px 30px rgba(0, 0, 0, .5);
+  --shadow-modal: 0 24px 56px -16px rgba(0, 0, 0, .62), 0 2px 6px rgba(0, 0, 0, .4);
+  --scrim: rgba(0, 0, 0, .6);
+}
+
+/* ease the appearance switch on the structural surfaces so the dark↔light shift
+   reads as a cross-fade, not a flash. these carry no other transition, so the
+   rule only ever fires on theme change; prefers-reduced-motion still nulls it. */
+body,
+.entry,
+.masthead,
+.grid,
+.login,
+.field input,
+.field select,
+.field textarea {
+  transition: background-color .25s ease, border-color .25s ease, color .25s ease;
+}
+
+/* the sign-in screen has no masthead — float the appearance toggle in its corner */
+.theme-corner {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 30;
 }

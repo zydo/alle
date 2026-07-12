@@ -4,9 +4,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#fbfcfb" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0e1416" media="(prefers-color-scheme: dark)">
   <title>alle</title>
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <script src="/theme-init.js"></script>
   <link rel="stylesheet" href="/style.css">
 </head>
 
@@ -27,6 +30,7 @@
     </div>
     <div class="mast-right">
       <span id="pill" class="state-pill"><span class="dot"></span><span id="pill-text">connecting</span></span>
+      <button id="theme" class="icon-btn" type="button" aria-label="Toggle appearance"></button>
       <a class="icon-btn github-link" href="https://github.com/zydo/alle" target="_blank" rel="noopener"
         aria-label="GitHub project" title="GitHub project">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
