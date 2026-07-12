@@ -243,9 +243,16 @@ def test_tun_on_requires_root(monkeypatch):
     with pytest.raises(service.ServiceError, match="privileged helper"):
         service.tun_mode(True)
     assert Store.load().router["tun"] is False  # gate fails before state moves
-    # the message points the user at installing the helper (the shipped path),
-    # not the stale "helper is planned" framing
+    # the hint is platform-specific: on macOS it leads with installing the
+    # helper (the shipped path, not the stale "helper is planned" framing) —
+    # pin the platform so the assertion holds on Linux CI too
+    monkeypatch.setattr(service.sys, "platform", "darwin")
     with pytest.raises(service.ServiceError, match="sudo alle helper install"):
+        service.tun_mode(True)
+    # …and on Linux it leads with the setcap grant
+    monkeypatch.setattr(service.sys, "platform", "linux")
+    monkeypatch.setattr(service, "_singbox_has_net_admin", lambda: False)
+    with pytest.raises(service.ServiceError, match="setcap cap_net_admin"):
         service.tun_mode(True)
 
 
