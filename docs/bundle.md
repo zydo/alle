@@ -68,6 +68,7 @@ providers:
         country: United States    # required for token providers
         city: ""                  # empty = any city
         label: Streaming — US     # optional display label
+        enabled: false            # optional — import held-but-not-dialled (default: true)
         wg: { ... }               # OPTIONAL for token providers (see below)
   protonvpn:                      # config providers have no credential
     channels:
@@ -123,6 +124,27 @@ the id directly as the channel key, so the id — not a filename — is what
 names and pins the channel. Keeping the same id as an existing `.conf`-derived
 channel means a later re-import of a freshly downloaded `.conf` still updates
 it in place.
+
+**`enabled` round-trips, and unstated means keep.** The administrative
+enable/disable state (`alle channels disable` — see the CLI reference) is
+part of the setup: exports write `enabled` **explicitly on every channel**
+(a bundle reader never needs an absent-key rule — same discipline as
+`lan_direct`), so applying a backup reproduces the split exactly. In a
+hand-written bundle the key is optional and tri-state, like the router
+toggles: explicit `true`/`false` applies that state, an **omitted key on
+`import` (merge) leaves an existing channel's state untouched** — so
+re-applying a bundle never undoes an ad-hoc `channels disable` — and a new
+channel defaults to enabled. On `import --replace` (restore), omitted simply
+means enabled. A **disabled** channel is imported without ever touching the
+provider: **no server resolution** (its `country`/`city` are checked against
+the provider's location catalog instead — skipped with a note if the catalog
+is unreachable), **no probe**, no connection slot occupied. It keeps an
+existing same-location channel's live `wg`, else the bundle's `wg` snapshot,
+else it lands wg-less and `alle channels enable` resolves a server at that
+moment. Two mirrors of the live restrict-only rule, both refused at
+validate/apply with nothing changed: a bundle ruleset cannot target a channel
+the bundle disables, and an import cannot disable a channel an existing
+routing rule still targets.
 
 ### Router and rulesets
 

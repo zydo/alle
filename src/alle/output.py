@@ -131,7 +131,17 @@ def channels_list(data: dict) -> str:
     channels = data["channels"]
     if not channels:
         return 'No channels yet. Add one:  alle channels add nordvpn --country "United States"'
-    return "\n".join(_table(BASE_HEADERS, [_base_cells(c) for c in channels]))
+    # STATUS is administrative intent (enabled/disabled), not probe liveness —
+    # this table stays static config, independent of whether alle is running.
+    return "\n".join(
+        _table(
+            [*BASE_HEADERS, "STATUS"],
+            [
+                [*_base_cells(c), "enabled" if c.get("enabled", True) else "disabled"]
+                for c in channels
+            ],
+        )
+    )
 
 
 def locations(data: dict) -> str:
@@ -427,16 +437,22 @@ def _skew_lines(snapshot: dict) -> list[str]:
 
 
 def _channels_summary(channels: list[dict]) -> str:
-    """Per-provider channel counts: ``NordVPN: 6 channels, Proton VPN: 1 channel``."""
+    """Per-provider channel counts with the enabled split when it matters:
+    ``NordVPN: 6 channels (4 enabled), Proton VPN: 1 channel``."""
     from alle.providers import display_name
 
-    counts: dict[str, int] = {}
+    counts: dict[str, list[int]] = {}  # provider -> [total, enabled]
     for c in channels:
-        counts[c["provider"]] = counts.get(c["provider"], 0) + 1
-    return ", ".join(
-        f"{display_name(p)}: {n} channel" + ("" if n == 1 else "s")
-        for p, n in sorted(counts.items())
-    )
+        entry = counts.setdefault(c["provider"], [0, 0])
+        entry[0] += 1
+        entry[1] += 1 if c.get("enabled", True) else 0
+    parts = []
+    for p, (total, enabled) in sorted(counts.items()):
+        label = f"{display_name(p)}: {total} channel" + ("" if total == 1 else "s")
+        if enabled != total:
+            label += f" ({enabled} enabled)"
+        parts.append(label)
+    return ", ".join(parts)
 
 
 def status(snapshot: dict) -> str:
@@ -448,8 +464,11 @@ def status(snapshot: dict) -> str:
     if not snapshot["running"]:
         lines = ["Alle - Inactive", *_skew_lines(snapshot), *_runtime_lines(snapshot)]
         if channels:
+            detail = f"{snapshot['channel_count']} channel(s)"
+            if snapshot.get("disabled_count"):
+                detail += f" ({snapshot['enabled_count']} enabled)"
             lines.append(
-                f"  ({snapshot['channel_count']} channel(s) across "
+                f"  ({detail} across "
                 f"{snapshot['provider_count']} provider(s) configured; run `alle start`)"
             )
         return "\n".join(lines)

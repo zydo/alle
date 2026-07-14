@@ -49,12 +49,23 @@ from alle.state import ReferencedError, Store, channel_id_from_filename
 
 
 class ServiceError(RuntimeError):
-    """A user-correctable application error, ready to show in the CLI."""
+    """A user-correctable application error, ready to show in the CLI.
+
+    ``web_message``, when set, is the same refusal phrased for the Web UI —
+    no CLI commands, no flat rule ids (the UI's fix is clicking the named
+    ruleset, not typing a command). Surfaces that render for a browser prefer
+    it; everything else shows ``str(e)``.
+    """
+
+    web_message: str | None = None
 
 
-def _blockers_error(blockers: dict[str, list[dict]]) -> ServiceError:
-    """Restrict-only removal refusal: every blocker in one pass, with the fix."""
-    lines = ["cannot remove — routing rules still reference:"]
+def _blockers_error(
+    blockers: dict[str, list[dict]], verb: str = "remove"
+) -> ServiceError:
+    """Restrict-only removal/disable refusal: every blocker in one pass, with
+    the fix."""
+    lines = [f"cannot {verb} — routing rules still reference:"]
     ids: list[str] = []
     for ref in sorted(blockers):
         rules_ = blockers[ref]
@@ -62,7 +73,29 @@ def _blockers_error(blockers: dict[str, list[dict]]) -> ServiceError:
         detail = ", ".join(f"{r['id']} ({routes.describe(r)})" for r in rules_)
         lines.append(f"  {ref} — {detail}")
     lines.append(f"Remove the rules first:  alle routes rm {' '.join(ids)}")
-    return ServiceError("\n".join(lines))
+    err = ServiceError("\n".join(lines))
+    # A ruleset has exactly one target, so referencing rules always come as
+    # whole rulesets — the Web UI form names those (the user's fix is to
+    # retarget/delete the ruleset in the routes panel).
+    names: list[str] = []
+    for ref in sorted(blockers):
+        for r in blockers[ref]:
+            name = str(r.get("ruleset_name") or r.get("ruleset") or r["id"])
+            if name not in names:
+                names.append(name)
+    noun = "this channel" if len(blockers) == 1 else "these channels"
+    if len(names) == 1:
+        err.web_message = (
+            f"Cannot {verb} — the ruleset “{names[0]}” still routes traffic "
+            f"through {noun}. Retarget or delete that ruleset first."
+        )
+    else:
+        listed = ", ".join(f"“{n}”" for n in names)
+        err.web_message = (
+            f"Cannot {verb} — the rulesets {listed} still route traffic "
+            f"through {noun}. Retarget or delete those rulesets first."
+        )
+    return err
 
 
 def resolve_provider(name: str) -> str:
@@ -521,6 +554,7 @@ def channel_list() -> dict:
                 "port_number": channel.port,
                 "country": _country_display(channel),
                 "city": _city_display(channel),
+                "enabled": channel.enabled,
             }
         )
     return {"providers": store.provider_names(), "channels": channels}
@@ -596,10 +630,12 @@ def _resolve_channel_ref(store: Store, ref: str, provider: str | None) -> list[d
     return matches
 
 
-def _channel_removal_plan(
-    refs: list[str], provider: str | None = None, all_: bool = False
+def _channel_batch_plan(
+    store: Store, refs: list[str], provider: str | None = None, all_: bool = False
 ) -> list[dict]:
-    store = Store.load()
+    """Resolve a batch channel selection (refs/globs, ``--provider`` scope,
+    ``--all``) to a deduplicated plan of channel rows — the shared front half
+    of ``channels rm`` and ``channels enable``/``disable``."""
     if provider is not None and not store.has_provider(provider):
         raise ServiceError(f"{display_name(provider)} is not added.")
 
@@ -627,6 +663,14 @@ def _channel_removal_plan(
         if key not in seen:
             seen.add(key)
             plan.append(item)
+    return plan
+
+
+def _channel_removal_plan(
+    refs: list[str], provider: str | None = None, all_: bool = False
+) -> list[dict]:
+    store = Store.load()
+    plan = _channel_batch_plan(store, refs, provider, all_)
     blockers = store.rules_referencing(
         {(item["provider"], item["channel"]) for item in plan}
     )
@@ -658,6 +702,91 @@ def channel_remove_many(
         applog.log(f"removed channel {item['provider']}/{item['channel']}")
     daemon.ensure_running()
     return {"channels": planned, "dry_run": False}
+
+
+def channel_set_enabled_many(
+    channel_ids: list[str],
+    enabled: bool,
+    provider: str | None = None,
+    dry_run: bool = False,
+    all_: bool = False,
+) -> dict:
+    """Enable or disable a batch of channels (same ref grammar as removal).
+
+    Disabled means *not materialised*: no sing-box inbound, no WireGuard
+    endpoint, no keepalive — the provider sees no connection, which is what
+    frees a slot on connection-capped plans. Purely local administrative
+    intent; the provider account's registered devices are untouched.
+
+    Disabling shares removal's restrict-only invariant (a rule targeting the
+    channel blocks it, listed in one pass); enabling has no reference check.
+    Enabling a channel that has no WireGuard params (imported disabled from a
+    bundle without a snapshot) first resolves a server via the provider API —
+    the one networked step, and only for that case. Channels already in the
+    requested state are reported as no-ops, not errors.
+    """
+    verb = "enable" if enabled else "disable"
+    store = Store.load()
+    plan = _channel_batch_plan(store, channel_ids, provider, all_)
+    for item in plan:
+        ch = store.get_channel(item["provider"], item["channel"])
+        item["was_enabled"] = ch.enabled if ch is not None else enabled
+        item["changed"] = ch is not None and ch.enabled != enabled
+
+    to_change = {(i["provider"], i["channel"]) for i in plan if i["changed"]}
+    if not enabled and to_change:
+        blockers = store.rules_referencing(to_change)
+        if blockers:
+            raise _blockers_error(blockers, verb=verb)
+    if dry_run:
+        return {"enabled": enabled, "dry_run": True, "channels": plan}
+
+    # Resolve wg-less channels BEFORE the toggle so a failed resolution
+    # aborts the whole batch with nothing half-enabled. A resolved wg that
+    # lands before an aborted toggle is harmless — the channel stays disabled.
+    wg_resolved: list[str] = []
+    if enabled:
+        for item in plan:
+            if not item["changed"]:
+                continue
+            ch = store.get_channel(item["provider"], item["channel"])
+            if ch is None or ch.wg:
+                continue
+            if kind(item["provider"]) != "token" or not is_functional(item["provider"]):
+                raise ServiceError(
+                    f"cannot enable {item['ref']}: it has no WireGuard config. "
+                    f"Re-import its .conf: alle channels add {item['provider']} "
+                    "--config <file>"
+                )
+            try:
+                wg = provider_wg(item["provider"], ch.country, ch.city or "")
+            except ProviderError as e:
+                raise ServiceError(
+                    f"cannot enable {item['ref']}: resolving a server failed ({e})."
+                ) from e
+            store.update_channel_wg(item["provider"], item["channel"], wg)
+            wg_resolved.append(item["ref"])
+
+    # One state transaction for the whole batch (all-or-nothing); the
+    # restrict-only check re-runs inside it, so a rule added between plan and
+    # toggle blocks the batch, never half of it.
+    try:
+        changed = (
+            store.set_channels_enabled(sorted(to_change), enabled) if to_change else []
+        )
+    except ReferencedError as e:
+        raise _blockers_error(e.blockers, verb=verb) from e
+    for prov, cid in changed:
+        applog.log(f"{verb}d channel {prov}/{cid}")
+    daemon.ensure_running()
+    return {
+        "enabled": enabled,
+        "dry_run": False,
+        "channels": plan,
+        "changed": [f"{prov}/{cid}" for prov, cid in changed],
+        "already": [i["ref"] for i in plan if not i["changed"]],
+        "wg_resolved": wg_resolved,
+    }
 
 
 def channel_set_label(ref: str, label: str, provider: str | None = None) -> dict:
@@ -1274,11 +1403,19 @@ def setup_export() -> dict:
 
 
 def setup_import(text: str) -> dict:
-    """Merge a bundle into the current setup (validate-all, then apply)."""
+    """Merge a bundle into the current setup (validate-all, then apply).
+
+    Disabled channels in the bundle are never resolved or probed; their
+    country/city are checked against the provider's location catalog instead
+    (skipped with a note when the catalog is unreachable — see
+    :func:`_bundle_location_lookup`).
+    """
+    lookup, notes = _bundle_location_lookup()
     try:
-        summary = bundle.apply_import(text)
+        summary = bundle.apply_import(text, location_lookup=lookup)
     except bundle.BundleError as e:
         raise ServiceError(str(e)) from e
+    summary["notes"] = notes
     ch = summary["channels"]
     applog.log(
         f"imported bundle: +{len(ch['created'])} channel(s), "
@@ -1302,10 +1439,12 @@ def setup_restore_plan(text: str) -> dict:
 def setup_restore(text: str) -> dict:
     """Replace the entire setup with a bundle. Destructive — callers confirm
     (the CLI prompts / requires ``--yes``; the Web UI shows a dialog)."""
+    lookup, notes = _bundle_location_lookup()
     try:
-        summary = bundle.apply_restore(text)
+        summary = bundle.apply_restore(text, location_lookup=lookup)
     except bundle.BundleError as e:
         raise ServiceError(str(e)) from e
+    summary["notes"] = notes
     applog.log(
         f"restored bundle: {len(summary['providers'])} provider(s), "
         f"{len(summary['channels'])} channel(s), {len(summary['rulesets'])} "
@@ -1376,7 +1515,13 @@ def status_snapshot() -> dict:
     for channel in store.channels():
         probe = channel.probe or {}
         recon = channel.reconnect or {}
-        if probe.get("ok"):
+        if not channel.enabled:
+            # Administrative intent beats liveness: a disabled channel is not
+            # materialised, so probe-derived states would be meaningless.
+            state = "Disabled"
+            latency = None
+            ip = None
+        elif probe.get("ok"):
             state = "Active"
             latency = probe.get("latency_ms")
             ip = probe.get("ip") or None
@@ -1406,12 +1551,14 @@ def status_snapshot() -> dict:
                 "country": _country_display(channel),
                 "city": _city_display(channel),
                 "state": state,
+                "enabled": channel.enabled,
                 "probe": probe,
                 "reconnect": recon,
                 "latency_ms": latency,
                 "ip": ip,
             }
         )
+    enabled_count = sum(1 for c in channels if c["enabled"])
     return {
         "running": running,
         "state": "running" if running else "stopped",
@@ -1421,6 +1568,8 @@ def status_snapshot() -> dict:
         "channels": channels,
         "provider_count": len({c["provider"] for c in channels}),
         "channel_count": len(channels),
+        "enabled_count": enabled_count,
+        "disabled_count": len(channels) - enabled_count,
     }
 
 
@@ -1486,6 +1635,7 @@ def _test_row(channel, probe: dict, traffic: dict) -> dict:
         "port_number": channel.port,
         "country": _country_display(channel),
         "city": _city_display(channel),
+        "enabled": True,
         "healthy": healthy,
         "state": state,
         "latency_ms": latency,
@@ -1496,6 +1646,34 @@ def _test_row(channel, probe: dict, traffic: dict) -> dict:
         # Cumulative traffic totals ride along on every test row: `alle test`
         # is the one per-channel table, so the durable counters (see
         # alle.metrics) surface here rather than in a separate command.
+        "sent": int(traffic.get("sent", 0)),
+        "received": int(traffic.get("received", 0)),
+        "traffic_updated_at": int(traffic.get("updated_at", 0)),
+        "speed_result": None,
+    }
+
+
+def _disabled_test_row(channel, traffic: dict) -> dict:
+    """A visible-but-skipped row for a disabled channel: listed with an
+    explicit state (never silently hidden), but not probed — it has no inbound
+    to probe, so a probe could only manufacture a failure."""
+    return {
+        "provider": channel.provider,
+        "display_provider": display_name(channel.provider),
+        "name": channel.id,
+        "label": channel.label,
+        "port": f":{channel.port}",
+        "port_number": channel.port,
+        "country": _country_display(channel),
+        "city": _city_display(channel),
+        "enabled": False,
+        "healthy": False,
+        "state": "Disabled",
+        "latency_ms": None,
+        "ip": None,
+        "error": None,
+        "detail": None,
+        "probe": {},
         "sent": int(traffic.get("sent", 0)),
         "received": int(traffic.get("received", 0)),
         "traffic_updated_at": int(traffic.get("updated_at", 0)),
@@ -1554,6 +1732,7 @@ def test(
             "channel_count": 0,
             "healthy_count": 0,
             "failed_count": 0,
+            "disabled_count": 0,
             "channels": [],
         }
 
@@ -1573,7 +1752,11 @@ def test(
             ]
         )
 
-    results = Engine(store).probe_all(channels)
+    engine = Engine(store)
+    # Only enabled channels are probed; disabled ones still get a visible row
+    # with an explicit Disabled state (skipped, never silently hidden).
+    to_probe = [ch for ch in channels if ch.enabled]
+    results = engine.probe_all(to_probe)
     traffic = metrics.totals()
     rows = [
         _test_row(
@@ -1581,10 +1764,17 @@ def test(
             results[f"{ch.provider}/{ch.id}"],
             traffic.get((ch.provider, ch.id), {}),
         )
+        if ch.enabled
+        else _disabled_test_row(ch, traffic.get((ch.provider, ch.id), {}))
         for ch in channels
     ]
-    running = not rows or any(
-        (row["probe"] or {}).get("error") != "stopped" for row in rows
+    probed_rows = [row for row in rows if row["enabled"]]
+    # Disabled rows carry no probe, so liveness comes from the probed rows —
+    # or straight from the runner when every channel is disabled.
+    running = (
+        any((row["probe"] or {}).get("error") != "stopped" for row in probed_rows)
+        if probed_rows
+        else engine.runner.is_running()
     )
 
     if speed:
@@ -1596,7 +1786,9 @@ def test(
                 if on_row is not None:
                     on_row(row)
                 continue
-            if not row["healthy"]:
+            if not row["enabled"]:
+                row["speed_result"] = _skipped_speed("disabled")
+            elif not row["healthy"]:
                 row["speed_result"] = _skipped_speed("unhealthy")
             else:
 
@@ -1636,7 +1828,9 @@ def test(
         "running": running,
         "channel_count": len(rows),
         "healthy_count": healthy_count,
-        "failed_count": len(rows) - healthy_count,
+        # Disabled channels are skipped, not failed — only probed rows count.
+        "failed_count": len(probed_rows) - healthy_count,
+        "disabled_count": len(rows) - len(probed_rows),
         "channels": rows,
     }
 

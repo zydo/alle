@@ -96,7 +96,10 @@ def test_export_is_setup_only_and_explicit(monkeypatch):
 
     assert data["kind"] == "alle-bundle" and data["bundle_version"] == 1
     channel = data["providers"]["nordvpn"]["channels"][ch.id]
-    assert set(channel) == {"country", "city", "label", "wg"}  # no port/probe/reconnect
+    # no port/probe/reconnect; enabled is explicit (unstated means keep-as-is
+    # on a merge, so a faithful backup must always state it)
+    assert set(channel) == {"country", "city", "label", "wg", "enabled"}
+    assert channel["enabled"] is True
     assert channel["label"] == "US East"
     assert data["providers"]["nordvpn"]["credential"] == {"token": "tok-123"}
     assert "credential" not in data["providers"]["protonvpn"]

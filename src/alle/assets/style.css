@@ -314,7 +314,10 @@ textarea {
 /* ---- layout ---- */
 
 main {
-  max-width: 1240px;
+  /* wide enough that the channel table's four per-row action buttons never
+     squeeze the text columns; the flexible label/location columns absorb
+     the extra room. One cap for every page (dashboard, logs). */
+  max-width: 1440px;
   margin: 0 auto;
   padding: 28px 22px 76px;
 }
@@ -441,7 +444,17 @@ section+section {
 /* ---- provider + channel management rows ---- */
 
 .row.dashchan {
-  grid-template-columns: minmax(160px, 1.3fr) minmax(112px, .8fr) 56px minmax(90px, .7fr) 72px 80px 92px 88px 88px 114px;
+  /* columns: channel · location · port · ip · latency · sent · received ·
+     down · up · actions. The five metric columns are a uniform 88px;
+     Location is capped at its longest realistic value un-ellipsized
+     ("San Francisco, United States" at 14.5px); IP is fixed at a full mono
+     IPv4 ("111.111.111.111"), which also fits the state words shown there
+     (Disabled, Reconnecting); the last column fits the four per-channel
+     action buttons (34px + 6px gap). Channel is the one flexible track: it
+     absorbs exactly the remaining width (so the table's total never
+     changes) and is the shrink valve on narrow windows, where its label
+     and ref ellipsize. */
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 210px) 56px 134px 88px 88px 88px 88px 88px 156px;
 }
 
 .row.dashchan.body {
@@ -2164,6 +2177,22 @@ select option {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Disabled is deliberate, not a failure: neutral tint, and the whole row is
+   de-emphasised (the toggle/remove actions keep full contrast for reach). */
+.ip.chan-state.muted {
+  color: var(--muted);
+  font-weight: 600;
+  cursor: help;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row.dashchan.body.chan-off > span:not(.row-actions) {
+  opacity: .55;
 }
 
 .loc {

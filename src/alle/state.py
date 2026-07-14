@@ -113,6 +113,11 @@ class Channel:
     wg: dict = field(default_factory=dict)
     probe: dict = field(default_factory=dict)
     reconnect: dict = field(default_factory=dict)
+    # Administrative intent, distinct from probe-derived liveness: a disabled
+    # channel is not materialised in sing-box at all (no inbound, no WireGuard
+    # endpoint, no keepalive — the provider sees no connection). On disk the
+    # key is written only when False; absent reads True.
+    enabled: bool = True
 
     @property
     def display(self) -> str:
@@ -222,6 +227,11 @@ def _ensure_channel_target(data: dict, target: str) -> None:
         chans = (data["providers"].get(provider) or {}).get("channels") or {}
         if cid not in chans:
             raise ValueError(f"no channel {target!r} to route to")
+        if not chans[cid].get("enabled", True):
+            raise ValueError(
+                f"channel {target!r} is disabled — enable it first: "
+                f"alle channels enable {target}"
+            )
 
 
 def _normalize_rulesets(data: dict) -> None:
@@ -534,9 +544,10 @@ class Store:
                         country=ch.get("country", ""),
                         city=ch.get("city", ""),
                         label=ch.get("label", ""),
-                        wg=ch.get("wg", {}),
+                        wg=ch.get("wg") or {},
                         probe=ch.get("probe", {}),
                         reconnect=ch.get("reconnect", {}),
+                        enabled=bool(ch.get("enabled", True)),
                     )
                 )
         return out
@@ -643,6 +654,44 @@ class Store:
                     removed.append((provider, cid))
         self.data = _read_raw()
         return removed
+
+    def set_channels_enabled(
+        self, refs: list[tuple[str, str]], enabled: bool
+    ) -> list[tuple[str, str]]:
+        """Enable/disable several channels in ONE transaction; returns those
+        whose state actually changed (already-there channels are no-ops).
+
+        Disabling is as safe as deleting: the same restrict-only blocker check
+        covers the whole batch inside the transaction (a rule added
+        concurrently blocks the batch), because a disabled channel must never
+        be referenced by a router rule. Enabling carries no reference check.
+
+        On disk, ``enabled`` is written only when False — enabling removes the
+        key, so a default-enabled channel keeps its original shape. Disabling
+        also drops the channel's probe + reconnect bookkeeping: a disabled
+        channel is inert, and a stale failing probe would otherwise show a
+        misleading "failed" and give auto-reconnect something to act on.
+        """
+        changed: list[tuple[str, str]] = []
+        with transaction() as data:
+            if not enabled:
+                blockers = _rules_referencing(data, set(refs))
+                if blockers:
+                    raise ReferencedError(blockers)
+            for provider, cid in refs:
+                prov = data["providers"].get(provider) or {}
+                ch = (prov.get("channels") or {}).get(cid)
+                if ch is None or bool(ch.get("enabled", True)) == enabled:
+                    continue
+                if enabled:
+                    ch.pop("enabled", None)
+                else:
+                    ch["enabled"] = False
+                    ch.pop("probe", None)
+                    ch.pop("reconnect", None)
+                changed.append((provider, cid))
+        self.data = _read_raw()
+        return changed
 
     def set_label(self, provider: str, cid: str, label: str) -> bool:
         """Set (or, with an empty ``label``, clear) a channel's display label.
@@ -1040,10 +1089,19 @@ class Store:
         bundle-import commit point (the replace twin is :meth:`restore_setup`).
 
         ``providers`` maps provider -> {channel id -> {country, city, label,
-        wg}} (channels upserted by ``(provider, id)`` with
+        wg, enabled}} (channels upserted by ``(provider, id)`` with
         :meth:`upsert_channel` semantics: port/probe kept, reconnect reset,
         label preserved unless the spec carries one); missing providers are
-        created. ``rulesets`` ({name, target, matchers: [(type, value), …]})
+        created. A spec's ``enabled`` is tri-state: explicit True/False
+        applies it, ``None`` (unstated) keeps an existing channel's state —
+        like the unstated router toggles, so a re-applied bundle never undoes
+        an ad-hoc ``channels disable`` — and reads enabled for a new channel.
+        A spec that disables a channel a routing rule still references raises
+        :class:`ReferencedError` — the same restrict-only check as
+        :meth:`set_channels_enabled`, run across the whole batch first, so an
+        import can never leave a rule pointing at a disabled channel. A
+        disabled spec's ``wg`` may be None (resolve-at-enable); it is stored
+        as ``{}``. ``rulesets`` ({name, target, matchers: [(type, value), …]})
         append as new blocks at the bottom of the priority order. ``None``
         toggles mean "bundle leaves it unstated" and change nothing. Returns
         the apply summary pieces: ``{providers_added, created, updated,
@@ -1058,6 +1116,22 @@ class Store:
             "rulesets_added": [],
         }
         with transaction() as data:
+            # The restrict-only check runs before any channel write so a
+            # blocked disable aborts the whole merge, not half of it. Only an
+            # *explicit* enabled: false disables — unstated changes nothing.
+            disabling = {
+                (provider, cid)
+                for provider, channels in providers.items()
+                for cid, spec in channels.items()
+                if spec.get("enabled") is False
+                and ((data["providers"].get(provider) or {}).get("channels") or {})
+                .get(cid, {})
+                .get("enabled", True)
+            }
+            if disabling:
+                blockers = _rules_referencing(data, disabling)
+                if blockers:
+                    raise ReferencedError(blockers)
             for provider, channels in providers.items():
                 prov = data["providers"].get(provider)
                 if prov is None:
@@ -1068,14 +1142,23 @@ class Store:
                     ref = f"{provider}/{cid}"
                     ch = chans.get(cid)
                     label = spec.get("label") or ""
+                    # tri-state: None (unstated) resolves to the existing
+                    # channel's state, or enabled for a new one
+                    enabled = spec.get("enabled")
+                    if enabled is None:
+                        enabled = ch.get("enabled", True) if ch is not None else True
+                    wg = spec["wg"] or {}
                     if ch is None:
                         entry = {
                             "country": spec.get("country", ""),
                             "city": spec.get("city", ""),
                             "port": _next_free_port(data),
-                            "wg": spec["wg"],
-                            "probe": {},
+                            "wg": wg,
                         }
+                        if enabled:
+                            entry["probe"] = {}
+                        else:
+                            entry["enabled"] = False
                         if label:
                             entry["label"] = label
                         chans[cid] = entry
@@ -1083,16 +1166,24 @@ class Store:
                     elif (
                         ch.get("country", "") == spec.get("country", "")
                         and ch.get("city", "") == spec.get("city", "")
-                        and ch.get("wg") == spec["wg"]
+                        and ch.get("wg") == wg
+                        and ch.get("enabled", True) == enabled
                         and (not label or ch.get("label", "") == label)
                     ):
                         summary["unchanged"].append(ref)
                     else:
                         ch["country"] = spec.get("country", "")
                         ch["city"] = spec.get("city", "")
-                        ch["wg"] = spec["wg"]
+                        ch["wg"] = wg
                         if label:  # explicit override; otherwise keep the old
                             ch["label"] = label
+                        if enabled:
+                            ch.pop("enabled", None)
+                        else:
+                            # same shape as set_channels_enabled: a disabled
+                            # channel carries no probe/reconnect bookkeeping
+                            ch["enabled"] = False
+                            ch.pop("probe", None)
                         # An import is human intervention: forget any reconnect
                         # give-up state so the daemon retries from scratch.
                         ch.pop("reconnect", None)
@@ -1157,9 +1248,15 @@ class Store:
                         "country": spec.get("country", ""),
                         "city": spec.get("city", ""),
                         "port": old_ports.get((provider, cid), 0),
-                        "wg": spec["wg"],
-                        "probe": {},
+                        # None (a disabled resolve-at-enable spec) stores as {}
+                        "wg": spec["wg"] or {},
                     }
+                    # tri-state: only an explicit false disables; unstated
+                    # reads enabled on a whole-setup replace
+                    if spec.get("enabled") is not False:
+                        entry["probe"] = {}
+                    else:
+                        entry["enabled"] = False
                     if spec.get("label"):
                         entry["label"] = spec["label"]
                     chans[cid] = entry
@@ -1217,6 +1314,11 @@ def config_signature(data: dict) -> str:
         chans = {}
         for cid, ch in sorted((pdata.get("channels") or {}).items()):
             chans[cid] = {"port": ch.get("port"), "wg": ch.get("wg")}
+            # Only when disabled (absent-reads-True, like the on-disk key), so
+            # existing default-enabled states keep their digest across upgrades
+            # while any toggle still moves it and reconciles sing-box.
+            if not ch.get("enabled", True):
+                chans[cid]["enabled"] = False
         if chans:  # an empty provider produces no inbounds, so it can't move the config
             relevant[provider] = chans
     router = data.get("router") or {}

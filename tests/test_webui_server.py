@@ -19,6 +19,14 @@ from conftest import wg_config
 WG = wg_config("1.2.3.4")
 
 
+@pytest.fixture(autouse=True)
+def no_background(monkeypatch):
+    """Mutations reached over the API must not spawn a real applier daemon —
+    without this, every mutation test leaked a live `-m alle applier` (which
+    then downloaded its own sing-box) into a deleted temp home."""
+    monkeypatch.setattr(service.daemon, "ensure_running", lambda: None)
+
+
 @pytest.fixture
 def live():
     """A running control server. Yields ``(base_url, secret)``."""
@@ -576,6 +584,112 @@ def test_relabel_channel(live):
     assert st == 200 and json.loads(body)["label"] == "Tokyo"
 
 
+def test_toggle_channel_enabled(live):
+    from alle.state import Store
+
+    base, secret = live
+    origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    _req(
+        base + "/api/v1/providers",
+        method="POST",
+        headers=origin,
+        data={"provider": "protonvpn"},
+    )
+    _req(
+        base + "/api/v1/channels",
+        method="POST",
+        headers=origin,
+        data={
+            "provider": "protonvpn",
+            "conf_name": "wg-jp-1.conf",
+            "conf_text": _conf(),
+        },
+    )
+    st, body, _ = _req(
+        base + "/api/v1/channels/protonvpn/wg_jp_1/enabled",
+        method="POST",
+        headers=origin,
+        data={"enabled": False},
+    )
+    assert st == 200 and json.loads(body)["changed"] == ["protonvpn/wg_jp_1"]
+    assert Store.load().get_channel("protonvpn", "wg_jp_1").enabled is False
+
+    # the channel list carries the flag for the UI
+    st, body, _ = _req(base + "/api/v1/channels", headers=origin)
+    assert json.loads(body)["channels"][0]["enabled"] is False
+
+    # a disabled channel can't be targeted by a new ruleset
+    st, body, _ = _req(
+        base + "/api/v1/routes/rulesets",
+        method="POST",
+        headers=origin,
+        data={
+            "name": "X",
+            "target": "protonvpn/wg_jp_1",
+            "matchers": [{"value": "x.com"}],
+        },
+    )
+    assert st == 400 and "disabled" in json.loads(body)["error"]
+
+    # `enabled` is required and strictly boolean
+    st, _, _ = _req(
+        base + "/api/v1/channels/protonvpn/wg_jp_1/enabled",
+        method="POST",
+        headers=origin,
+        data={},
+    )
+    assert st == 400
+
+    st, body, _ = _req(
+        base + "/api/v1/channels/protonvpn/wg_jp_1/enabled",
+        method="POST",
+        headers=origin,
+        data={"enabled": True},
+    )
+    assert st == 200
+    assert Store.load().get_channel("protonvpn", "wg_jp_1").enabled is True
+
+
+def test_disable_channel_blocked_by_rule_returns_verbatim_message(live):
+    from alle.state import Store
+
+    base, secret = live
+    origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    _req(
+        base + "/api/v1/providers",
+        method="POST",
+        headers=origin,
+        data={"provider": "protonvpn"},
+    )
+    _req(
+        base + "/api/v1/channels",
+        method="POST",
+        headers=origin,
+        data={
+            "provider": "protonvpn",
+            "conf_name": "wg-de-1.conf",
+            "conf_text": _conf(),
+        },
+    )
+    Store.load().create_ruleset(
+        "protonvpn/wg_de_1", "protonvpn/wg_de_1", [("domain_suffix", "x.com")]
+    )
+
+    st, body, _ = _req(
+        base + "/api/v1/channels/protonvpn/wg_de_1/enabled",
+        method="POST",
+        headers=origin,
+        data={"enabled": False},
+    )
+    assert st == 400
+    # the web form of the refusal: names the ruleset (the UI's clickable fix),
+    # never flat rule ids or CLI commands
+    error = json.loads(body)["error"]
+    assert "Cannot disable" in error and "“protonvpn/wg_de_1”" in error
+    assert "alle routes" not in error and "r1" not in error
+    assert Store.load().get_channel("protonvpn", "wg_de_1").enabled is True
+
+
 def test_remove_channel_blocked_by_rule_returns_verbatim_message(live):
     from alle.state import Store
 
@@ -605,7 +719,9 @@ def test_remove_channel_blocked_by_rule_returns_verbatim_message(live):
         base + "/api/v1/channels/protonvpn/wg_de_1", method="DELETE", headers=origin
     )
     assert st == 400
-    assert "routing rules still reference" in json.loads(body)["error"]
+    error = json.loads(body)["error"]
+    assert "Cannot remove" in error and "“protonvpn/wg_de_1”" in error
+    assert "alle routes" not in error
 
     Store.load().remove_rules(["r1"])
     st, _, _ = _req(

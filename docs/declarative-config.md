@@ -81,6 +81,29 @@ Field rules for a token channel:
 | `city`               | no               | omit for the fastest city in the country.                                                                                                  |
 | `label`              | no (recommended) | friendly display name shown in status and the Web UI.                                                                                      |
 | `wg`                 | **no — omit**    | resolved from the token at apply. If you *do* include one (an export always does), it is only a fallback used when the API is unreachable. |
+| `enabled`            | no               | tri-state. `false` imports the channel **disabled**: held in config but never dialled — no server resolution at apply, no probe, no provider connection slot used (see below). `true` (re-)enables it. **Omitted** = on `import` an existing channel keeps its current state (an ad-hoc `channels disable` survives re-applying the bundle); a new channel starts enabled. |
+
+**A stable of servers under a connection cap.** Providers that cap
+simultaneous connections (NordVPN allows ~10) pair naturally with `enabled`:
+declare every server you want on hand, enable only the ones that should be
+live. A disabled channel costs nothing at apply time — validation checks its
+`country`/`city` against the provider's location catalog (instead of proving
+them by resolution), no server is resolved, nothing is probed, and no
+connection slot is occupied. `alle channels enable <id>` later resolves the
+server at that moment (the one networked step) and materialises it. The same
+key works for config channels (their `wg` is still required). One constraint,
+enforced at validation: a ruleset in the bundle cannot target a channel the
+bundle disables.
+
+```yaml
+channels:
+  united_states_new_york_1:
+    country: United States
+    city: New York
+  sweden_1:
+    country: Sweden
+    enabled: false          # held, not dialled — enable it when needed
+```
 
 **Channel id convention.** Use the same scheme alle applies when it names
 channels itself: **`<country>_<n>`**, or **`<country>_<city>_<n>`** when you
@@ -155,6 +178,7 @@ come from outside the file:
 | `wg.peer.preshared_key`                   | `[Peer] PresharedKey`, if present        | optional; Proton configs usually have none (`null`)                                                                                                                                                  |
 | `country` / `city`                        | **not in the file**                      | optional but recommended — copy them from the console where you downloaded the config. The filename parses best-effort (`US`/`CA`), but the console is authoritative.                                |
 | `label`                                   | **you choose it**                        | optional but recommended                                                                                                                                                                             |
+| `enabled`                                 | **you choose it**                        | optional, tri-state. `false` holds the channel without dialling it (no provider connection slot used); omitted = keep an existing channel's state on `import`, enabled for a new one.                 |
 
 `[Interface] DNS` and the `# …` comment lines are ignored (alle reads only the
 fields sing-box acts on), so they have no bundle equivalent.

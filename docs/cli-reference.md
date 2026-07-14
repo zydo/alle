@@ -23,6 +23,7 @@ omit the prefix.
     - [`alle channels ls [--json|--ids|--refs]`](#alle-channels-ls---json--ids--refs)
     - [`alle channels setlabel <channel> [label]`](#alle-channels-setlabel-channel-label)
     - [`alle channels rm <channel>...`](#alle-channels-rm-channel)
+    - [`alle channels enable/disable <channel>...`](#alle-channels-enabledisable-channel)
   - [`alle routes`](#alle-routes)
     - [`alle routes ruleset create <name> --via <target> --<matcher>...`](#alle-routes-ruleset-create-name---via-target---matcher)
     - [`alle routes ruleset add <ruleset> --<matcher>...`](#alle-routes-ruleset-add-ruleset---matcher)
@@ -224,18 +225,23 @@ alle channels add nordvpn --country "United States" --label "Streaming - US"
 ### `alle channels ls [--json|--ids|--refs]`
 
 List configured channels (static config only — no live status). Columns: `LABEL`,
-`ID`, `PORT`, `COUNTRY`, `CITY`. `LABEL` is the friendly display name (falls back
-to the id when unset); `ID` is the globally-unique, provider-qualified handle
-(`nordvpn/japan_1`) — the same ref every command accepts, which is why no separate
-provider column is needed.
+`ID`, `PORT`, `COUNTRY`, `CITY`, `STATUS`. `LABEL` is the friendly display name
+(falls back to the id when unset); `ID` is the globally-unique,
+provider-qualified handle (`nordvpn/japan_1`) — the same ref every command
+accepts, which is why no separate provider column is needed. `STATUS` is the
+administrative `enabled` / `disabled` state (see
+[`alle channels disable`](#alle-channels-enabledisable-channel)), distinct from
+probe liveness — this table stays the same whether alle is up or down.
 
 ```text
-LABEL           ID                        PORT    COUNTRY        CITY
---------------  ------------------------  ------  -------------  ----------
-Streaming - US  nordvpn/japan_1           :53124  Japan          (Any City)
-seattle_1       nordvpn/seattle_1         :53125  United States  Seattle
-wg_us_ca_842    protonvpn/wg_us_ca_842    :53126  United States  California
+LABEL           ID                        PORT    COUNTRY        CITY        STATUS
+--------------  ------------------------  ------  -------------  ----------  --------
+Streaming - US  nordvpn/japan_1           :53124  Japan          (Any City)  enabled
+seattle_1       nordvpn/seattle_1         :53125  United States  Seattle     disabled
+wg_us_ca_842    protonvpn/wg_us_ca_842    :53126  United States  California  enabled
 ```
+
+`--json` carries the same fact as a boolean `enabled` per channel.
 
 For scripting, print just channel ids or provider-qualified refs (labels are
 never used as identifiers):
@@ -289,6 +295,42 @@ alle channels rm --provider nordvpn --all
   with `alle routes ls --channel <name>`. There is no `--force` — removing rules
   is always its own explicit step, so a channel removal can never silently
   reroute traffic.
+
+### `alle channels enable/disable <channel>...`
+
+Set a channel's **administrative state** without removing it. A **disabled**
+channel is kept in the config but not materialised at all: no local proxy
+port, no WireGuard endpoint, no handshake or keepalive toward the provider —
+**it occupies no connection slot** on plans that cap simultaneous connections
+(NordVPN and Proton VPN allow ~10). Hold more channels than the cap and enable
+only the ones you want live:
+
+```bash
+alle channels disable japan_1                    # free its provider slot
+alle channels disable 'united_states_*'          # globs and batches, like rm
+alle channels disable --provider nordvpn --all
+alle channels enable nordvpn/japan_1             # dial it again
+alle channels disable japan_1 --dry-run          # plan without changing state
+```
+
+- Same ref grammar as `channels rm`: bare ids, `provider/id` refs, globs,
+  `--provider` scoping, `--all`, `--dry-run`. Channels already in the requested
+  state are reported as no-ops.
+- Disabled ≠ unhealthy. Enable/disable is *intent*; "active" is *liveness*
+  (the latest probe). A disabled channel shows `Disabled` in `status` and a
+  skipped `Disabled` row in `test` — listed everywhere, probed nowhere.
+- **A channel targeted by a routing rule cannot be disabled** — the same
+  restrict-only refusal as `rm`, listing every referencing rule. Rules can't
+  target a disabled channel either; enable it first.
+- Disabling is purely **local**: alle stops dialling the server. It does not
+  deregister the device/peer from the provider account.
+- Enabling is instant when the channel has its WireGuard params (the usual
+  case). A channel imported *disabled* from a bundle without a `wg` snapshot
+  resolves its server via the provider API at enable time — the one case where
+  `enable` needs the network, and it fails cleanly (channel stays disabled) if
+  the API is unreachable.
+- The daemon reconciles on every toggle: exactly that one endpoint is added or
+  removed from the live sing-box config; other channels never blip.
 
 ---
 
@@ -503,7 +545,7 @@ config-rejected sing-box) surface as warning lines.
 
 ```text
 Alle - Active
-  Channels  NordVPN: 6 channels, Proton VPN: 1 channel  (details: alle channels ls)
+  Channels  NordVPN: 6 channels (4 enabled), Proton VPN: 1 channel  (details: alle channels ls)
   Router    127.0.0.1:54585 — 2 rule(s), LAN bypasses VPN, unmatched → direct  (details: alle routes ls)
   Web UI    http://alle-cb9cd104.localhost:58601  (open it: alle ui)
 ```

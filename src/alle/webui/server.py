@@ -807,14 +807,17 @@ class _Handler(BaseHTTPRequestHandler):
     def _call(self, fn, *args, **kwargs):
         """Run a service call and return its result as JSON; map a user-facing
         error to a 400 whose message the UI shows verbatim (blocker lists,
-        rejected tokens, …)."""
+        rejected tokens, …). An error that carries a ``web_message`` (the same
+        refusal phrased for a browser — ruleset names instead of rule ids and
+        CLI commands) sends that instead of the CLI text."""
         from alle import service
         from alle.providers import ProviderError
 
         try:
             return self._json(200, fn(*args, **kwargs))
         except (service.ServiceError, ProviderError) as e:
-            return self._json(400, {"error": str(e)})
+            message = getattr(e, "web_message", None) or str(e)
+            return self._json(400, {"error": message})
 
     def _stream_test(self, channel: str | None):
         """Stream a speed test as newline-delimited JSON — a framed protocol.
@@ -1055,6 +1058,24 @@ class _Handler(BaseHTTPRequestHandler):
                 service.channel_set_label,
                 f"{seg[1]}/{seg[2]}",
                 _str_field(body, "label"),
+            )
+        if (
+            method == "POST"
+            and len(seg) == 4
+            and seg[0] == "channels"
+            and seg[3] == "enabled"
+        ):
+            # `enabled` is required and strictly boolean, same contract as the
+            # kill switch: a missing field must never silently flip a channel.
+            # Disabling a channel a routing rule targets is refused; the 400
+            # error carries the blockers list the UI shows verbatim.
+            _fields(body, "enabled")
+            return self._call(
+                lambda: service.channel_set_enabled_many(
+                    [seg[2]],
+                    _bool_field(body, "enabled", required=True),
+                    provider=seg[1],
+                )
             )
         if method == "DELETE" and len(seg) == 3 and seg[0] == "channels":
             return self._call(

@@ -356,7 +356,9 @@ def run_applier() -> None:
         config changes keep applying within one poll interval regardless."""
         try:
             eng = Engine(Store.load())
-            if eng.store.channels():
+            # Only enabled channels are probed/reconnected; when every channel
+            # is disabled the pass is a no-op (no empty probe log each cycle).
+            if any(ch.enabled for ch in eng.store.channels()):
                 eng.probe_all()
                 reconnect.run_pass(Store.load(), eng.runner)
         except Exception as e:  # noqa: BLE001 — a bad pass must not kill the worker

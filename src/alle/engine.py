@@ -119,6 +119,13 @@ class Engine:
         inbounds, endpoints, rules, errors = [], [], [], {}
         built: set[tuple[str, str]] = set()
         for ch in self.store.channels():
+            if not ch.enabled:
+                # A disabled channel is not materialised at all: no inbound,
+                # no WireGuard endpoint (so no handshake/keepalive toward the
+                # provider — the whole point), no route rule. Not an error;
+                # a rule that somehow still targets it compiles fail-closed
+                # to reject via the `built` miss below.
+                continue
             try:
                 endpoint = self._endpoint(ch)
             except ProviderError as e:
@@ -410,7 +417,9 @@ class Engine:
     def probe_all(self, channels: list[Channel] | None = None) -> dict[str, dict]:
         """Probe each channel through its proxy and persist the result.
 
-        Returns ``{"<provider>/<id>": probe_dict}``. Only meaningful while
+        Defaults to the **enabled** channels: a disabled one has no inbound to
+        probe, so probing it would only manufacture failures. Returns
+        ``{"<provider>/<id>": probe_dict}``. Only meaningful while
         sing-box is running; if it isn't, every channel records a failure.
 
         Channels are probed concurrently on a capped worker pool, and the
@@ -422,7 +431,8 @@ class Engine:
         """
         from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 
-        channels = self.store.channels() if channels is None else channels
+        if channels is None:
+            channels = [ch for ch in self.store.channels() if ch.enabled]
         running = self.runner.is_running()
         out: dict[str, dict] = {}
         if not running:

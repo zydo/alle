@@ -173,16 +173,7 @@ function syncHeaderBusy() {
   el.speedAll.disabled = busy.has("all:probe") || busy.has("all:speed");
 }
 
-function chanRow(c) {
-  const key = chanKey(c);
-  const m = measured.get(key) || {};
-  const speed = m.speed_result || {};
-  // No STATE column (space is tight): when a channel is not healthy, show its
-  // short state word in the IP cell instead of leaving it blank — the verbose
-  // reason is the cell's tooltip. Healthy/pending-with-no-IP-yet stays empty.
-  const okStates = new Set(["Active", "Healthy", "Pending", ""]);
-  const st = c.state || "";
-  const showState = st && !okStates.has(st);
+function compactState(st) {
   // Compact the state word for the narrow IP cell (the full form is the tooltip):
   // "Reconnecting (4)" → "Reconnecting", "Reconnect failed" → "Failed".
   // Plain string ops (no regex): drop a trailing "(...)" suffix if present.
@@ -191,29 +182,70 @@ function chanRow(c) {
     const open = shortSt.lastIndexOf("(");
     if (open > 0) shortSt = shortSt.slice(0, open).trimEnd();
   }
-  if (shortSt === "Reconnect failed") shortSt = "Failed";
-  const probeDetail = c.probe?.detail;
-  const tip = probeDetail ? `${st} — ${probeDetail}` : st;
-  let ipCell = `<span class="ip"></span>`;
-  if (m.ip) {
-    ipCell = `<span class="ip copyable" data-copy="${esc(m.ip)}" title="Click to copy">${esc(m.ip)}</span>`;
-  } else if (showState) {
-    ipCell = `<span class="ip chan-state warn" title="${esc(tip)}">${esc(shortSt)}</span>`;
+  return shortSt === "Reconnect failed" ? "Failed" : shortSt;
+}
+
+function buildIpCell(off, m, c, st, shortSt) {
+  // No STATE column (space is tight): when a channel is not healthy, show its
+  // short state word in the IP cell instead of leaving it blank — the verbose
+  // reason is the cell's tooltip. Healthy/pending-with-no-IP-yet stays empty.
+  const okStates = new Set(["Active", "Healthy", "Pending", ""]);
+  const showState = st && !okStates.has(st);
+
+  if (off) {
+    // Administrative intent, not a failure: shown neutrally, never hidden.
+    return `<span class="ip chan-state muted" title="Disabled — not connected to the provider (no connection slot used)">Disabled</span>`;
   }
-  return `<div class="row dashchan body" data-provider="${esc(c.provider)}" data-id="${esc(c.name)}">
+  if (m.ip) {
+    return `<span class="ip copyable" data-copy="${esc(m.ip)}" title="Click to copy">${esc(m.ip)}</span>`;
+  }
+  if (showState) {
+    const probeDetail = c.probe?.detail;
+    const tip = probeDetail ? `${st} — ${probeDetail}` : st;
+    return `<span class="ip chan-state warn" title="${esc(tip)}">${esc(shortSt)}</span>`;
+  }
+  return `<span class="ip"></span>`;
+}
+
+function chanRow(c) {
+  const key = chanKey(c);
+  const off = c.enabled === false;
+  const m = measured.get(key) || {};
+  const speed = m.speed_result || {};
+  const st = c.state || "";
+  const shortSt = compactState(st);
+  const ipCell = buildIpCell(off, m, c, st, shortSt);
+  // A disabled channel has no inbound to probe or speed-test; its toggle
+  // flips back to enabled. The toggle greys out with the other actions while
+  // any test is in flight so state can't flip mid-run.
+  const testable = !off && !chanBusy(key);
+  const portCopy = `http://127.0.0.1:${esc(c.port_number)}`;
+  const latText = !off && isSet(m.latency_ms) ? `${esc(m.latency_ms)} ms` : "";
+  const sentText = isSet(m.sent) ? bytes(m.sent) : "";
+  const recvText = isSet(m.received) ? bytes(m.received) : "";
+  const downText = !off && speed.download_bps ? mbps(speed.download_bps) : "";
+  const upText = !off && speed.upload_bps ? mbps(speed.upload_bps) : "";
+  const probeAttr = testable ? "" : " disabled";
+  const speedAttr = testable ? "" : " disabled";
+  const toggleDisabled = chanBusy(key) ? " disabled" : "";
+  const toggleTitle = off ? "Enable" : "Disable";
+  const toggleLabel = off ? "▶" : "⏸";
+
+  return `<div class="row dashchan body${off ? " chan-off" : ""}" data-provider="${esc(c.provider)}" data-id="${esc(c.name)}">
     <span class="chan-label"><button class="name edit" data-label="${esc(c.label || "")}" title="Rename">${esc(c.label || c.name)}</button>
       <div class="ref">${esc(key)}</div></span>
     <span class="loc" title="${esc(loc(c))}">${esc(loc(c))}</span>
-    <span class="port copyable" data-copy="http://127.0.0.1:${esc(c.port_number)}" title="Click to copy">${esc(c.port)}</span>
+    <span class="port copyable" data-copy="${portCopy}" title="Click to copy">${esc(c.port)}</span>
     ${ipCell}
-    <span class="lat">${isSet(m.latency_ms) ? `${esc(m.latency_ms)} ms` : ""}</span>
-    <span class="mono">${isSet(m.sent) ? bytes(m.sent) : ""}</span>
-    <span class="mono">${isSet(m.received) ? bytes(m.received) : ""}</span>
-    <span class="mono">${speed.download_bps ? mbps(speed.download_bps) : ""}</span>
-    <span class="mono">${speed.upload_bps ? mbps(speed.upload_bps) : ""}</span>
+    <span class="lat">${latText}</span>
+    <span class="mono">${sentText}</span>
+    <span class="mono">${recvText}</span>
+    <span class="mono">${downText}</span>
+    <span class="mono">${upText}</span>
     <span class="row-actions channel-actions">
-      <button class="icon-btn" title="Probe" aria-label="Probe" data-probe${chanBusy(key) ? " disabled" : ""}>${spin(key, "probe", "◉")}</button>
-      <button class="icon-btn" title="Speed Test" aria-label="Speed Test" data-speed${chanBusy(key) ? " disabled" : ""}>${spin(key, "speed", GAUGE)}</button>
+      <button class="icon-btn" title="Probe" aria-label="Probe" data-probe${probeAttr}>${spin(key, "probe", "◉")}</button>
+      <button class="icon-btn" title="Speed Test" aria-label="Speed Test" data-speed${speedAttr}>${spin(key, "speed", GAUGE)}</button>
+      <button class="icon-btn" title="${toggleTitle}" aria-label="${toggleTitle}" data-toggle${toggleDisabled}>${toggleLabel}</button>
       <button class="icon-btn danger" title="Remove" aria-label="Remove" data-remove>×</button>
     </span>
   </div>`;
@@ -226,7 +258,7 @@ function renderChannels() {
     el.channels.innerHTML = `<div class="grid">${addRow}</div>`;
     return;
   }
-  const head = `<div class="row dashchan head"><span>Channel</span><span>Location</span><span>Port</span><span>IP</span><span>Latency</span><span>Sent</span><span>Received</span><span>Down SPD</span><span>Up SPD</span><span class="row-actions channel-actions channel-all-actions"><button class="icon-btn" id="probe-all" title="Probe All" aria-label="Probe all" data-probe-all>◉</button><button class="icon-btn" id="speed-all" title="Speed Test All" aria-label="Speed test all" data-speed-all>${GAUGE}</button></span></div>`;
+  const head = `<div class="row dashchan head"><span>Channel</span><span>Location</span><span>Port</span><span>IP</span><span>Latency</span><span>Sent</span><span>Received</span><span>Down Speed</span><span>Up Speed</span><span class="row-actions channel-actions channel-all-actions"><button class="icon-btn" id="probe-all" title="Probe All" aria-label="Probe all" data-probe-all>◉</button><button class="icon-btn" id="speed-all" title="Speed Test All" aria-label="Speed test all" data-speed-all>${GAUGE}</button></span></div>`;
   el.channels.innerHTML = `<div class="grid">${head}${chans.map(chanRow).join("")}${addRow}</div>`;
   syncHeaderBusy();
 }
@@ -356,9 +388,23 @@ async function onChannelClick(e) {
   if (!channel) return;
   if (e.target.closest("[data-probe]")) return runTest(channel, false);
   if (e.target.closest("[data-speed]")) return runTest(channel, true);
+  if (e.target.closest("[data-toggle]")) return toggleChannel(channel);
   if (e.target.closest("[data-remove]")) return removeChannel(channel);
   const nameBtn = e.target.closest(".name.edit");
   if (nameBtn) startRelabel(row, channel, nameBtn.dataset.label);
+}
+
+async function toggleChannel(c) {
+  const enable = c.enabled === false;
+  const res = await api.post(`/api/v1/channels/${c.provider}/${c.name}/enabled`, { enabled: enable });
+  if (res.ok) {
+    measured.delete(chanKey(c)); // stale probe/speed cells make no sense across the flip
+    toast(`${enable ? "Enabled" : "Disabled"} ${c.name}.`);
+    refreshStatus();
+  } else {
+    // A refused disable lists the routing rules that still target the channel.
+    toast(res.error, "err");
+  }
 }
 
 async function removeChannel(c) {
@@ -856,10 +902,12 @@ async function openAddChannel() {
 }
 
 function routeTargetOptions() {
+  // Disabled channels are not offered: a rule cannot target one (the API
+  // refuses it too — this just keeps the picker honest).
   return [
     { value: "direct", label: "Direct — No VPN" },
     { value: "block", label: "Block — Drop Traffic" },
-    ...((status?.channels || []).map((c) => ({ value: chanKey(c), label: c.label || c.name }))),
+    ...((status?.channels || []).filter((c) => c.enabled !== false).map((c) => ({ value: chanKey(c), label: c.label || c.name }))),
   ];
 }
 

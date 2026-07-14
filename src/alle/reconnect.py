@@ -99,6 +99,11 @@ def run_pass(
     now = time.time() if now is None else now
     restart_refs: list[str] = []
     for ch in store.channels():
+        if not ch.enabled:
+            # Never re-resolve or re-materialise a disabled channel — that
+            # would dial the provider again. Disabling also cleared its probe/
+            # reconnect bookkeeping, so there is nothing stale to act on.
+            continue
         probe = ch.probe or {}
         rc = dict(ch.reconnect or {})
 

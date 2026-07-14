@@ -425,10 +425,12 @@ def test_channels_ls_is_a_flat_table_with_separator(capsys, no_background, tmp_p
         "PORT",
         "COUNTRY",
         "CITY",
+        "STATUS",
     ]  # single header
     assert set(lines[1]) <= {"-", " "} and "-" in lines[1]  # dash separator
     # flat row led by the qualified id (unlabeled → LABEL falls back to the id)
     assert "protonvpn/wg_us_ca_842" in lines[2]
+    assert lines[2].rstrip().endswith("enabled")  # default STATUS
 
 
 def test_config_import_id_comes_from_filename(capsys, no_background, tmp_path):

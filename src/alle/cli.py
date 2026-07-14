@@ -8,9 +8,12 @@ under it (``alle channels add <name> --country …``). All of it lives in one
 The CLI only adapts terminal input/output to the shared application layer. A
 detached applier daemon watches the state file, makes the single sing-box
 process match it, and heartbeat-probes every channel — so adding or removing a
-channel is enough; there is no separate "apply" step. WireGuard is
-connectionless, so there is no enable/disable: a channel is "active" only if its
-latest probe succeeded.
+channel is enough; there is no separate "apply" step. Two distinct
+per-channel facts: ``channels enable``/``disable`` set *administrative intent*
+(a disabled channel is not materialised at all — no WireGuard endpoint, no
+keepalive, no probe — so it occupies no provider connection slot), while
+"active" is *liveness*: an enabled channel is active only if its latest probe
+succeeded.
 
 Read commands accept ``--json`` for **shell / cross-language scripting** (jq,
 monitoring hooks, CI): it is a direct serialization of the ``alle.service`` return
@@ -384,6 +387,33 @@ def cmd_channels_rm(args):
         all_=args.all,
     )
     _print_channel_removals(result)
+
+
+def cmd_channels_set_enabled(args):
+    enabled = args.channels_command == "enable"
+    verb = "enable" if enabled else "disable"
+    result = service.channel_set_enabled_many(
+        args.refs,
+        enabled,
+        provider=_resolve_provider(args.provider) if args.provider else None,
+        dry_run=args.dry_run,
+        all_=args.all,
+    )
+    if result["dry_run"]:
+        for item in result["channels"]:
+            if item["changed"]:
+                print(f"Would {verb} channel {item['ref']}.")
+            else:
+                print(f"Channel {item['ref']} is already {verb}d — nothing to do.")
+        return
+    for ref in result["wg_resolved"]:
+        print(f"Resolved a server for {ref} (it had no WireGuard config yet).")
+    for ref in result["changed"]:
+        print(f"{verb.capitalize()}d channel {ref}.")
+    for ref in result["already"]:
+        print(f"Channel {ref} is already {verb}d — nothing to do.")
+    if result["changed"]:
+        print("Applying… (see: alle status)")
 
 
 # ---- routes ------------------------------------------------------------------
@@ -770,6 +800,8 @@ def _print_bundle_summary(result: dict) -> None:
             f"  ! {ref}: could not resolve a fresh server — restored the "
             "bundle's snapshot (auto-reconnect refreshes it when possible)"
         )
+    for note in result.get("notes", []):
+        print(f"  note: {note}")
     if created:
         print(
             "Note: ports are allocated locally and never travel in a bundle — "
@@ -1135,6 +1167,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cr.add_argument("--dry-run", action="store_true", help="show what would be removed")
     cr.set_defaults(func=cmd_channels_rm)
+    for toggle, blurb in (
+        (
+            "enable",
+            "enable one or more disabled channels (materialise them again)",
+        ),
+        (
+            "disable",
+            "disable one or more channels — kept in config but not materialised: "
+            "no connection to the provider, so its connection-cap slot is freed",
+        ),
+    ):
+        ct = ch_sub.add_parser(toggle, help=blurb)
+        ct.add_argument(
+            "refs",
+            nargs="*",
+            help=f"channel name, glob, or provider/name ref to {toggle}",
+        )
+        ct.add_argument("--provider", help="scope channel names/globs to this provider")
+        ct.add_argument(
+            "--all",
+            action="store_true",
+            help=f"{toggle} every channel under --provider",
+        )
+        ct.add_argument("--dry-run", action="store_true", help="show what would change")
+        ct.set_defaults(func=cmd_channels_set_enabled)
 
     # routes
     ro = sub.add_parser(

@@ -259,6 +259,24 @@ alle channels rm 'united_states_*' --dry-run
 alle providers rm nordvpn protonvpn -y
 ```
 
+**Hold more channels than your plan's connection cap.** Some subscriptions
+limit simultaneous connections (NordVPN and Proton VPN allow ~10). A
+**disabled** channel stays in your config but is not materialised at all — no
+WireGuard handshake or keepalive toward the provider, so it uses **no
+connection slot**. Keep a stable of servers on hand and flip which ones are
+live:
+
+```bash
+alle channels disable japan_1            # free the slot; config + rules stay
+alle channels enable japan_1             # dial it again
+alle channels disable 'united_states_*'  # same ref grammar as rm
+```
+
+Disabled channels stay visible everywhere (`channels ls` grows a STATUS
+column; `test` shows a skipped `Disabled` row) and can't be targeted by
+routing rules while disabled. This is local intent only — it doesn't
+deregister the device from your provider account.
+
 For the complete command reference, see the
 [CLI Reference](docs/cli-reference.md).
 

@@ -37,6 +37,22 @@ keeps a restore working when fresh resolution *fails* (offline, API down,
 token rejected). Config channels' ``wg`` *is* their configuration — required
 in the bundle, restored verbatim, refreshed only by re-importing a newly
 downloaded ``.conf``.
+
+Channels round-trip their administrative ``enabled`` state. Exports write it
+**explicitly on every channel** (a bundle reader must never need to know any
+absent-key rule — same discipline as ``lan_direct``); a hand-written channel
+may omit it, and the meaning is per apply mode: on **import (merge)** an
+omitted ``enabled`` leaves an existing channel's state untouched — like the
+unstated router toggles, so an ad-hoc ``channels disable`` survives a
+re-import — while a new channel defaults to enabled; on **restore** (a
+whole-setup replace) omitted means enabled. A **disabled** channel is
+imported without ever touching the provider: no server resolution (no API
+call to pick one) and no probe — its country/city are instead checked against
+the provider's location catalog when reachable. It keeps the live params of
+an existing same-location channel, else the bundle's ``wg`` snapshot, else it
+lands wg-less and a later ``alle channels enable`` resolves it. A bundle
+ruleset can never target a channel the same bundle disables, mirroring the
+live restrict-only invariant.
 """
 
 from __future__ import annotations
@@ -56,7 +72,7 @@ from alle.providers import (
     known,
     provider_resolver,
 )
-from alle.state import Store, _slug
+from alle.state import ReferencedError, Store, _slug
 
 BUNDLE_KIND = "alle-bundle"
 BUNDLE_VERSION = 1
@@ -212,7 +228,10 @@ def export_bundle() -> dict:
 
 
 def _export_channel(ch) -> dict:
-    out: dict = {"country": ch.country, "city": ch.city}
+    # `enabled` is written explicitly (never relying on an absent-key rule):
+    # on a merge, an *omitted* key means "leave the channel's state alone",
+    # so an export — a faithful backup — must always state it.
+    out: dict = {"country": ch.country, "city": ch.city, "enabled": ch.enabled}
     if ch.label:
         out["label"] = ch.label
     if ch.wg:
@@ -260,13 +279,14 @@ def validate(
     stored_credentials_ok: bool = False,
     strict: bool = False,
     location_lookup=None,
+    check_locations: str = "all",
 ) -> dict:
     """Check the whole bundle; raise :class:`BundleError` with every problem.
 
     Returns the normalized parse: ``{"providers": {provider: {"credential",
-    "channels": {id: {"country", "city", "label", "wg"}}}}, "router":
-    {"killswitch", "lan_direct", "rulesets"}}`` where ``wg`` is None for
-    resolve-at-apply entries and each router key is None when the bundle
+    "channels": {id: {"country", "city", "label", "wg", "enabled"}}}},
+    "router": {"killswitch", "lan_direct", "rulesets"}}`` where ``wg`` is None
+    for resolve-at-apply entries and each router key is None when the bundle
     leaves it unstated.
 
     ``text`` is the raw YAML, used only to annotate errors with line numbers
@@ -277,7 +297,12 @@ def validate(
     self-contained restore/validate) requires the router toggles to be
     explicit when a router block is present. ``location_lookup(provider)``, if
     given, returns ``{country_lower: {city_lower, …}}`` so country/city are
-    checked against the provider's real locations.
+    checked against the provider's real locations; ``check_locations``
+    narrows that check to ``"disabled"`` channels only (the apply paths:
+    an enabled channel's location is proven by resolution itself, a disabled
+    one is never resolved so the catalog check is its only correctness gate).
+    The lookup is consulted lazily — a bundle with nothing to check fetches
+    no location list.
     """
     line_index = _line_index(text) if text else {}
     errors: list[tuple[str, str]] = []
@@ -301,6 +326,7 @@ def validate(
             errors,
             stored_credentials_ok=stored_credentials_ok,
             location_lookup=location_lookup,
+            check_locations=check_locations,
         )
         if parsed is not None:
             parsed_providers[str(provider)] = parsed
@@ -310,6 +336,16 @@ def validate(
         for provider, entry in parsed_providers.items()
         for cid in entry["channels"]
     } | set(extra_channel_refs)
+    # A ruleset may not target a channel this same bundle disables — the
+    # bundle-level mirror of the live restrict-only invariant. (A merge
+    # targeting an *existing* disabled channel is refused at apply, where the
+    # existing setup's enabled state is known.)
+    disabled_refs = {
+        f"{provider}/{cid}"
+        for provider, entry in parsed_providers.items()
+        for cid, ch in entry["channels"].items()
+        if ch.get("enabled") is False  # explicit only; unstated may be either
+    }
 
     parsed_router: dict = {"killswitch": None, "lan_direct": None, "rulesets": None}
     raw_router = data.get("router")
@@ -331,7 +367,7 @@ def validate(
         raw_rulesets = raw_router.get("rulesets")
         if raw_rulesets is not None:
             parsed_router["rulesets"] = _validate_rulesets(
-                raw_rulesets, channel_refs, errors
+                raw_rulesets, channel_refs, disabled_refs, errors
             )
 
     if errors:
@@ -362,6 +398,7 @@ def _validate_provider(
     *,
     stored_credentials_ok: bool,
     location_lookup=None,
+    check_locations: str = "all",
 ) -> dict | None:
     path = f"providers.{provider}"
     if provider not in known():
@@ -414,7 +451,17 @@ def _validate_provider(
                 )
             )
 
-    locations = location_lookup(provider) if location_lookup else None
+    # Lazy: the location list (a possible network fetch) is only pulled when a
+    # channel actually needs the check — e.g. an import whose channels are all
+    # enabled never fetches it.
+    locations_memo: list = []
+
+    def locations_for():
+        if not locations_memo:
+            locations_memo.append(
+                location_lookup(provider) if location_lookup else None
+            )
+        return locations_memo[0]
 
     channels: dict[str, dict] = {}
     raw_channels = entry.get("channels")
@@ -438,7 +485,8 @@ def _validate_provider(
             cpath,
             errors,
             token_provider=token_provider,
-            locations=locations,
+            locations_for=locations_for,
+            check_locations=check_locations,
         )
         if channel is not None:
             channels[cid] = channel
@@ -452,7 +500,8 @@ def _validate_channel(
     errors: list,
     *,
     token_provider: bool,
-    locations=None,
+    locations_for=None,
+    check_locations: str = "all",
 ) -> dict | None:
     if spec is None:
         spec = {}
@@ -467,15 +516,31 @@ def _validate_channel(
             value = ""
         fields[key] = (value or "").strip()
 
+    # Tri-state: True / False / None. None = the bundle leaves it unstated —
+    # a merge then keeps an existing channel's state (a new one is enabled),
+    # like the unstated router toggles; a restore reads it as enabled.
+    enabled = spec.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        errors.append((f"{path}.enabled", "must be true or false"))
+        enabled = None
+
     if token_provider:
         # country is the input the API resolves from — required, and checked
         # against the provider's real list when we have it; city is optional
-        # but must be a real city in that country when given.
+        # but must be a real city in that country when given. With
+        # check_locations="disabled" (the apply paths) only disabled channels
+        # are checked: an enabled one is about to be resolved, which proves
+        # its location anyway, while a disabled one is deliberately never
+        # resolved, so this format check is all the validation it gets.
         if not fields["country"]:
             errors.append((f"{path}.country", "is required for a token provider"))
-        elif locations is not None:
-            cities = locations.get(fields["country"].lower())
-            if cities is None:
+        elif locations_for is not None and (
+            check_locations == "all" or enabled is False
+        ):
+            locations = locations_for()
+            if locations is None:
+                pass  # catalog unreachable — the caller noted it; shape-only
+            elif (cities := locations.get(fields["country"].lower())) is None:
                 errors.append(
                     (
                         f"{path}.country",
@@ -503,7 +568,7 @@ def _validate_channel(
                 "can resolve a channel without a snapshot",
             )
         )
-    return {**fields, "wg": wg}
+    return {**fields, "wg": wg, "enabled": enabled}
 
 
 def _check_wg_key(path: str, value, errors: list) -> str:
@@ -609,7 +674,9 @@ def _validate_wg(wg, path: str, errors: list) -> dict | None:
     }
 
 
-def _validate_rulesets(raw, channel_refs: set[str], errors: list) -> list[dict]:
+def _validate_rulesets(
+    raw, channel_refs: set[str], disabled_refs: set[str], errors: list
+) -> list[dict]:
     out: list[dict] = []
     if not isinstance(raw, list):
         errors.append(("router.rulesets", "must be a list"))
@@ -631,6 +698,14 @@ def _validate_rulesets(raw, channel_refs: set[str], errors: list) -> list[dict]:
                 if target not in channel_refs:
                     errors.append(
                         (f"{path}.target", f"no channel {target!r} to route to")
+                    )
+                elif target in disabled_refs:
+                    errors.append(
+                        (
+                            f"{path}.target",
+                            f"channel {target!r} is disabled in this bundle — "
+                            "a rule cannot target a disabled channel",
+                        )
                     )
         except routes.RuleError as e:
             errors.append((f"{path}.target", str(e)))
@@ -663,9 +738,12 @@ def _validate_rulesets(raw, channel_refs: set[str], errors: list) -> list[dict]:
 
 
 def _resolve_token_wg(
-    parsed: dict, store: Store, *, stored_credentials_ok: bool
+    parsed: dict, store: Store, *, stored_credentials_ok: bool, merge: bool = True
 ) -> tuple[list[str], list[str]]:
     """Settle every token channel's ``wg`` (in place) before any mutation.
+
+    ``merge`` selects how an *unstated* ``enabled`` reads: on a merge it
+    inherits the existing channel's state, on a restore it means enabled.
 
     A token channel's WireGuard params are *derived* state, not configuration
     — the authoritative fields are the provider, token, and location. So, per
@@ -682,6 +760,12 @@ def _resolve_token_wg(
        apply still succeeds; the daemon's probe + auto-reconnect refresh it
        later. Only a wg-less channel with no snapshot to fall back on fails the
        whole apply.
+
+    **Disabled channels are exempt from fresh resolution** — the provider API
+    is never asked to pick a server for one. After the keep-existing check
+    (step 1, no API call), a disabled channel keeps the bundle's snapshot if
+    it has one, else stays wg-less: it can't be materialised anyway, and a
+    later ``alle channels enable`` resolves it then.
 
     This is the only networked step of an apply. Config channels are never
     touched — their snapshot is the source of truth. Returns ``(resolved,
@@ -717,6 +801,16 @@ def _resolve_token_wg(
             ):
                 ch["wg"] = copy.deepcopy(existing.wg)
                 continue
+            enabled = ch.get("enabled")
+            if enabled is None:
+                # unstated: a merge keeps the existing channel's state; a
+                # restore (and a brand-new channel) reads it as enabled
+                enabled = existing.enabled if merge and existing is not None else True
+            if not enabled:
+                # never resolve a channel that will be (or stay) disabled;
+                # keep the snapshot (which may be None — wg-less until
+                # enabled)
+                continue
             snapshot = ch["wg"]
             resolver = resolver_for(provider, creds)
             try:
@@ -740,7 +834,7 @@ def _resolve_token_wg(
     return resolved, fallback
 
 
-def apply_import(text: str) -> dict:
+def apply_import(text: str, *, location_lookup=None) -> dict:
     """Merge a bundle into the current setup (upsert by ``(provider, id)``).
 
     All-or-nothing: validation + network resolution stage everything first,
@@ -748,6 +842,10 @@ def apply_import(text: str) -> dict:
     transaction (:meth:`Store.merge_setup`) inside a setup transaction — a
     failure or crash anywhere before the state commit rolls the credentials
     back and leaves the setup untouched.
+
+    ``location_lookup`` (see :func:`validate`) backs the country/city check
+    for **disabled** channels — the ones this apply deliberately never
+    resolves, so the catalog is their only correctness gate.
     """
     data = loads(text)
     store = Store.load()
@@ -757,6 +855,8 @@ def apply_import(text: str) -> dict:
         text=text,
         extra_channel_refs=existing_refs,
         stored_credentials_ok=True,
+        location_lookup=location_lookup,
+        check_locations="disabled",
     )
     wg_resolved, wg_fallback = _resolve_token_wg(
         parsed, store, stored_credentials_ok=True
@@ -765,20 +865,37 @@ def apply_import(text: str) -> dict:
     creds_added: list[str] = []
     creds_replaced: list[str] = []
     router = parsed["router"]
-    with txn.setup_transaction("bundle import") as t:
-        for provider, entry in parsed["providers"].items():
-            if entry["credential"] is not None:
-                old = credentials.get(provider)
-                if old != entry["credential"]:
-                    (creds_added if old is None else creds_replaced).append(provider)
-                    credentials.set_(provider, entry["credential"])
-        merged = store.merge_setup(
-            {p: e["channels"] for p, e in parsed["providers"].items()},
-            router["rulesets"] or [],
-            killswitch=router["killswitch"],
-            lan_direct=router["lan_direct"],
-        )
-        t.commit()
+    try:
+        with txn.setup_transaction("bundle import") as t:
+            for provider, entry in parsed["providers"].items():
+                if entry["credential"] is not None:
+                    old = credentials.get(provider)
+                    if old != entry["credential"]:
+                        (creds_added if old is None else creds_replaced).append(
+                            provider
+                        )
+                        credentials.set_(provider, entry["credential"])
+            merged = store.merge_setup(
+                {p: e["channels"] for p, e in parsed["providers"].items()},
+                router["rulesets"] or [],
+                killswitch=router["killswitch"],
+                lan_direct=router["lan_direct"],
+            )
+            t.commit()
+    except ReferencedError as e:
+        # The bundle disables a channel an *existing* routing rule targets —
+        # only knowable at merge time. Nothing changed; list every blocker.
+        raise BundleError(
+            [
+                (
+                    "providers.{}.channels.{}.enabled".format(*ref.split("/", 1)),
+                    "cannot disable — routing rule(s) still reference it: "
+                    + ", ".join(r["id"] for r in rules_)
+                    + " (retarget or remove them first)",
+                )
+                for ref, rules_ in sorted(e.blockers.items())
+            ]
+        ) from e
 
     # Post-commit: re-created identities lift their metrics tombstones so
     # their traffic counts again.
@@ -847,13 +964,24 @@ def _setup_counts(channels_by_provider: dict[str, set], rulesets: int) -> dict:
     }
 
 
-def apply_restore(text: str) -> dict:
-    """Replace the whole setup with the bundle. Destructive — callers confirm."""
+def apply_restore(text: str, *, location_lookup=None) -> dict:
+    """Replace the whole setup with the bundle. Destructive — callers confirm.
+
+    ``location_lookup`` backs the disabled-channel country/city check, exactly
+    as in :func:`apply_import`.
+    """
     data = loads(text)
-    parsed = validate(data, text=text, stored_credentials_ok=False, strict=True)
+    parsed = validate(
+        data,
+        text=text,
+        stored_credentials_ok=False,
+        strict=True,
+        location_lookup=location_lookup,
+        check_locations="disabled",
+    )
     store = Store.load()
     wg_resolved, wg_fallback = _resolve_token_wg(
-        parsed, store, stored_credentials_ok=False
+        parsed, store, stored_credentials_ok=False, merge=False
     )
 
     old_providers = set(store.provider_names())
