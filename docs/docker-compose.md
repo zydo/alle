@@ -24,12 +24,15 @@ ports (proxy hub) or *joining* its network namespace (gateway).
 
 ## Prerequisites
 
-A registry-published image is planned; until then, build it from the repo:
+Install Docker Engine with Docker Compose, then pull the official image from
+Docker Hub (Compose will also pull it automatically on first use):
 
 ```bash
-git clone https://github.com/zydo/alle && cd alle
-docker build -t alle .
+docker pull ziyudo/alle:latest
 ```
+
+The examples use `latest`; pin a release tag instead when you want reproducible
+deployments.
 
 ## Step 1 — author the bundle
 
@@ -89,7 +92,7 @@ network tricks:
 # compose.yaml
 services:
   alle:
-    image: alle
+    image: ziyudo/alle:latest
     restart: unless-stopped
     volumes:
       - alle-state:/var/lib/alle                 # channels/keys/binary cache survive recreates
@@ -148,7 +151,7 @@ mode scoped to the container — the host's routes are never touched:
 ```yaml
 services:
   alle:
-    image: alle
+    image: ziyudo/alle:latest
     restart: unless-stopped
     cap_add: [NET_ADMIN]               # tun creation + route table (this netns only)
     devices: [/dev/net/tun]
@@ -201,7 +204,7 @@ as files, which pairs with `token_file`:
 ```yaml
 services:
   alle:
-    image: alle
+    image: ziyudo/alle:latest
     restart: unless-stopped
     secrets: [nordvpn_token]
     volumes:
@@ -230,10 +233,10 @@ credential:
   unchanged ones aren't touched, and removed *rulesets* re-append (prune old
   ones with `alle routes …` or do a one-off destructive sync:
   `docker compose exec alle alle import --replace --yes /etc/alle/bundle.yaml`).
-- **Upgrade alle** — rebuild the image from a newer checkout, then
-  `docker compose up -d` (recreates the container; the volume carries the
-  setup over). There is no in-container self-upgrade — the image is
-  immutable by design.
+- **Upgrade alle** — run `docker compose pull alle`, then `docker compose up
+  -d` (recreates the container; the volume carries the setup over). If you pin
+  a release tag, update that tag in `compose.yaml` first. There is no
+  in-container self-upgrade — the image is immutable by design.
 - **Backup** — `docker compose exec alle alle export --out - >
   backup.yaml`. The output contains secrets; treat it like a password file.
 - **Watch health** — `docker compose ps` shows the health state;
@@ -242,12 +245,12 @@ credential:
 
 ## Troubleshooting
 
-| Symptom                                                   | Likely cause / fix                                                                                                                                                                                    |
-| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Container exits immediately at start                      | The bundle failed validation — the entrypoint fails loudly. `docker compose logs alle` shows every blocker with line numbers; fix `bundle.yaml`.                                                      |
-| `environment variable 'NORDVPN_TOKEN' is not set` in logs | The variable didn't reach the container: set it in `.env`, the shell, or switch to compose secrets + `token_file`.                                                                                    |
+| Symptom                                                   | Likely cause / fix                                                                                                                                                                                                                                                                                                        |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Container exits immediately at start                      | The bundle failed validation — the entrypoint fails loudly. `docker compose logs alle` shows every blocker with line numbers; fix `bundle.yaml`.                                                                                                                                                                          |
+| `environment variable 'NORDVPN_TOKEN' is not set` in logs | The variable didn't reach the container: set it in `.env`, the shell, or switch to compose secrets + `token_file`.                                                                                                                                                                                                        |
 | A service can't reach `alle:20010`                        | The port isn't declared in the bundle (allocation order gave it another number — `docker compose exec alle alle status` shows actual ports), the channel is **disabled** (a disabled channel's port isn't listening — `alle channels ls` shows STATUS; enable it), or the two services are on different compose networks. |
-| First start is slow / unhealthy briefly                   | The one-time sing-box download into the volume. The health check's start period covers it; it never repeats while the volume lives.                                                                   |
-| `alle tun on` says it needs privileges                    | The gateway variant's three grants are missing: `cap_add: [NET_ADMIN]`, `devices: [/dev/net/tun]`, `ALLE_RUN_AS_ROOT=1` — then recreate the container.                                                |
-| Joined container has no network at all                    | Kill-switch doing its job while the tunnel is down (check `docker compose exec alle alle status`), or the alle container restarted and the joined service needs its compose-driven restart to finish. |
-| Web UI unreachable from the host                          | By design: it stays loopback-only inside the container (its auth model is built for one loopback caller). Use `docker exec` for management.                                                           |
+| First start is slow / unhealthy briefly                   | The one-time sing-box download into the volume. The health check's start period covers it; it never repeats while the volume lives.                                                                                                                                                                                       |
+| `alle tun on` says it needs privileges                    | The gateway variant's three grants are missing: `cap_add: [NET_ADMIN]`, `devices: [/dev/net/tun]`, `ALLE_RUN_AS_ROOT=1` — then recreate the container.                                                                                                                                                                    |
+| Joined container has no network at all                    | Kill-switch doing its job while the tunnel is down (check `docker compose exec alle alle status`), or the alle container restarted and the joined service needs its compose-driven restart to finish.                                                                                                                     |
+| Web UI unreachable from the host                          | By design: it stays loopback-only inside the container (its auth model is built for one loopback caller). Use `docker exec` for management.                                                                                                                                                                               |

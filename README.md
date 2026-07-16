@@ -86,7 +86,7 @@ bypass the VPN and expose your home address, alle captures and rejects it.
 | -------- | ------------------------------------------- |
 | macOS    | Supported                                   |
 | Linux    | Supported                                   |
-| Docker   | Supported — build from the repo (see below) |
+| Docker   | Supported — `ziyudo/alle` on Docker Hub     |
 | Windows  | Planned                                     |
 
 **Features**
@@ -98,7 +98,7 @@ bypass the VPN and expose your home address, alle captures and rejects it.
 | Web UI            | Dashboard (channels, probe/speed, routes, kill-switch) + Logs page                                               |
 | Docker            | Container profile: proxy hub for compose networks, VPN gateway container (tun), declarative boot config          |
 | Desktop companion | Planned                                                                                                          |
-| Distribution      | PyPI CLI package; registry-published Docker image and native installers planned                                  |
+| Distribution      | PyPI CLI package and Docker Hub image; native installers planned                                                  |
 
 ## Install
 
@@ -138,15 +138,14 @@ Also works: `python -m pip install alle-proxy` into an environment you manage,
 or one-off runs with `uvx --from alle-proxy alle --help`.
 
 **In Docker** — for servers and compose stacks, alle also runs as a container
-(a registry-published image is planned; for now, build from the repo):
+from Docker Hub:
 
 ```bash
-git clone https://github.com/zydo/alle && cd alle
-docker build -t alle .
+docker pull ziyudo/alle:latest
 docker run -d --name alle --restart unless-stopped \
   -v alle-state:/var/lib/alle \
   -v ./bundle.yaml:/etc/alle/bundle.yaml:ro \
-  alle
+  ziyudo/alle:latest
 docker exec alle alle status        # manage with the same CLI, via exec
 ```
 
@@ -456,7 +455,7 @@ patterns:
   ```yaml
   services:
     alle:
-      image: alle
+      image: ziyudo/alle:latest
       restart: unless-stopped
       volumes: [alle-state:/var/lib/alle, ./bundle.yaml:/etc/alle/bundle.yaml:ro]
       environment: {NORDVPN_TOKEN: "${NORDVPN_TOKEN}"}
@@ -543,8 +542,6 @@ Planned next steps:
 
 - More WireGuard-capable VPN providers. See
   [VPN Provider Research](docs/vpn-provider-research.md).
-- A registry-published Docker image (the Dockerfile ships today; publishing is
-  CI work).
 - Desktop companion with OS-level VPN integration.
 - Windows support and broader distribution.
 

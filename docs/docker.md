@@ -10,6 +10,10 @@ host install of alle behaves exactly as before (loopback-only proxy ports,
 OS-assigned port numbers, `alle daemon install` lifecycle); the image simply
 ships with the container knobs turned on.
 
+The official image is [`ziyudo/alle`](https://hub.docker.com/r/ziyudo/alle) on
+Docker Hub. The examples use `latest`; pin a release tag instead when you want
+reproducible deployments.
+
 Two ways to use it:
 
 1. **Proxy hub** — other containers on the same Docker network (or, if you
@@ -105,7 +109,7 @@ which also means a bundle full of held spares applies fine offline.
 ```yaml
 services:
   alle:
-    image: alle    # built from this repo's Dockerfile
+    image: ziyudo/alle:latest
     restart: unless-stopped
     volumes:
       - alle-state:/var/lib/alle
@@ -145,7 +149,7 @@ containers):
 ```yaml
 services:
   alle:
-    image: alle
+    image: ziyudo/alle:latest
     restart: unless-stopped
     cap_add: [NET_ADMIN]
     devices: [/dev/net/tun]
