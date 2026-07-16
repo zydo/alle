@@ -4,7 +4,8 @@
 
 <p align="center">
   <a href="https://github.com/zydo/alle/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/zydo/alle/ci.yml?branch=main&amp;label=CI" alt="CI"></a>
-  <a href="https://pypi.org/project/alle-proxy/"><img src="https://img.shields.io/pypi/v/alle-proxy.svg" alt="PyPI"></a>
+  <a href="https://pypi.org/project/alle-proxy/"><img src="https://img.shields.io/pypi/v/alle-proxy.svg?label=PyPI" alt="PyPI"></a>
+  <a href="https://hub.docker.com/r/ziyudo/alle"><img src="https://img.shields.io/docker/v/ziyudo/alle?sort=semver&amp;label=Docker" alt="Docker"></a>
 </p>
 
 # alle
@@ -82,12 +83,12 @@ bypass the VPN and expose your home address, alle captures and rejects it.
 
 **Platforms**
 
-| Platform | Support                                     |
-| -------- | ------------------------------------------- |
-| macOS    | Supported                                   |
-| Linux    | Supported                                   |
-| Docker   | Supported — `ziyudo/alle` on Docker Hub     |
-| Windows  | Planned                                     |
+| Platform | Support                                 |
+| -------- | --------------------------------------- |
+| macOS    | Supported                               |
+| Linux    | Supported                               |
+| Docker   | Supported — `ziyudo/alle` on Docker Hub |
+| Windows  | Planned                                 |
 
 **Features**
 
@@ -98,7 +99,7 @@ bypass the VPN and expose your home address, alle captures and rejects it.
 | Web UI            | Dashboard (channels, probe/speed, routes, kill-switch) + Logs page                                               |
 | Docker            | Container profile: proxy hub for compose networks, VPN gateway container (tun), declarative boot config          |
 | Desktop companion | Planned                                                                                                          |
-| Distribution      | PyPI CLI package and Docker Hub image; native installers planned                                                  |
+| Distribution      | PyPI CLI package and Docker Hub image; native installers planned                                                 |
 
 ## Install
 
