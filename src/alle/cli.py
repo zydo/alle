@@ -7,8 +7,8 @@ under it (``alle channels add <name> --country …``). All of it lives in one
 
 The CLI only adapts terminal input/output to the shared application layer. A
 detached applier daemon watches the state file, makes the single sing-box
-process match it, and heartbeat-probes every channel — so adding or removing a
-channel is enough; there is no separate "apply" step. Two distinct
+process match it, and heartbeat-probes every enabled channel — so adding or
+removing a channel is enough; there is no separate "apply" step. Two distinct
 per-channel facts: ``channels enable``/``disable`` set *administrative intent*
 (a disabled channel is not materialised at all — no WireGuard endpoint, no
 keepalive, no probe — so it occupies no provider connection slot), while
@@ -288,7 +288,12 @@ def cmd_providers_rm(args):
 def cmd_channels_add(args):
     provider = _resolve_provider(args.provider)
     result = service.channel_add(
-        provider, args.country, args.city, args.config, args.label or ""
+        provider,
+        args.country,
+        args.city,
+        args.config,
+        args.label or "",
+        port=args.port or 0,
     )
     channel = result["channel"]
     labelled = f' labelled "{channel.label}"' if channel.label else ""
@@ -804,8 +809,9 @@ def _print_bundle_summary(result: dict) -> None:
         print(f"  note: {note}")
     if created:
         print(
-            "Note: ports are allocated locally and never travel in a bundle — "
-            "point apps at the ports shown by: alle status"
+            "Note: unless a channel declares an explicit `port:`, ports are "
+            "allocated locally (exports never carry them) — point apps at the "
+            "ports shown by: alle status"
         )
 
 
@@ -925,6 +931,27 @@ def cmd_restart(args):
     print("Alle restarted. See: alle status")
 
 
+def cmd_health(args):
+    """Liveness probe with a strict exit code: 0 healthy, 1 not. Made for
+    monitoring (container HEALTHCHECK, cron, scripts) — `alle status` is the
+    human/diagnostic view."""
+    result = service.health()
+    if args.json:
+        import json
+
+        print(json.dumps(result))
+    else:
+        detail = f"daemon={'up' if result['daemon'] else 'down'} "
+        detail += f"sing-box={'up' if result['singbox'] else 'down'} "
+        detail += f"channels={result['channels']}"
+        runtime_status = (result.get("runtime") or {}).get("singbox")
+        if runtime_status and runtime_status != "ok":
+            detail += f" ({runtime_status})"
+        print(("healthy: " if result["ok"] else "unhealthy: ") + detail)
+    if not result["ok"]:
+        sys.exit(1)
+
+
 # ---- logs ------------------------------------------------------------------
 
 
@@ -977,6 +1004,21 @@ def cmd_daemon_status(args):
 
 
 def cmd_applier(args):
+    daemon.run_applier()
+
+
+def cmd_run(args):
+    """The daemon loop in the foreground — a container's PID 1 (or an
+    interactive debug run). Identical to the hidden ``applier`` body except
+    the operation log is also echoed to stderr, so `docker logs` (or the
+    terminal) shows the same timeline as `alle logs`."""
+    applog.echo_stderr = True
+    # The foreground process IS the daemon: keep any work it triggers
+    # (Web-UI-requested mutations calling ensure_running) from spawning a
+    # second, detached applier around it. ALLE_APPLIER, not ALLE_SERVICE —
+    # a plain foreground run has no supervisor to respawn it, so it must not
+    # arm the supervised self-exit-on-upgrade.
+    os.environ.setdefault("ALLE_APPLIER", "1")
     daemon.run_applier()
 
 
@@ -1130,6 +1172,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--label",
         help='optional display label, e.g. "Video Streaming - US" '
         "(the channel id stays the handle commands use)",
+    )
+    ca.add_argument(
+        "--port",
+        type=int,
+        help="explicit local proxy port for the channel (default: OS-assigned); "
+        "declare one when something outside alle must know it ahead of time",
     )
     ca.set_defaults(func=cmd_channels_add)
     cls = ch_sub.add_parser(
@@ -1320,6 +1368,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "restart", help="stop then start (reload after upgrades/config)"
     ).set_defaults(func=cmd_restart)
+    sub.add_parser(
+        "run",
+        help="run the daemon in the foreground (containers/PID 1, debugging; "
+        "logs also stream to stderr)",
+    ).set_defaults(func=cmd_run)
+    he = sub.add_parser(
+        "health",
+        help="cheap liveness check with a strict exit code (0 healthy, 1 not) "
+        "— for monitoring and container HEALTHCHECKs",
+    )
+    he.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    he.set_defaults(func=cmd_health)
     tn = sub.add_parser(
         "tun",
         help="system-wide VPN mode: a TUN device routes ALL system traffic "

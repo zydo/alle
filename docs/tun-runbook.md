@@ -39,12 +39,12 @@ pending trial and its remaining time.
 Standing rule: live tun configs never run on the dev host during agent
 sessions. What runs where:
 
-| Tier | Environment                                    | What runs there                                                                                                                                                                | Setup / reset                                                                                                                                                                                                                               |
-| ---- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1    | dev host                                       | config-generation tests (`uv run pytest`), `sing-box check` of generated configs — ~90% of the work, and all of CI                                                             | nothing beyond the repo checkout                                                                                                                                                                                                            |
-| 2    | Linux container (`scripts/tun-sandbox/run.sh`) | live tun: route seizure, DNS hijack, per-rule matching, kill-switch, loopback bypass, teardown — in an isolated network namespace, zero host risk                              | Docker only; containers are `--rm` (nothing persists except the git-ignored `.tun-sandbox-cache/` binary cache)                                                                                                                             |
+| Tier | Environment                                    | What runs there                                                                                                                                                                | Setup / reset                                                                                                                                                                                                                                                                  |
+| ---- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1    | dev host                                       | config-generation tests (`uv run pytest`), `sing-box check` of generated configs — ~90% of the work, and all of CI                                                             | nothing beyond the repo checkout                                                                                                                                                                                                                                               |
+| 2    | Linux container (`scripts/tun-sandbox/run.sh`) | live tun: route seizure, DNS hijack, per-rule matching, kill-switch, loopback bypass, teardown — in an isolated network namespace, zero host risk                              | Docker only; containers are `--rm` (nothing persists except the git-ignored `.tun-sandbox-cache/` binary cache)                                                                                                                                                                |
 | 3    | macOS guest VM (Tart)                          | Darwin specifics: utun naming, Darwin `auto_route`, `strict_route` (upstream documents no macOS semantics), mDNSResponder/DNS-hijack interplay — the checklist below, over SSH | `brew trust cirruslabs/cli && brew install cirruslabs/cli/tart`; `tart clone ghcr.io/cirruslabs/macos-tahoe-base:latest tahoe-base` — SSH (`admin`/`admin`, passwordless sudo) **is** enabled in the base image; give the first boot a few minutes before concluding otherwise |
-| —    | dev host, live                                 | **final acceptance only**: human at keyboard, `--trial` armed                                                                                                                  | see checklist step 1                                                                                                                                                                                                                        |
+| —    | dev host, live                                 | **final acceptance only**: human at keyboard, `--trial` armed                                                                                                                  | see checklist step 1                                                                                                                                                                                                                                                           |
 
 Tier 2 entrypoints:
 
@@ -54,6 +54,14 @@ scripts/tun-sandbox/run.sh /repo/scripts/tun-sandbox/engine-smoke.sh  # the engi
 scripts/tun-sandbox/run.sh /repo/scripts/tun-sandbox/setcap-smoke.sh  # Linux setcap (no-root) privilege path
 scripts/tun-sandbox/run.sh bash                                   # interactive shell
 ```
+
+Related but distinct: tun-in-a-container is also a supported *product* shape
+now — the Docker image's gateway mode (`docs/docker.md`,
+`docs/docker-compose.md`) runs the same tun core inside the container's own
+netns with `--cap-add NET_ADMIN --device /dev/net/tun`. The Tier 2 sandbox is
+its test harness ancestor; the runbook's host-safety rules don't apply there
+because a container netns is exactly the isolation this tier map exists to
+provide.
 
 Tier 3 connect / reset recipe (verified 2026-07-11 against
 `macos-tahoe-base`, macOS 26.5):

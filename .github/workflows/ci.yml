@@ -48,3 +48,60 @@ jobs:
           cache-suffix: test-py${{ matrix.python-version }}
       - run: uv sync --all-extras
       - run: uv run pytest -q
+
+  # Build the container image and boot it against a synthetic no-credential
+  # bundle, gated on the same `alle health` check the image's HEALTHCHECK
+  # runs — so a PR can't silently break the Dockerfile, the entrypoint, or
+  # the bundle-apply-at-start contract. The dummy WireGuard keys never pass
+  # probes; everything under test (build, import, ports, health) is
+  # independent of tunnel health. The only network fetch is the pinned,
+  # checksum-verified sing-box download on first start.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Build image
+        run: docker build -t alle:ci .
+      - name: Boot with a synthetic bundle
+        run: |
+          key=$(python3 -c 'import base64; print(base64.b64encode(bytes([7]*32)).decode())')
+          cat > /tmp/alle-bundle.yaml <<EOF
+          kind: alle-bundle
+          bundle_version: 1
+          providers:
+            protonvpn:
+              channels:
+                us_test:
+                  port: 25000
+                  wg:
+                    private_key: $key
+                    address: [10.5.0.2/32]
+                    peer: {public_key: $key, endpoint_host: 192.0.2.10, endpoint_port: 51820,
+                           allowed_ips: [0.0.0.0/0], keepalive: 25}
+          router: {killswitch: false, lan_direct: true}
+          EOF
+          docker run -d --name alle-ci \
+            -v alle-ci-state:/var/lib/alle \
+            -v /tmp/alle-bundle.yaml:/etc/alle/bundle.yaml:ro alle:ci
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 30); do
+            if docker exec alle-ci alle health; then exit 0; fi
+            sleep 5
+          done
+          echo "::error::container never became healthy"
+          docker logs alle-ci
+          exit 1
+      - name: Assert the bundle applied
+        run: |
+          docker exec alle-ci alle channels ls | tee /tmp/ls.out
+          grep -q "us_test" /tmp/ls.out
+          grep -q ":25000" /tmp/ls.out
+          # the image profile widens binds to the container network
+          docker exec alle-ci sh -c 'grep -o "\"listen\": \"[^\"]*\"" /var/lib/alle/singbox.json | sort -u' \
+            | grep -q '0.0.0.0'
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs alle-ci || true

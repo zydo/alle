@@ -37,6 +37,8 @@ omit the prefix.
   - [`alle locations`](#alle-locations)
   - [`alle status`](#alle-status)
   - [`alle start` / `stop` / `restart`](#alle-start--stop--restart)
+  - [`alle run`](#alle-run)
+  - [`alle health [--json]`](#alle-health---json)
   - [`alle tun [on|off]`](#alle-tun-onoff)
   - [`alle test`](#alle-test)
   - [`alle export [--out <file>]`](#alle-export---out-file)
@@ -52,6 +54,7 @@ omit the prefix.
   - [`alle version`](#alle-version)
   - [Output conventions](#output-conventions)
   - [Exit codes](#exit-codes)
+  - [Environment variables](#environment-variables)
   - [Files](#files)
 
 ## Conventions
@@ -221,6 +224,15 @@ Both forms accept `--label "<text>"` to give the channel a friendly display name
 ```bash
 alle channels add nordvpn --country "United States" --label "Streaming - US"
 ```
+
+Both forms also accept `--port <n>` to **declare** the channel's local proxy
+port instead of taking an OS-assigned one — for when something outside alle
+(a firewall rule, a compose file publishing the port) must know it ahead of
+time. A declared port that another channel (or the router entrypoint) already
+holds is refused loudly; nothing is ever silently moved. Without `--port`,
+allocation is OS-assigned exactly as before. (`ALLE_PORT_BASE=<n>` switches
+the *allocator* to sequential-from-`n` — an opt-in used by the container
+image; see `docs/docker.md`.)
 
 ### `alle channels ls [--json|--ids|--refs]`
 
@@ -550,6 +562,9 @@ Alle - Active
   Web UI    http://alle-cb9cd104.localhost:58601  (open it: alle ui)
 ```
 
+A provider's count shows the enabled split (`6 channels (4 enabled)`) only
+when some of its channels are [disabled](#alle-channels-enabledisable-channel).
+
 The router line always states the entrypoint's full posture — `pass-through
 (no rules)`, or the rule count plus the two priority boundaries: the built-in
 LAN block (`LAN bypasses VPN` / `LAN follows rules`) and unmatched handling
@@ -572,6 +587,34 @@ is a summary.
 alle start
 alle restart
 alle stop
+```
+
+---
+
+## `alle run`
+
+The same daemon loop, in the **foreground**: the process does not detach, and
+every operation-log line is also written to stderr. This is what a container
+runs as PID 1 (`docker logs` gets the timeline; a restart policy replaces the
+login service — see `docs/docker.md`), and it doubles as an interactive way
+to watch the daemon work. `Ctrl-C`/SIGTERM stop it cleanly. Everything else —
+locking, pidfile, the Web UI thread — is identical to the background daemon,
+so a foreground run and `alle start` exclude each other like two daemons
+always have.
+
+---
+
+## `alle health [--json]`
+
+A **cheap liveness probe with a strict exit code**: `0` when the daemon is
+running and sing-box is up, `1` otherwise. Built for machines — container
+`HEALTHCHECK`s, cron, monitoring — where [`alle status`](#alle-status) is the
+human/diagnostic view. No probes and no network I/O: two pidfile checks and a
+state read.
+
+```bash
+alle health           # healthy: daemon=up sing-box=up channels=3
+alle health --json    # {"ok": true, "daemon": true, "singbox": true, ...}
 ```
 
 ---
@@ -692,22 +735,26 @@ cumulative traffic: `LABEL`, `ID`, `PORT`, `COUNTRY`, `CITY`, `STATE`,
 counters began). With `--channel`, test just one channel by id. `STATE` is
 `Healthy`, or the failure reason (`Stopped` while the runtime is down,
 otherwise the probe error — e.g. `Timeout`, `Failed`); a failing channel marks
-its own row, it never aborts the rest of the run. Every channel table shares
-the same `LABEL` + `ID` lead — `LABEL` is the display name (the id when no
-label is set), `ID` is the provider-qualified ref commands take.
+its own row, it never aborts the rest of the run. A
+[disabled](#alle-channels-enabledisable-channel) channel is listed too —
+skipped with `STATE` `Disabled`, not probed (it has no inbound to probe) and
+never counted as failed. Every channel table shares the same `LABEL` + `ID`
+lead — `LABEL` is the display name (the id when no label is set), `ID` is the
+provider-qualified ref commands take.
 
 ```text
-LABEL         ID                      PORT    COUNTRY        CITY        STATE    LATENCY  IP             SENT      RECV
-------------  ----------------------  ------  -------------  ----------  -------  -------  -------------  --------  --------
-Test runner   nordvpn/japan_1         :53124  Japan          (Any City)  Healthy  398.0ms  93.118.43.151  104.0 MB  396.7 MB
-wg_us_ca_842  protonvpn/wg_us_ca_842  :53126  United States  California  Timeout  -        -              28.1 MB   141.8 MB
+LABEL         ID                      PORT    COUNTRY        CITY        STATE     LATENCY  IP             SENT      RECV
+------------  ----------------------  ------  -------------  ----------  --------  -------  -------------  --------  --------
+Test runner   nordvpn/japan_1         :53124  Japan          (Any City)  Healthy   398.0ms  93.118.43.151  104.0 MB  396.7 MB
+seattle_1     nordvpn/seattle_1       :53125  United States  Seattle     Disabled  -        -              12.5 MB   88.0 MB
+wg_us_ca_842  protonvpn/wg_us_ca_842  :53126  United States  California  Timeout   -        -              28.1 MB   141.8 MB
 ```
 
 Add `--speed` to run the slower download/upload test after the fresh
 connectivity probe; it appends `DOWNLOAD` and `UPLOAD` columns. Speed tests run
-only for channels that were healthy in that same probe; an unhealthy channel
-keeps its row (failure reason in `STATE`, `-` in the speed columns) while the
-others proceed.
+only for channels that were healthy in that same probe; an unhealthy or
+disabled channel keeps its row (reason in `STATE`, `-` in the speed columns)
+while the others proceed.
 
 In an interactive terminal `alle test --speed` **streams**: the table header
 prints up front and each channel's row appears the moment its own test completes
@@ -1030,6 +1077,24 @@ alle version
   credential, missing config file, etc.); the message explains what to fix.
 - `2` — argument/usage error (argparse); help is printed.
 - `130` — interrupted (Ctrl-C).
+
+## Environment variables
+
+All optional; **every one unset = the behavior documented everywhere else in
+this reference.** They exist for deployment profiles (the Docker image sets
+several — see `docs/docker.md`) and for hermetic testing:
+
+| Variable         | Effect                                                                                                                                                                   |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ALLE_HOME`      | State directory (default `~/.alle`).                                                                                                                                     |
+| `ALLE_LISTEN`    | Bind address for channel + router proxy inbounds (default `127.0.0.1`). The container image sets `0.0.0.0`; invalid values are logged and ignored, never widened.        |
+| `ALLE_PORT_BASE` | Allocate new ports sequentially from this number instead of the OS ephemeral pool — deterministic, publishable ports. Declared `--port`/bundle `port:` values still win. |
+| `ALLE_SINGBOX`   | Path to a pre-provisioned sing-box binary. Still verified against the pinned SHA-256 on every start; a mismatch is a hard error, never a re-download.                    |
+| `ALLE_CONTAINER` | Marks the process as containerized (guardrails + hint text only — never changes binds, ports, or lifecycle by itself).                                                   |
+| `ALLE_BUNDLE`    | Read by the container entrypoint only: the bundle path applied at boot (default `/etc/alle/bundle.yaml`).                                                                |
+
+(`ALLE_SERVICE` / `ALLE_APPLIER` are internal markers set by the login service,
+the image, and `alle run` — not user knobs.)
 
 ## Files
 

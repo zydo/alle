@@ -37,10 +37,16 @@ bundle_version: 1      # required
 providers:
   # per-provider entries — see below
 router:
+  port: 20000          # optional — declare the router entrypoint's port
   killswitch: false    # optional (default false)
   lan_direct: true     # optional (default true)
   rulesets: []         # optional
 ```
+
+`port` keys (here and per channel) are **declarations** for setups where
+something outside alle — a firewall rule, a compose file — must know a port
+ahead of time. Omit them (the default) and ports are allocated locally,
+exactly as before; exports never carry them.
 
 The two archetypes fill their `providers` entry differently: **token
 providers** carry a credential and let alle derive WireGuard material;
@@ -74,14 +80,32 @@ providers:
 
 Field rules for a token channel:
 
-| Field                | Required?        | Notes                                                                                                                                      |
-| -------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| channel id (the key) | **yes**          | lowercase slug (`a-z`, `0-9`, `_`); the permanent handle used by rulesets and status. See the convention below.                            |
-| `country`            | **yes**          | it is the input the provider API resolves a server from.                                                                                   |
-| `city`               | no               | omit for the fastest city in the country.                                                                                                  |
-| `label`              | no (recommended) | friendly display name shown in status and the Web UI.                                                                                      |
-| `wg`                 | **no — omit**    | resolved from the token at apply. If you *do* include one (an export always does), it is only a fallback used when the API is unreachable. |
+| Field                | Required?        | Notes                                                                                                                                                                           |
+| -------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| channel id (the key) | **yes**          | lowercase slug (`a-z`, `0-9`, `_`); the permanent handle used by rulesets and status. See the convention below.                                                                 |
+| `country`            | **yes**          | it is the input the provider API resolves a server from.                                                                                                                        |
+| `city`               | no               | omit for the fastest city in the country.                                                                                                                                       |
+| `label`              | no (recommended) | friendly display name shown in status and the Web UI.                                                                                                                           |
+| `port`               | no               | **declare** the channel's local proxy port instead of taking an allocated one — for firewall rules/compose files that must know it. Clashes are rejected, never silently moved. |
+| `wg`                 | **no — omit**    | resolved from the token at apply. If you *do* include one (an export always does), it is only a fallback used when the API is unreachable.                                      |
 | `enabled`            | no               | tri-state. `false` imports the channel **disabled**: held in config but never dialled — no server resolution at apply, no probe, no provider connection slot used (see below). `true` (re-)enables it. **Omitted** = on `import` an existing channel keeps its current state (an ad-hoc `channels disable` survives re-applying the bundle); a new channel starts enabled. |
+
+**Keeping the token out of the file.** Instead of the inline `token`, a
+credential field can be *indirect* — resolved when the bundle is applied:
+
+```yaml
+credential:
+  token_env: NORDVPN_TOKEN            # read from an environment variable
+# credential:
+#   token_file: /run/secrets/nordvpn  # or read from a file (compose/k8s secrets)
+```
+
+Give exactly one of `token`, `token_env`, `token_file`. A missing variable or
+unreadable file is reported as a validation blocker before anything is
+changed. This works for any credential field of any provider (`<field>_env` /
+`<field>_file`), and it is what lets a bundle live in version control or a
+compose repo without carrying the secret. (`alle export` still writes the
+stored token inline — an export is a backup, not a template.)
 
 **A stable of servers under a connection cap.** Providers that cap
 simultaneous connections (NordVPN allows ~10) pair naturally with `enabled`:

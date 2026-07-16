@@ -21,6 +21,28 @@ from pathlib import Path
 from typing import Callable
 
 
+def _preserve_owner(path: str | Path, like: Path) -> None:
+    """Keep a state file's owner stable across a root write (best-effort).
+
+    A management command run as root — ``docker exec <container> alle …``
+    (root is the exec default), a stray ``sudo alle …`` — must not flip a
+    0600 state file or a lock file to root-owned: the unprivileged daemon
+    would be locked out of its own state dir until something re-chowns it
+    (in the container, the next restart). Root inherits the owner of
+    ``like`` (the file being replaced, or the state dir for a fresh file);
+    for every other caller the file already has the right owner and only
+    root may chown, so this is a no-op.
+    """
+    if os.geteuid() != 0:
+        return
+    try:
+        st = os.stat(like)
+        if st.st_uid != 0 or st.st_gid != 0:
+            os.chown(path, st.st_uid, st.st_gid)
+    except OSError:
+        pass  # never fail the write over ownership cosmetics
+
+
 @contextmanager
 def locked(lock_path: Path):
     """Hold an exclusive interprocess ``flock`` on ``lock_path``.
@@ -33,7 +55,10 @@ def locked(lock_path: Path):
     import fcntl
 
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    existed = lock_path.exists()
     with open(lock_path, "w") as lock:
+        if not existed:
+            _preserve_owner(lock_path, lock_path.parent)
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
             yield
@@ -83,6 +108,10 @@ def write_durably(
             write(f)
             f.flush()
             os.fsync(f.fileno())
+        # A root writer keeps the previous owner (or the state dir's, for a
+        # fresh file) so an exec'd/sudo'd mutation never locks the
+        # unprivileged daemon out of its own state.
+        _preserve_owner(tmp, target if target.exists() else target.parent)
         os.replace(tmp, target)
         if mode is not None:
             os.chmod(target, mode)

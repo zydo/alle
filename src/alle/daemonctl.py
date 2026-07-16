@@ -274,6 +274,17 @@ def manager() -> _Manager | None:
 
 
 def _require_manager() -> _Manager:
+    from alle import runtime
+
+    if runtime.in_container():
+        # Guardrail only (never a behavior switch): there is no launchd/systemd
+        # in a container, and the lifecycle belongs to the container runtime.
+        raise DaemonCtlError(
+            "alle is running inside a container — there is no login service to "
+            "install. The container runtime owns the daemon's lifecycle: run "
+            "`alle run` as the container's main process and use a restart "
+            "policy (e.g. `restart: unless-stopped`)."
+        )
     m = manager()
     if m is None:
         raise DaemonCtlError(
@@ -287,6 +298,18 @@ def is_installed() -> bool:
     """True if a login-service unit exists for alle (ownership-handoff signal)."""
     m = manager()
     return m is not None and m.is_installed()
+
+
+def require_backend() -> None:
+    """Raise :class:`DaemonCtlError` when no login service can be installed
+    here (container, unsupported platform) — without touching anything.
+
+    Callers that stop a running daemon before installing must run this first:
+    a doomed install must never take the live daemon down on its way to the
+    error (in a container that daemon is PID 1 — stopping it stops the
+    container).
+    """
+    _require_manager()
 
 
 # ---- operations (used by the service layer) ----------------------------------

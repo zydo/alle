@@ -14,5 +14,5 @@ htmlcov/
 .DS_Store
 .firecrawl/
 .tun-sandbox-cache/
-# Local-only notes
-ROADMAP*.md
+# Local-only notes (roadmaps, scratch) — never committed
+.localonly/

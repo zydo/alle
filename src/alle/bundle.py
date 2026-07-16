@@ -7,12 +7,15 @@ a reinstall, or hand-written from scratch as a startup config. It is
 declarative: ``alle export`` is a convenience that emits the declarative form
 of the live setup, not a state dump.
 
-Deliberately excluded: everything runtime. Probe results, reconnect
-bookkeeping, traffic/speed history, rule/ruleset ids, and *ports* — ports are
-local allocations, so applying a bundle re-allocates them and apps pointing at
-old port numbers must be repointed. Secrets are *included* (WireGuard private
-keys, provider tokens): the file itself is a secret, and callers write it
-``0600``.
+Deliberately excluded from *exports*: everything runtime. Probe results,
+reconnect bookkeeping, traffic/speed history, rule/ruleset ids, and
+auto-assigned ports — those are local allocations, so applying a bundle
+re-allocates them and apps pointing at old port numbers must be repointed.
+(A hand-written bundle *may* carry explicit ``port:`` declarations — those
+apply as written and clash loudly; see the validate/apply paths.) Secrets are
+*included* in exports (WireGuard private keys, provider tokens), so the file
+itself is a secret and callers write it ``0600``; a hand-written bundle can
+instead reference its secrets indirectly (``token_env``/``token_file``).
 
 Two apply modes share the format and one validation pass:
 
@@ -44,8 +47,9 @@ absent-key rule — same discipline as ``lan_direct``); a hand-written channel
 may omit it, and the meaning is per apply mode: on **import (merge)** an
 omitted ``enabled`` leaves an existing channel's state untouched — like the
 unstated router toggles, so an ad-hoc ``channels disable`` survives a
-re-import — while a new channel defaults to enabled; on **restore** (a
-whole-setup replace) omitted means enabled. A **disabled** channel is
+re-import (e.g. the Docker entrypoint re-applying the bundle on every
+container start) — while a new channel defaults to enabled; on **restore**
+(a whole-setup replace) omitted means enabled. A **disabled** channel is
 imported without ever touching the provider: no server resolution (no API
 call to pick one) and no probe — its country/city are instead checked against
 the provider's location catalog when reachable. It keeps the live params of
@@ -58,6 +62,8 @@ live restrict-only invariant.
 from __future__ import annotations
 
 import copy
+import os
+from pathlib import Path
 
 import yaml
 
@@ -72,7 +78,7 @@ from alle.providers import (
     known,
     provider_resolver,
 )
-from alle.state import ReferencedError, Store, _slug
+from alle.state import PortInUseError, ReferencedError, Store, _slug
 
 BUNDLE_KIND = "alle-bundle"
 BUNDLE_VERSION = 1
@@ -347,7 +353,12 @@ def validate(
         if ch.get("enabled") is False  # explicit only; unstated may be either
     }
 
-    parsed_router: dict = {"killswitch": None, "lan_direct": None, "rulesets": None}
+    parsed_router: dict = {
+        "killswitch": None,
+        "lan_direct": None,
+        "rulesets": None,
+        "port": None,
+    }
     raw_router = data.get("router")
     if raw_router is not None and not isinstance(raw_router, dict):
         errors.append(("router", "must be a mapping"))
@@ -364,11 +375,34 @@ def validate(
                 errors.append((f"router.{key}", "must be true or false"))
             else:
                 parsed_router[key] = value
+        # port stays optional even in strict mode: absent means "keep/allocate
+        # locally", the pre-declaration behavior every bundle had.
+        parsed_router["port"] = (
+            _validate_port(raw_router.get("port"), "router.port", errors) or None
+        )
         raw_rulesets = raw_router.get("rulesets")
         if raw_rulesets is not None:
             parsed_router["rulesets"] = _validate_rulesets(
                 raw_rulesets, channel_refs, disabled_refs, errors
             )
+
+    # Declared ports must be unique across the whole bundle (channels + the
+    # router) — two declarations of one port can never both hold.
+    declared: dict[int, str] = {}
+    if parsed_router["port"]:
+        declared[parsed_router["port"]] = "router.port"
+    for provider, entry in parsed_providers.items():
+        for cid, ch in entry["channels"].items():
+            port = ch.get("port") or 0
+            if not port:
+                continue
+            cpath = f"providers.{provider}.channels.{cid}.port"
+            if port in declared:
+                errors.append(
+                    (cpath, f"port {port} is also declared at {declared[port]}")
+                )
+            else:
+                declared[port] = cpath
 
     if errors:
         raise BundleError(errors, line_index)
@@ -431,6 +465,7 @@ def _validate_provider(
             credential = None
         else:
             credential = {k: v.strip() for k, v in credential.items()}
+            credential = _resolve_credential(credential, f"{path}.credential", errors)
             missing = [
                 f.key for f in auth_fields(provider) if not credential.get(f.key)
             ]
@@ -491,6 +526,56 @@ def _validate_provider(
         if channel is not None:
             channels[cid] = channel
     return {"credential": credential, "channels": channels}
+
+
+def _resolve_credential(credential: dict, path: str, errors: list) -> dict:
+    """Settle credential *indirection*: for any field ``k``, a bundle may carry
+    ``k`` (inline, as always), ``k_env`` (read an environment variable), or
+    ``k_file`` (read a file, e.g. a compose/k8s secret mount) — exactly one.
+
+    Resolution happens at validate time so every missing variable or unreadable
+    file is reported up front with the rest of the blockers, and everything
+    downstream (apply, credential storage) keeps seeing plain values. Inline
+    values keep working unchanged — indirection is opt-in per field.
+    """
+    resolved: dict[str, str] = {}
+    for key, value in credential.items():
+        if key.endswith("_env"):
+            field_name, source = key[: -len("_env")], "env"
+        elif key.endswith("_file"):
+            field_name, source = key[: -len("_file")], "file"
+        else:
+            field_name, source = key, "inline"
+        if field_name in resolved:
+            errors.append(
+                (
+                    f"{path}.{key}",
+                    f"give exactly one of {field_name}, {field_name}_env, "
+                    f"{field_name}_file",
+                )
+            )
+            continue
+        if source == "env":
+            got = os.environ.get(value)
+            if not (got or "").strip():
+                errors.append(
+                    (f"{path}.{key}", f"environment variable {value!r} is not set")
+                )
+                continue
+            resolved[field_name] = got.strip()
+        elif source == "file":
+            try:
+                got = Path(value).expanduser().read_text()
+            except OSError as e:
+                errors.append((f"{path}.{key}", f"could not read {value!r}: {e}"))
+                continue
+            if not got.strip():
+                errors.append((f"{path}.{key}", f"{value!r} is empty"))
+                continue
+            resolved[field_name] = got.strip()
+        else:
+            resolved[field_name] = value
+    return resolved
 
 
 def _validate_channel(
@@ -557,6 +642,8 @@ def _validate_channel(
                     )
                 )
 
+    port = _validate_port(spec.get("port"), f"{path}.port", errors)
+
     wg = spec.get("wg")
     if wg is not None:
         wg = _validate_wg(wg, f"{path}.wg", errors)
@@ -568,7 +655,21 @@ def _validate_channel(
                 "can resolve a channel without a snapshot",
             )
         )
-    return {**fields, "wg": wg, "enabled": enabled}
+    return {**fields, "port": port, "wg": wg, "enabled": enabled}
+
+
+def _validate_port(value, path: str, errors: list) -> int:
+    """An optional explicit port declaration: absent/0 means "let alle
+    allocate" (the default, and the only behavior a bundle without ``port``
+    keys ever sees); otherwise it must be a real port number."""
+    if value is None:
+        return 0
+    if isinstance(value, str) and value.isdigit():
+        value = int(value)
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 < value <= 65535:
+        errors.append((path, "must be a port number (1-65535)"))
+        return 0
+    return value
 
 
 def _check_wg_key(path: str, value, errors: list) -> str:
@@ -880,8 +981,13 @@ def apply_import(text: str, *, location_lookup=None) -> dict:
                 router["rulesets"] or [],
                 killswitch=router["killswitch"],
                 lan_direct=router["lan_direct"],
+                router_port=router["port"],
             )
             t.commit()
+    except PortInUseError as e:
+        # A declared port clashing with the *existing* setup is only knowable
+        # at merge time; surface it like any other blocker — nothing changed.
+        raise BundleError([("providers", str(e))]) from e
     except ReferencedError as e:
         # The bundle disables a channel an *existing* routing rule targets —
         # only knowable at merge time. Nothing changed; list every blocker.
@@ -992,23 +1098,27 @@ def apply_restore(text: str, *, location_lookup=None) -> dict:
     # config_signature and triggers the reconcile). Metrics cleanup is
     # best-effort post-commit work.
     router = parsed["router"]
-    with txn.setup_transaction("bundle restore") as t:
-        credentials.replace_all(
-            {
-                provider: entry["credential"]
-                for provider, entry in parsed["providers"].items()
-                if entry["credential"] is not None
-            }
-        )
-        store.restore_setup(
-            {p: e["channels"] for p, e in parsed["providers"].items()},
-            router["rulesets"] or [],
-            killswitch=bool(router["killswitch"]),
-            lan_direct=router["lan_direct"]
-            if router["lan_direct"] is not None
-            else True,
-        )
-        t.commit()
+    try:
+        with txn.setup_transaction("bundle restore") as t:
+            credentials.replace_all(
+                {
+                    provider: entry["credential"]
+                    for provider, entry in parsed["providers"].items()
+                    if entry["credential"] is not None
+                }
+            )
+            store.restore_setup(
+                {p: e["channels"] for p, e in parsed["providers"].items()},
+                router["rulesets"] or [],
+                killswitch=bool(router["killswitch"]),
+                lan_direct=router["lan_direct"]
+                if router["lan_direct"] is not None
+                else True,
+                router_port=router["port"],
+            )
+            t.commit()
+    except PortInUseError as e:
+        raise BundleError([("providers", str(e))]) from e
     new_channels = {
         f"{provider}/{cid}"
         for provider, entry in parsed["providers"].items()

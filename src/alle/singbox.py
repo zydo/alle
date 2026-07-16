@@ -76,7 +76,17 @@ def host_platform() -> str:
 def bin_path() -> Path:
     """Where the pinned sing-box lives (whether or not it's downloaded yet).
     Public: the CLI prints it (``alle version --singbox-path``) and the TUN
-    privilege gate inspects its file capabilities."""
+    privilege gate inspects its file capabilities.
+
+    ``ALLE_SINGBOX`` points at a pre-provisioned binary instead (the container
+    image bakes one outside the state volume; air-gapped hosts stage their
+    own). The trust model is unchanged: the bytes are still verified against
+    the pinned SHA-256 on every start, and an override that fails is an error
+    — never a fallback download over (or beside) a path the user chose.
+    """
+    override = os.environ.get("ALLE_SINGBOX")
+    if override:
+        return Path(override)
     return paths.state_dir() / "bin" / f"sing-box@{SINGBOX_VERSION}"
 
 
@@ -105,6 +115,20 @@ def ensure_binary() -> Path:
     key = host_platform()
     expected = SINGBOX_SHA256[key]
     target = bin_path()
+    if os.environ.get("ALLE_SINGBOX"):
+        # An explicit override is a statement, not a cache: verify it, but on
+        # any failure raise instead of downloading — silently replacing (or
+        # shadowing) a path the operator chose would defeat the point.
+        if not target.exists():
+            raise SingBoxError(f"ALLE_SINGBOX={target} does not exist")
+        got = _sha256_file(target)
+        if got != expected:
+            raise SingBoxError(
+                f"ALLE_SINGBOX={target} is not the pinned sing-box "
+                f"{SINGBOX_VERSION} ({key}): expected SHA-256 {expected}, "
+                f"got {got}"
+            )
+        return target
     if target.exists():
         if _sha256_file(target) == expected:
             return target

@@ -56,8 +56,9 @@ UPGRADE_EXIT_CODE = 3
 
 # What the applier's command line looks like: ensure_running() spawns
 # ``<python> -m alle applier``; a supervised or hand-run ``alle applier`` shows
-# as ``.../bin/alle applier``. Used to reject recycled PIDs.
-_MARKERS = ("-m alle", "alle applier")
+# as ``.../bin/alle applier``; the foreground form (a container's PID 1) as
+# ``.../bin/alle run``. Used to reject recycled PIDs.
+_MARKERS = ("-m alle", "alle applier", "alle run")
 
 
 def _pid_path() -> Path:
@@ -366,7 +367,13 @@ def run_applier() -> None:
 
     probe_worker: dict = {"thread": None}
 
-    supervised = bool(os.environ.get("ALLE_SERVICE"))
+    # The self-exit-on-upgrade only makes sense when a supervisor respawns us
+    # onto *new code*. A container image is immutable — the installed version
+    # cannot change under a running container, and exiting would just make the
+    # restart policy relaunch the same code — so the check is skipped there.
+    from alle import runtime
+
+    supervised = bool(os.environ.get("ALLE_SERVICE")) and not runtime.in_container()
     last_stamp: tuple[int, int] | None = None
     sig = None
     last_sig = None

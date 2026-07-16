@@ -1,0 +1,10 @@
+# Whitelist: the image build needs exactly the package sources + metadata.
+*
+!src
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!THIRD_PARTY_NOTICES.md
+!docker
+src/**/__pycache__

@@ -40,10 +40,10 @@ alled = "alle.daemon:run_applier"
 alle-tray = "alle.tray:main"
 
 [tool.hatch.build]
-# Keep local-only roadmap notes out of every release artifact (sdist + wheel).
-# .gitignore also ignores ROADMAP*.md; this is belt-and-suspenders for builders
-# that do not consult VCS ignore rules.
-exclude = ["ROADMAP*.md"]
+# Keep local-only notes (roadmaps, scratch) out of every release artifact
+# (sdist + wheel). .gitignore also ignores .localonly/; this is
+# belt-and-suspenders for builders that do not consult VCS ignore rules.
+exclude = [".localonly"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/alle"]

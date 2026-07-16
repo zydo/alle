@@ -45,7 +45,12 @@ from alle.providers import (
     provider_resolver,
     provider_wg,
 )
-from alle.state import ReferencedError, Store, channel_id_from_filename
+from alle.state import (
+    PortInUseError,
+    ReferencedError,
+    Store,
+    channel_id_from_filename,
+)
 
 
 class ServiceError(RuntimeError):
@@ -386,9 +391,12 @@ def channel_add(
     city: str | None,
     config: str | None = None,
     label: str = "",
+    port: int = 0,
 ) -> dict:
     store = Store.load()
     label = label.strip()
+    if port:
+        _check_declared_port(port)
     if not store.has_provider(provider):
         raise ServiceError(
             f"{display_name(provider)} is not added — run `alle providers add {provider}` first."
@@ -405,7 +413,7 @@ def channel_add(
         )
 
     if config:
-        return _channel_add_config(store, provider, config, label)
+        return _channel_add_config(store, provider, config, label, port)
 
     if kind(provider) == "config":
         raise ServiceError(
@@ -430,7 +438,10 @@ def channel_add(
             msg += f"\nSee available locations: alle locations {provider}"
         raise ServiceError(msg) from e
 
-    channel = store.add_channel(provider, country, city or "", wg, label)
+    try:
+        channel = store.add_channel(provider, country, city or "", wg, label, port)
+    except PortInUseError as e:
+        raise ServiceError(str(e)) from e
     metrics.revive_channel(provider, channel.id)  # same identity re-created
     applog.log(
         f"added channel {provider}/{channel.id} ({channel.location}) on :{channel.port}"
@@ -443,8 +454,14 @@ def channel_add(
     }
 
 
+def _check_declared_port(port: int) -> None:
+    """Range-check an explicitly declared port before any state is touched."""
+    if not isinstance(port, int) or isinstance(port, bool) or not 0 < port <= 65535:
+        raise ServiceError(f"--port must be 1-65535, got {port}")
+
+
 def _channel_add_config(
-    store: Store, provider: str, config: str, label: str = ""
+    store: Store, provider: str, config: str, label: str = "", port: int = 0
 ) -> dict:
     """Import a channel from a WireGuard ``.conf`` (the config-provider archetype).
 
@@ -463,7 +480,7 @@ def _channel_add_config(
         text = path.read_text()
     except OSError as e:
         raise ServiceError(f"could not read {config}: {e}") from e
-    return _import_conf(store, provider, path.name, text, label)
+    return _import_conf(store, provider, path.name, text, label, port)
 
 
 def channel_add_conf_text(
@@ -483,7 +500,7 @@ def channel_add_conf_text(
 
 
 def _import_conf(
-    store: Store, provider: str, filename: str, text: str, label: str
+    store: Store, provider: str, filename: str, text: str, label: str, port: int = 0
 ) -> dict:
     """Parse a ``.conf`` (from a file or an upload) and upsert it as a channel.
 
@@ -508,9 +525,14 @@ def _import_conf(
     # update from a byte-identical no-op.
     existing = store.get_channel(provider, channel_id_from_filename(stem))
     unchanged = existing is not None and _conf_channel_unchanged(
-        existing, country, city, wg, label
+        existing, country, city, wg, label, port
     )
-    channel, created = store.upsert_channel(provider, stem, country, city, wg, label)
+    try:
+        channel, created = store.upsert_channel(
+            provider, stem, country, city, wg, label, port
+        )
+    except PortInUseError as e:
+        raise ServiceError(str(e)) from e
     metrics.revive_channel(provider, channel.id)  # same identity re-created
     action = "imported" if created else ("unchanged" if unchanged else "updated")  # noqa: S3358
     applog.log(
@@ -528,7 +550,7 @@ def _import_conf(
 
 
 def _conf_channel_unchanged(
-    existing, country: str, city: str, wg: dict, label: str
+    existing, country: str, city: str, wg: dict, label: str, port: int = 0
 ) -> bool:
     """True when re-importing a ``.conf`` would change nothing about the channel —
     same parsed location and WireGuard params, and no new label. Used to warn that
@@ -536,6 +558,9 @@ def _conf_channel_unchanged(
     if (existing.country, existing.city) != (country, city):
         return False
     if existing.wg != wg:
+        return False
+    # An explicit port only changes state when it differs; 0 keeps the current.
+    if port and port != existing.port:
         return False
     # A label is only applied when non-empty; an empty label never changes state.
     return not (label and label != existing.label)
@@ -1168,9 +1193,23 @@ def routes_killswitch(enable: bool | None = None) -> dict:
 
 
 def _process_uid(pid: int) -> int | None:
-    """Best-effort uid of a live process (POSIX ``ps``); None when unknowable."""
+    """Best-effort uid of a live process; None when unknowable.
+
+    ``/proc`` first: it is always there on Linux, while ``ps`` is not — slim
+    container images (and other minimal systems) don't ship procps, and a
+    root daemon must not read as "unknown uid" there. ``ps`` remains the
+    non-/proc (macOS) path.
+    """
     import subprocess
 
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("Uid:"):
+                    # "Uid:  <real> <effective> <saved> <fs>" — effective decides
+                    return int(line.split()[2])
+    except (OSError, ValueError, IndexError):
+        pass
     try:
         out = subprocess.run(
             ["ps", "-o", "uid=", "-p", str(pid)],
@@ -1195,8 +1234,19 @@ _TUN_SETCAP_HINT = (
 
 _TUN_SUDO_HINT = 'one-off: alle stop && sudo ALLE_HOME="$HOME/.alle" alle tun on'
 
+_TUN_CONTAINER_HINT = (
+    "in a container the privilege is granted at run time, not installed:\n"
+    "  docker run --cap-add NET_ADMIN --device /dev/net/tun … (compose: "
+    "cap_add: [NET_ADMIN] + devices: [/dev/net/tun])\n"
+    "then recreate the container. sudo/setcap/helper do not apply here."
+)
+
 
 def _tun_privilege_hint() -> str:
+    from alle import runtime
+
+    if runtime.in_container():
+        return _TUN_CONTAINER_HINT
     if sys.platform == "darwin":
         return _TUN_HELPER_HINT + "\nOr " + _TUN_SUDO_HINT
     if sys.platform == "linux":
@@ -1898,6 +1948,30 @@ def restart() -> dict:
     return {"reconnect_cleared": cleared}
 
 
+def health() -> dict:
+    """A cheap liveness probe for monitoring — the container ``HEALTHCHECK``
+    and scripts. Deliberately lighter than ``status()``: two pidfile checks
+    and a state read, no probes, no network, no Clash API.
+
+    ``ok`` means the daemon is running and sing-box is up (sing-box runs idle
+    even with zero channels, so its absence under a live daemon is a real
+    finding, not a fresh-install artifact). ``runtime`` carries the daemon's
+    published sing-box status ("degraded", "crash_looping", …) when one is
+    recorded — informational; a degraded-but-supervised runtime still counts
+    as alive.
+    """
+    pid = daemon.running_pid()
+    singbox_up = singbox.Runner().is_running()
+    info = daemon.daemon_info() if pid is not None else None
+    return {
+        "ok": pid is not None and singbox_up,
+        "daemon": pid is not None,
+        "singbox": singbox_up,
+        "channels": len(Store.load().channels()),
+        "runtime": (info or {}).get("runtime"),
+    }
+
+
 def logs_tail(lines: int = 200) -> str:
     return applog.tail(lines)
 
@@ -1912,6 +1986,10 @@ def daemon_install(linger: bool = False) -> dict:
     is the sole owner, then hands off to it.
     """
     try:
+        # Fail-fast on container/unsupported platforms BEFORE the stop below:
+        # a doomed install must never take the running daemon down (in a
+        # container that daemon is PID 1 — stopping it stops the container).
+        daemonctl.require_backend()
         daemon.stop()  # a hand-spawned daemon would double up with the service
         result = daemonctl.install(linger=linger)
     except daemonctl.DaemonCtlError as e:

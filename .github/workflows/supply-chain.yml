@@ -39,6 +39,29 @@ jobs:
           scan-args: |-
             --lockfile=uv.lock
 
+  # The OSV job covers the Python dependency tree (uv.lock); this covers the
+  # rest of the shipped container — the Debian base layer and anything pip
+  # installed into it. Same rationale as the weekly OSV sweep: a digest-pinned
+  # base image doesn't stop advisories from being published *after* the pin.
+  # ignore-unfixed keeps the gate actionable (Debian carries many no-fix CVEs);
+  # severity CRITICAL/HIGH with a hard exit code fails the run on real ones.
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Build image
+        run: docker build -t alle:scan .
+      - name: Trivy scan (image layers)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: alle:scan
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
   gitleaks:
     runs-on: ubuntu-latest
     steps:

@@ -49,20 +49,75 @@ def channel_id_from_filename(filename: str) -> str:
     return _slug(filename)
 
 
-def _next_free_port(data: dict) -> int:
-    """Ask the OS for an available loopback port that no channel already claims.
+class PortInUseError(RuntimeError):
+    """An explicitly requested port is already claimed by another channel (or
+    the router entrypoint). ``holder`` names the claimant for the message."""
 
-    Called inside a transaction so the allocation is made against the locked,
-    current state. The temporary socket is closed before sing-box later binds the
-    port, so another local process can theoretically race us, but this avoids
-    hard-coded port ranges and lets the OS pick from its ephemeral pool.
+    def __init__(self, port: int, holder: str):
+        self.port = port
+        self.holder = holder
+        super().__init__(f"port {port} is already used by {holder}")
+
+
+def _used_ports(data: dict) -> dict[int, str]:
+    """Every claimed port -> a human name for its claimant."""
+    used: dict[int, str] = {}
+    for provider, prov in (data.get("providers") or {}).items():
+        for cid, ch in (prov.get("channels") or {}).items():
+            port = int(ch.get("port") or 0)
+            if port:
+                used[port] = f"channel {provider}/{cid}"
+    router_port = int((data.get("router") or {}).get("port") or 0)
+    if router_port:
+        used[router_port] = "the router entrypoint"
+    return used
+
+
+def _claim_port(
+    data: dict, port: int, *, exclude: tuple[str, str] | None = None
+) -> int:
+    """Validate an explicitly requested ``port`` against the locked state.
+
+    ``exclude`` names the ``(provider, cid)`` being (re)pointed, so a channel
+    keeping its own declared port is never its own conflict. Raises
+    :class:`PortInUseError` on a clash — explicit ports are a declaration, and
+    silently moving a declared port would break the compose/firewall contract
+    the declaration exists for.
     """
-    used = {
-        int(ch.get("port") or 0)
-        for prov in (data.get("providers") or {}).values()
-        for ch in (prov.get("channels") or {}).values()
-    }
-    used.add(int((data.get("router") or {}).get("port") or 0))
+    if not isinstance(port, int) or isinstance(port, bool) or not 0 < port <= 65535:
+        raise ValueError(f"port must be 1-65535, got {port!r}")
+    used = _used_ports(data)
+    if exclude is not None:
+        own = f"channel {exclude[0]}/{exclude[1]}"
+        used = {p: h for p, h in used.items() if h != own}
+    if port in used:
+        raise PortInUseError(port, used[port])
+    return port
+
+
+def _next_free_port(data: dict) -> int:
+    """Allocate an unclaimed local proxy port against the locked state.
+
+    Default: ask the OS for an ephemeral loopback port (the temporary socket is
+    closed before sing-box later binds it, so another local process can
+    theoretically race us, but this avoids hard-coded ranges). Opt-in
+    (``ALLE_PORT_BASE=<n>``): allocate sequentially from ``n`` upward instead —
+    deterministic ports for environments that must publish them ahead of time
+    (the container image); unset means exactly the OS-assigned behavior.
+    """
+    used = set(_used_ports(data))
+    base = os.environ.get("ALLE_PORT_BASE")
+    if base:
+        try:
+            start = int(base)
+        except ValueError as e:
+            raise RuntimeError(f"ALLE_PORT_BASE must be a port number: {base!r}") from e
+        if not 0 < start <= 65535:
+            raise RuntimeError(f"ALLE_PORT_BASE must be 1-65535, got {start}")
+        for port in range(start, 65536):
+            if port not in used:
+                return port
+        raise RuntimeError(f"no free port at or above ALLE_PORT_BASE={start}")
     for _ in range(100):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", 0))
@@ -561,16 +616,24 @@ class Store:
         )
 
     def add_channel(
-        self, provider: str, country: str, city: str, wg: dict, label: str = ""
+        self,
+        provider: str,
+        country: str,
+        city: str,
+        wg: dict,
+        label: str = "",
+        port: int = 0,
     ) -> Channel:
         # id and port are allocated inside the transaction, against the locked
         # on-disk state — two concurrent adds can never pick the same slot.
         # ``label`` is the optional display label, not part of the id.
+        # ``port`` (optional) is an explicit declaration; 0 keeps the default
+        # allocation. A declared port that clashes raises PortInUseError.
         with transaction() as data:
             prov = _require_provider(data, provider)
             chans = prov.setdefault("channels", {})
             cid = _next_id(set(chans), country, city)
-            port = _next_free_port(data)
+            port = _claim_port(data, port) if port else _next_free_port(data)
             chans[cid] = {
                 "country": country,
                 "city": city,
@@ -591,6 +654,7 @@ class Store:
         city: str,
         wg: dict,
         label: str = "",
+        port: int = 0,
     ) -> tuple[Channel, bool]:
         """Create or update a channel with a *fixed* id derived from ``filename``.
 
@@ -605,6 +669,11 @@ class Store:
         ``label`` is the optional display label. On re-import an existing label
         is **preserved** (a re-import replaces keys, not the user's naming);
         passing a new ``label`` explicitly overrides it.
+
+        ``port`` (optional) is an explicit declaration: on create it is the
+        channel's port; on update it *re-points* the channel (the declaration
+        wins over the earlier allocation — that is what declaring is for).
+        0 means allocate on create / keep the current port on update.
         """
         cid = _slug(filename)
         with transaction() as data:
@@ -616,7 +685,7 @@ class Store:
                 chans[cid] = {
                     "country": country,
                     "city": city,
-                    "port": _next_free_port(data),
+                    "port": _claim_port(data, port) if port else _next_free_port(data),
                     "wg": wg,
                     "probe": {},
                 }
@@ -628,6 +697,8 @@ class Store:
                 ch["wg"] = (
                     wg  # keep port + probe; the daemon re-probes on the wg change
                 )
+                if port and port != int(ch.get("port") or 0):
+                    ch["port"] = _claim_port(data, port, exclude=(provider, cid))
                 if label:  # explicit override; otherwise the existing label stays
                     ch["label"] = label
                 # A re-import is human intervention: forget any reconnect give-up
@@ -1084,6 +1155,7 @@ class Store:
         rulesets: list[dict],
         killswitch: bool | None,
         lan_direct: bool | None,
+        router_port: int | None = None,
     ) -> dict:
         """Merge a validated bundle into the setup in ONE transaction — the
         bundle-import commit point (the replace twin is :meth:`restore_setup`).
@@ -1092,21 +1164,25 @@ class Store:
         wg, enabled}} (channels upserted by ``(provider, id)`` with
         :meth:`upsert_channel` semantics: port/probe kept, reconnect reset,
         label preserved unless the spec carries one); missing providers are
-        created. A spec's ``enabled`` is tri-state: explicit True/False
-        applies it, ``None`` (unstated) keeps an existing channel's state —
-        like the unstated router toggles, so a re-applied bundle never undoes
-        an ad-hoc ``channels disable`` — and reads enabled for a new channel.
-        A spec that disables a channel a routing rule still references raises
+        created. A spec's optional explicit ``port`` is a declaration: it is
+        used on create and re-points an existing channel (clashes raise
+        :class:`PortInUseError`, aborting the whole transaction). A spec's
+        ``enabled`` is tri-state: explicit True/False applies it, ``None``
+        (unstated) keeps an existing channel's state — like the unstated
+        router toggles, so a re-applied bundle never undoes an ad-hoc
+        ``channels disable`` — and reads enabled for a new channel. A spec
+        that disables a channel a routing rule still references raises
         :class:`ReferencedError` — the same restrict-only check as
         :meth:`set_channels_enabled`, run across the whole batch first, so an
         import can never leave a rule pointing at a disabled channel. A
         disabled spec's ``wg`` may be None (resolve-at-enable); it is stored
         as ``{}``. ``rulesets`` ({name, target, matchers: [(type, value), …]})
         append as new blocks at the bottom of the priority order. ``None``
-        toggles mean "bundle leaves it unstated" and change nothing. Returns
-        the apply summary pieces: ``{providers_added, created, updated,
-        unchanged, rulesets_added}`` (channel entries as ``provider/cid``
-        refs).
+        toggles mean "bundle leaves it unstated" and change nothing;
+        ``router_port`` (optional) declares the router entrypoint's contract
+        port the same way. Returns the apply summary pieces:
+        ``{providers_added, created, updated, unchanged, rulesets_added}``
+        (channel entries as ``provider/cid`` refs).
         """
         summary: dict = {
             "providers_added": [],
@@ -1142,6 +1218,7 @@ class Store:
                     ref = f"{provider}/{cid}"
                     ch = chans.get(cid)
                     label = spec.get("label") or ""
+                    port = int(spec.get("port") or 0)
                     # tri-state: None (unstated) resolves to the existing
                     # channel's state, or enabled for a new one
                     enabled = spec.get("enabled")
@@ -1152,7 +1229,9 @@ class Store:
                         entry = {
                             "country": spec.get("country", ""),
                             "city": spec.get("city", ""),
-                            "port": _next_free_port(data),
+                            "port": _claim_port(data, port)
+                            if port
+                            else _next_free_port(data),
                             "wg": wg,
                         }
                         if enabled:
@@ -1169,12 +1248,17 @@ class Store:
                         and ch.get("wg") == wg
                         and ch.get("enabled", True) == enabled
                         and (not label or ch.get("label", "") == label)
+                        and (not port or int(ch.get("port") or 0) == port)
                     ):
                         summary["unchanged"].append(ref)
                     else:
                         ch["country"] = spec.get("country", "")
                         ch["city"] = spec.get("city", "")
                         ch["wg"] = wg
+                        if port and port != int(ch.get("port") or 0):
+                            ch["port"] = _claim_port(
+                                data, port, exclude=(provider, cid)
+                            )
                         if label:  # explicit override; otherwise keep the old
                             ch["label"] = label
                         if enabled:
@@ -1212,6 +1296,12 @@ class Store:
                 router["killswitch"] = bool(killswitch)
             if lan_direct is not None:
                 router["lan_direct"] = bool(lan_direct)
+            if router_port and router_port != int(router.get("port") or 0):
+                used = _used_ports(data)
+                used.pop(int(router.get("port") or 0), None)
+                if router_port in used:
+                    raise PortInUseError(router_port, used[router_port])
+                router["port"] = router_port
         self.data = _read_raw()
         return summary
 
@@ -1221,6 +1311,7 @@ class Store:
         rulesets: list[dict],
         killswitch: bool,
         lan_direct: bool,
+        router_port: int | None = None,
     ) -> None:
         """Replace the entire setup in one transaction — the bundle-restore
         commit point.
@@ -1228,11 +1319,13 @@ class Store:
         ``providers`` maps provider -> {channel id -> {country, city, label,
         wg}}; ``rulesets`` is an ordered list of {name, target, matchers:
         [(type, value), …]}. Runtime state is reset (fresh probe, no
-        reconnect) and rule/ruleset ids are minted fresh. Ports are local
-        allocations, never part of a bundle: a channel whose ``(provider,
-        id)`` already exists keeps its current port (a same-machine restore
-        preserves the local contract), anything else gets a fresh one, and
-        the router contract port is untouched.
+        reconnect) and rule/ruleset ids are minted fresh. Auto-assigned ports
+        are local allocations, never part of a bundle: a channel whose
+        ``(provider, id)`` already exists keeps its current port (a
+        same-machine restore preserves the local contract), anything else
+        gets a fresh one, and the router contract port is untouched. A spec's
+        optional explicit ``port`` (and ``router_port``) is a declaration and
+        wins over both; duplicate declarations abort the transaction.
         """
         with transaction() as data:
             old_ports = {
@@ -1247,7 +1340,8 @@ class Store:
                     entry = {
                         "country": spec.get("country", ""),
                         "city": spec.get("city", ""),
-                        "port": old_ports.get((provider, cid), 0),
+                        "port": int(spec.get("port") or 0)
+                        or old_ports.get((provider, cid), 0),
                         # None (a disabled resolve-at-enable spec) stores as {}
                         "wg": spec["wg"] or {},
                     }
@@ -1262,14 +1356,29 @@ class Store:
                     chans[cid] = entry
                 new_providers[provider] = {"channels": chans}
             data["providers"] = new_providers
-            # Ports for new identities are allocated only after the old
-            # channel set is gone, so ports freed by the replace are reusable
-            # while every kept port (and the router's) stays reserved.
+            router = data.setdefault("router", _router_blank())
+            if router_port:
+                router["port"] = router_port
+            # Declared ports are already in place, so the duplicate check and
+            # the fresh allocations below both see them. Ports for new
+            # identities are allocated only after the old channel set is gone,
+            # so ports freed by the replace are reusable while every kept port
+            # (and the router's) stays reserved.
+            seen: dict[int, str] = {}
+            if int(router.get("port") or 0):
+                seen[int(router["port"])] = "the router entrypoint"
+            for provider, prov in new_providers.items():
+                for cid, ch in prov["channels"].items():
+                    port = int(ch.get("port") or 0)
+                    if not port:
+                        continue
+                    if port in seen:
+                        raise PortInUseError(port, seen[port])
+                    seen[port] = f"channel {provider}/{cid}"
             for prov in new_providers.values():
                 for ch in prov["channels"].values():
                     if not ch["port"]:
                         ch["port"] = _next_free_port(data)
-            router = data.setdefault("router", _router_blank())
             router["killswitch"] = bool(killswitch)
             router["lan_direct"] = bool(lan_direct)
             rules: list[dict] = []

@@ -11,9 +11,9 @@ router toggles. It serves three jobs with the same format:
    to produce one; nothing about the format assumes it was machine-generated.
 
 ```bash
-alle export                                            # -> alle-backup-<date>-<time>.yaml (0600)
-alle import  alle-backup-20260709-143022.yaml          # merge into the current setup
-alle import  alle-backup-20260709-143022.yaml --replace  # REPLACE the current setup (confirms)
+alle export                                             # -> alle-backup-<date>-<time>.yaml (0600)
+alle import alle-backup-20260709-143022.yaml            # merge into the current setup
+alle import alle-backup-20260709-143022.yaml --replace  # REPLACE the current setup (confirms)
 ```
 
 The Web UI's **Bundle** page offers the same operations (export downloads the
@@ -26,22 +26,24 @@ file; import uploads one, merge or replace).
 
 ## Contents
 
-- [Format](#format)
-  - [Header](#header)
-  - [Providers and channels](#providers-and-channels)
-  - [Router and rulesets](#router-and-rulesets)
-  - [Hand-written examples](#hand-written-examples)
-- [How a bundle is applied](#how-a-bundle-is-applied)
-  - [Validation: all-or-nothing](#validation-all-or-nothing)
-  - [Merge (default)](#merge-default)
-  - [Replace (`--replace`)](#replace---replace)
-  - [Token channels: `wg` is derived state](#token-channels-wg-is-derived-state)
-  - [Config channels: `wg` is the config](#config-channels-wg-is-the-config)
-- [What never travels in a bundle](#what-never-travels-in-a-bundle)
-- [Caveats](#caveats)
-  - [Cloning a setup to a second machine](#cloning-a-setup-to-a-second-machine)
-  - [Old backups can overwrite newer credentials](#old-backups-can-overwrite-newer-credentials)
-  - [Smaller notes](#smaller-notes)
+- [The setup bundle — backup, migration, and declarative config](#the-setup-bundle--backup-migration-and-declarative-config)
+  - [Contents](#contents)
+  - [Format](#format)
+    - [Header](#header)
+    - [Providers and channels](#providers-and-channels)
+    - [Router and rulesets](#router-and-rulesets)
+    - [Hand-written examples](#hand-written-examples)
+  - [How a bundle is applied](#how-a-bundle-is-applied)
+    - [Validation: all-or-nothing](#validation-all-or-nothing)
+    - [Merge (default)](#merge-default)
+    - [Replace (`--replace`)](#replace---replace)
+    - [Token channels: `wg` is derived state](#token-channels-wg-is-derived-state)
+    - [Config channels: `wg` is the config](#config-channels-wg-is-the-config)
+  - [What never travels in a bundle](#what-never-travels-in-a-bundle)
+  - [Caveats](#caveats)
+    - [Cloning a setup to a second machine](#cloning-a-setup-to-a-second-machine)
+    - [Old backups can overwrite newer credentials](#old-backups-can-overwrite-newer-credentials)
+    - [Smaller notes](#smaller-notes)
 
 ## Format
 
@@ -62,12 +64,13 @@ bundle_version: 1     # required — a newer version is refused with a clear err
 providers:
   nordvpn:                        # a known provider key (nordvpn, protonvpn)
     credential:                   # REQUIRED for token providers
-      token: "nordvpn-access-token"
+      token: "nordvpn-access-token"   # or token_env / token_file (see below)
     channels:
       united_states_1:            # the channel id — its permanent handle (required)
         country: United States    # required for token providers
         city: ""                  # empty = any city
         label: Streaming — US     # optional display label
+        port: 20010               # optional — DECLARE the local proxy port (see below)
         enabled: false            # optional — import held-but-not-dialled (default: true)
         wg: { ... }               # OPTIONAL for token providers (see below)
   protonvpn:                      # config providers have no credential
@@ -97,6 +100,15 @@ The `wg` rule follows the two provider archetypes:
   be as small as `{country: Sweden}`. When `wg` is present (an export always
   includes it), it serves as a fallback snapshot, not as the primary source
   ([details below](#token-channels-wg-is-derived-state)).
+
+  Any credential field can be **indirect** instead of inline: `token_env:
+  NORDVPN_TOKEN` reads an environment variable, `token_file: /run/secrets/…`
+  reads a file (compose/k8s secrets) — exactly one of the three spellings per
+  field, resolved at validation time so a missing source is an ordinary
+  blocker. This is what lets a hand-written bundle live in version control
+  without carrying the secret; `alle export` always writes the stored value
+  inline (an export is a backup, not a template). See
+  [declarative-config.md](declarative-config.md) for authoring guidance.
 - **Config providers (Proton VPN):** `wg` is *required*. There is no API to
   derive anything from — the values from the downloaded `.conf` **are** the
   channel's configuration. Validation rejects a config channel without them.
@@ -133,9 +145,10 @@ part of the setup: exports write `enabled` **explicitly on every channel**
 hand-written bundle the key is optional and tri-state, like the router
 toggles: explicit `true`/`false` applies that state, an **omitted key on
 `import` (merge) leaves an existing channel's state untouched** — so
-re-applying a bundle never undoes an ad-hoc `channels disable` — and a new
-channel defaults to enabled. On `import --replace` (restore), omitted simply
-means enabled. A **disabled** channel is imported without ever touching the
+re-applying a bundle (e.g. a container entrypoint importing it on every
+start) never undoes an ad-hoc `channels disable` — and a new channel
+defaults to enabled. On `import --replace` (restore), omitted simply means
+enabled. A **disabled** channel is imported without ever touching the
 provider: **no server resolution** (its `country`/`city` are checked against
 the provider's location catalog instead — skipped with a note if the catalog
 is unreachable), **no probe**, no connection slot occupied. It keeps an
@@ -150,6 +163,7 @@ routing rule still targets.
 
 ```yaml
 router:
+  port: 20000            # optional — declare the router entrypoint's port
   killswitch: false      # block unmatched router traffic (default: false)
   lan_direct: true       # built-in LAN/local direct rules (default: true)
   rulesets:              # priority order — first matching ruleset wins
@@ -204,8 +218,10 @@ current setup:
   stored one **replaces it, and the summary says so explicitly** (see
   [caveats](#old-backups-can-overwrite-newer-credentials)).
 - Channels upsert by `(provider, id)`: existing ones update in place (local
-  port kept), new ids are created (fresh port). Channels identical to the
-  bundle are reported as unchanged and left untouched.
+  port kept), new ids are created (fresh port). A channel that declares a
+  `port:` is the exception — the declaration wins, re-pointing an existing
+  channel if needed. Channels identical to the bundle are reported as
+  unchanged and left untouched.
 - **Rulesets always append at the bottom of the priority order.** Under
   first-match-wins an appended block can never hijack existing routing.
   Re-importing the same bundle therefore duplicates its rulesets — the shadow
@@ -264,12 +280,16 @@ not a bundle limitation.
 
 ## What never travels in a bundle
 
-- **Ports.** Local proxy ports and the router entrypoint port are OS
-  allocations on each machine, never serialized. On apply, a channel whose
-  `(provider, id)` already exists keeps its current local port (a
-  same-machine restore preserves your app configs); new identities get fresh
-  ports. **After migrating to a new machine, repoint apps at the ports shown
-  by `alle status`.**
+- **Auto-assigned ports.** Local proxy ports and the router entrypoint port
+  are local allocations, and `alle export` never serializes them. On apply, a
+  channel whose `(provider, id)` already exists keeps its current local port
+  (a same-machine restore preserves your app configs); new identities get
+  fresh ports. **After migrating to a new machine, repoint apps at the ports
+  shown by `alle status`.** The exception is a *hand-written* `port:`
+  declaration (see the format above): declared ports apply as written on
+  every machine — that is what they are for (compose files, firewall rules) —
+  and a declaration that clashes with an existing port is rejected, never
+  silently moved.
 - **Runtime state.** Probe results, latency/IP measurements, speed tests,
   traffic totals, and reconnect bookkeeping are not exported; a restore
   starts with clean probes and the daemon measures everything anew.

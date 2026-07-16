@@ -13,6 +13,8 @@ network I/O (through each proxy) and writes the result back into the store.
 
 from __future__ import annotations
 
+import ipaddress
+import os
 import re
 import sys
 import time
@@ -40,17 +42,36 @@ PROBE_PASS_DEADLINE = 60.0
 
 # What a sing-box startup failure over a stolen port looks like in its log:
 # "start inbound/mixed[in-…]: listen tcp 127.0.0.1:<port>: bind: address already in use"
-_LOOPBACK_PORT = re.compile(r"127\.0\.0\.1:(\d+)")
+# The host part follows the configured listen address (see _listen_addr), so
+# match any IPv4 host or a bracketed IPv6 one, not just loopback.
+_LOOPBACK_PORT = re.compile(r"(?:(?:\d{1,3}\.){3}\d{1,3}|\]):(\d+)")
 
 
 def _ports_in_use(err_text: str) -> set[int]:
-    """Loopback ports named before an address-in-use message on the same line."""
+    """Ports named before an address-in-use message on the same line."""
     return {
         int(port)
         for line in err_text.splitlines()
         if "address already in use" in line
         for port in _LOOPBACK_PORT.findall(line.split("address already in use", 1)[0])
     }
+
+
+def _listen_addr() -> str:
+    """The address channel/router inbounds bind. Default (and the only host
+    behavior): loopback. ``ALLE_LISTEN`` — set to ``0.0.0.0`` by the container
+    image, where the container boundary is the trust boundary — widens it;
+    an invalid value is logged and ignored rather than killing the daemon
+    or silently widening the bind."""
+    value = (os.environ.get("ALLE_LISTEN") or "").strip()
+    if not value:
+        return "127.0.0.1"
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        applog.log(f"ALLE_LISTEN={value!r} is not an IP address — using 127.0.0.1")
+        return "127.0.0.1"
+    return value
 
 
 def _probe_detail(ref: str, result: dict) -> str:
@@ -135,7 +156,7 @@ class Engine:
                 {
                     "type": "mixed",
                     "tag": ch.inbound_tag,
-                    "listen": "127.0.0.1",
+                    "listen": _listen_addr(),
                     "listen_port": ch.port,
                 }
             )
@@ -259,7 +280,7 @@ class Engine:
                 {
                     "type": "mixed",
                     "tag": ROUTER_INBOUND_TAG,
-                    "listen": "127.0.0.1",
+                    "listen": _listen_addr(),
                     "listen_port": port,
                 }
             )

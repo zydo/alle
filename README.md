@@ -82,11 +82,12 @@ bypass the VPN and expose your home address, alle captures and rejects it.
 
 **Platforms**
 
-| Platform | Support   |
-| -------- | --------- |
-| macOS    | Supported |
-| Linux    | Supported |
-| Windows  | Planned   |
+| Platform | Support                                     |
+| -------- | ------------------------------------------- |
+| macOS    | Supported                                   |
+| Linux    | Supported                                   |
+| Docker   | Supported — build from the repo (see below) |
+| Windows  | Planned                                     |
 
 **Features**
 
@@ -95,8 +96,9 @@ bypass the VPN and expose your home address, alle captures and rejects it.
 | Core CLI          | Providers, channels, per-channel proxies, status, tests (probe + speed + traffic), logs                          |
 | Routing           | Ruleset-based router entrypoint with domain/CIDR/all matchers, kill-switch, CLI shadow lint, built-in LAN bypass |
 | Web UI            | Dashboard (channels, probe/speed, routes, kill-switch) + Logs page                                               |
+| Docker            | Container profile: proxy hub for compose networks, VPN gateway container (tun), declarative boot config          |
 | Desktop companion | Planned                                                                                                          |
-| Distribution      | PyPI CLI package; native installers planned                                                                      |
+| Distribution      | PyPI CLI package; registry-published Docker image and native installers planned                                  |
 
 ## Install
 
@@ -134,6 +136,31 @@ so it starts at login and is supervised — see the
 
 Also works: `python -m pip install alle-proxy` into an environment you manage,
 or one-off runs with `uvx --from alle-proxy alle --help`.
+
+**In Docker** — for servers and compose stacks, alle also runs as a container
+(a registry-published image is planned; for now, build from the repo):
+
+```bash
+git clone https://github.com/zydo/alle && cd alle
+docker build -t alle .
+docker run -d --name alle --restart unless-stopped \
+  -v alle-state:/var/lib/alle \
+  -v ./bundle.yaml:/etc/alle/bundle.yaml:ro \
+  alle
+docker exec alle alle status        # manage with the same CLI, via exec
+```
+
+The container is configured declaratively: mount a
+[setup bundle](docs/declarative-config.md) and every start converges on it
+(tokens can stay out of the file via `token_env`/`token_file`). Other
+containers on the same Docker network reach the channel and router proxy
+ports directly — or join the container's network to ride a full VPN tunnel
+(gateway mode). See the [Docker section](#docker) below,
+**[docs/docker.md](docs/docker.md)** (image design), and
+**[docs/docker-compose.md](docs/docker-compose.md)** (compose walkthrough).
+None of this changes host installs: outside a
+container, proxy ports stay loopback-only with OS-assigned numbers, exactly
+as described everywhere else in this README.
 
 After installation:
 
@@ -340,9 +367,17 @@ The bundle is a **secret** (it carries WireGuard private keys and provider
 tokens), so treat it like a password file. The same export and import
 (merge / replace) are on the Web UI's **Bundle** page.
 
+Because `import` merges idempotently, a bundle doubles as **startup config**:
+the Docker image applies a mounted bundle on every boot, and the same file
+works on hosts. Two features keep such a file shareable: credential
+indirection (`token_env:` / `token_file:` instead of an inline token) and
+declared ports (`port:` per channel, `router: {port: …}`) for setups where
+apps or compose files must know ports ahead of time.
+
 The full format, apply semantics, how to hand-write one provider by provider,
-and all caveats (ports don't travel, token-provider channels may re-resolve a
-fresh server, cloning a setup to two machines) live in the dedicated guides:
+and all caveats (auto-assigned ports don't travel, token-provider channels may
+re-resolve a fresh server, cloning a setup to two machines) live in the
+dedicated guides:
 **[docs/declarative-config.md](docs/declarative-config.md)** (how to author
 one) and **[docs/bundle.md](docs/bundle.md)** (format reference + caveats),
 plus [`alle validate`](docs/cli-reference.md#alle-validate-file) to check a
@@ -408,6 +443,42 @@ from `~/.alle/control_api.json` into the login page. Sessions idle out after
 30 minutes without an open tab (capped at 12 hours); the masthead's **Sign
 out** button revokes every session immediately.
 
+## Docker
+
+The same core runs as a container for servers and compose stacks — two
+patterns:
+
+- **Proxy hub** — sibling containers on the same Docker network point their
+  egress at `alle:<router-port>` or a channel port, exactly the explicit-proxy
+  model above, one network layer out. Declare stable ports in the bundle
+  (`port: 20010`) so compose files can publish them.
+
+  ```yaml
+  services:
+    alle:
+      image: alle
+      restart: unless-stopped
+      volumes: [alle-state:/var/lib/alle, ./bundle.yaml:/etc/alle/bundle.yaml:ro]
+      environment: {NORDVPN_TOKEN: "${NORDVPN_TOKEN}"}
+    app:
+      image: some/app
+      environment: {ALL_PROXY: socks5h://alle:20000}
+  ```
+
+- **VPN gateway container** — with `cap_add: [NET_ADMIN]`,
+  `devices: [/dev/net/tun]`, and `ALLE_RUN_AS_ROOT=1`, `alle tun on` captures
+  the *container's own* network namespace (the host's routes are never
+  touched). Other containers join via `network_mode: service:alle` and get
+  full-tunnel VPN with the same routing rules — and with the kill-switch on,
+  a dropped tunnel means they go dark instead of leaking.
+
+Everything container-specific is opt-in via environment the image sets
+(`ALLE_LISTEN`, `ALLE_PORT_BASE`, `ALLE_CONTAINER`, …) — a host install never
+changes behavior. The image design and trust-boundary notes live in
+**[docs/docker.md](docs/docker.md)**; a step-by-step compose walkthrough
+(bundle authoring, secrets, verification, day-2 operations, troubleshooting)
+in **[docs/docker-compose.md](docs/docker-compose.md)**.
+
 ## How it works
 
 - `alle` keeps its local state under `~/.alle/`, or under `$ALLE_HOME` when that
@@ -428,7 +499,11 @@ out** button revokes every session immediately.
   probe.
 
 - Local proxy ports are assigned by the OS and stored in state. Use
-  `alle channels ls` to see the current ports.
+  `alle channels ls` to see the current ports. When something outside alle
+  must know a port ahead of time (a firewall rule, a compose file), declare
+  it instead — `alle channels add … --port 20010`, or `port:` in a bundle;
+  declared ports are honored as written and clash loudly rather than being
+  silently moved.
 
 - The background runtime applies state changes, keeps the `sing-box` process in
   sync, probes channel health, and records per-channel traffic totals.
@@ -442,12 +517,18 @@ out** button revokes every session immediately.
   `~/.alle/` or `$ALLE_HOME`.
 - The state directory is kept owner-only (`0700`), and credential/state/config
   files inside it are written with private permissions from the first byte.
-- `alle` does not read provider tokens from environment variables; credentials
-  are added explicitly with `alle providers add`.
+- `alle` never reads provider tokens from environment variables implicitly;
+  credentials are added explicitly with `alle providers add`, or — for
+  version-controlled setups and containers — by a bundle that *names* its
+  source explicitly (`token_env: NORDVPN_TOKEN` / `token_file:
+  /run/secrets/…`).
 - `alle` downloads a pinned upstream `sing-box` release and verifies its checksum
   before running it.
 - Local proxy ports bind to loopback. Traffic only uses a VPN exit when an app is
-  pointed at one of those proxies.
+  pointed at one of those proxies. (The one exception is the Docker image,
+  which explicitly opts into binding the container's network — there the
+  container boundary is the trust boundary; see
+  [docs/docker.md](docs/docker.md). Host installs are never affected.)
 - The loopback proxies are unauthenticated: on a multi-user machine, any local
   user or process can send traffic through your channels (and your provider
   account). alle assumes a single-user machine; don't run it where that
@@ -462,6 +543,8 @@ Planned next steps:
 
 - More WireGuard-capable VPN providers. See
   [VPN Provider Research](docs/vpn-provider-research.md).
+- A registry-published Docker image (the Dockerfile ships today; publishing is
+  CI work).
 - Desktop companion with OS-level VPN integration.
 - Windows support and broader distribution.
 

@@ -26,6 +26,36 @@ the same machine may be able to send traffic through your channels (and your
 provider account). alle assumes a single-user machine; don't run it where
 that assumption fails. (Tracked as backlog: per-installation proxy auth.)
 
+## The container profile (Docker)
+
+The official Docker image shifts the trust boundary **one layer out, by
+explicit opt-in**: it sets `ALLE_LISTEN=0.0.0.0`, so the (still
+unauthenticated) channel/router proxy ports are reachable from the
+*container's network* — the same reasoning as loopback-on-bare-metal, with
+the container network in the role of the machine. Consequences:
+
+- **Anything on the container's Docker network can use the proxies** (and
+  your provider account). Keep alle on networks whose members you trust, and
+  treat a `-p`-published proxy port as publishing an open proxy to whatever
+  can reach it — only ever publish onto trusted networks.
+- **The Web UI does not widen.** It stays `127.0.0.1`-only inside the
+  container; its auth model was built for one loopback caller. Manage via
+  `docker exec <name> alle …`.
+- **Nothing changes on hosts.** `ALLE_LISTEN` (and the other container knobs)
+  default off; container *detection* only ever refuses host-only footguns and
+  rephrases hints — it never rebinds or reallocates.
+- **Gateway (tun) mode** follows the same tun trust analysis below, scoped to
+  the container's netns: the capture is per-container, the host's route table
+  is never touched, and the privilege is granted at `docker run` time
+  (`--cap-add NET_ADMIN --device /dev/net/tun`) instead of sudo/setcap/helper.
+- **Secret indirection** (`token_env`/`token_file` in bundles) names its
+  source explicitly — alle still never *scans* the environment for
+  credentials. Environment variables are visible to `docker inspect` and any
+  process in the container; secret files (compose/k8s secrets) are the
+  tighter channel where that matters.
+
+See [docker.md](docker.md) for the image design.
+
 ## TUN mode: the elevated trust surface
 
 Explicit-proxy mode (the default) runs entirely as your OS user and the
@@ -155,4 +185,18 @@ tunnel.
 
 The bundled sing-box is a pinned upstream release, checksum-verified on every
 use — a binary that doesn't match the pinned SHA-256 is re-downloaded, never
-executed.
+executed. A pre-provisioned binary (`ALLE_SINGBOX=<path>`, e.g. an air-gapped
+host or a baked image) is held to the same pin: verified on every start, and
+a mismatch is a hard error — alle never downloads over or beside a path the
+operator chose. The Docker image deliberately ships **no** sing-box; the
+container fetches and verifies the pinned build into its state volume on
+first start, exactly like a host install.
+
+The same pin-everything discipline covers the build inputs: every GitHub
+Action is pinned to an immutable commit SHA, the Dockerfile's base images are
+pinned by manifest digest (the tag is only a comment), and Python
+dependencies install from the committed `uv.lock`. CI counterparts keep the
+pins honest: the image is built and boot-tested on every PR, OSV scans the
+lockfile and Trivy scans the built image's layers (weekly and pre-merge, so
+advisories published *after* a pin still surface), and Dependabot bumps all
+three pin families on the same weekly cadence.

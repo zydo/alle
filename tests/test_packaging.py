@@ -2,8 +2,9 @@
 
 Regression for the P1 'constrain package contents and complete notices' gate:
 
-* local-only roadmap notes never leak into a release artifact (they used to —
-  Hatchling reads ``.gitignore`` but not ``.git/info/exclude``);
+* local-only notes (roadmaps under ``.localonly/``) never leak into a release
+  artifact (they used to — Hatchling reads ``.gitignore`` but not
+  ``.git/info/exclude``);
 * the dashboard screenshot stays in the sdist (so it renders on the PyPI
   project page via a relative README path) but out of the installed wheel (the
   Web UI never serves it);
@@ -55,10 +56,17 @@ def _wheel_names(wheel: Path) -> set[str]:
         return set(zf.namelist())
 
 
-def test_roadmaps_do_not_leak_into_artifacts(built):
+def test_local_only_notes_do_not_leak_into_artifacts(built):
+    # Local-only notes (roadmaps live under .localonly/ as of 2026-07-14) must
+    # stay out of both artifacts — check the directory and the old filename
+    # pattern, since Hatchling reads .gitignore but not .git/info/exclude.
     sdist, wheel = built
     for name in _sdist_names(sdist) | _wheel_names(wheel):
-        assert "ROADMAP" not in name.upper(), f"roadmap leaked into artifact: {name}"
+        upper = name.upper()
+        assert "ROADMAP" not in upper, f"roadmap leaked into artifact: {name}"
+        assert ".LOCALONLY" not in upper, (
+            f"local-only notes leaked into artifact: {name}"
+        )
 
 
 def test_screenshot_in_sdist_not_wheel(built):

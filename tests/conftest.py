@@ -18,6 +18,10 @@ def _isolated_state(monkeypatch):
         # succeed and the tun privilege gate / singbox running_pid take the
         # helper path instead of the code path under test).
         monkeypatch.setenv("ALLE_HELPER_SOCKET", os.path.join(tmp, "nope.sock"))
+        # The opt-in profile knobs must never leak from the invoking shell (or
+        # a container CI runner) into tests that assert the defaults.
+        for var in ("ALLE_LISTEN", "ALLE_PORT_BASE", "ALLE_SINGBOX", "ALLE_CONTAINER"):
+            monkeypatch.delenv(var, raising=False)
         yield
 
 

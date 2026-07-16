@@ -373,7 +373,7 @@ def test_import_failure_before_commit_leaves_setup_untouched(monkeypatch):
     data["providers"]["nordvpn"]["credential"] = {"token": "tok-456"}
     before_state = Store.load().data
 
-    def boom(self, providers, rulesets, killswitch, lan_direct):
+    def boom(self, providers, rulesets, killswitch, lan_direct, router_port=None):
         raise RuntimeError("state write failed")
 
     monkeypatch.setattr(Store, "merge_setup", boom)
@@ -391,7 +391,7 @@ def test_restore_failure_before_commit_leaves_credentials_untouched(monkeypatch)
     data = bundle.export_bundle()
     data["providers"]["nordvpn"]["credential"] = {"token": "tok-456"}
 
-    def boom(self, providers, rulesets, killswitch, lan_direct):
+    def boom(self, providers, rulesets, killswitch, lan_direct, router_port=None):
         raise RuntimeError("state write failed")
 
     monkeypatch.setattr(Store, "restore_setup", boom)

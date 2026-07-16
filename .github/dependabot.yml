@@ -1,0 +1,22 @@
+# Keeps every pin fresh — the counterpart of the pin-everything discipline:
+# Actions are pinned to commit SHAs, the Dockerfile's base images to manifest
+# digests, and Python dependencies to uv.lock. Without automated bumps those
+# pins only ever go stale. Weekly, aligned with the supply-chain sweep, so a
+# bump PR and the advisory scan land in the same review pass.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday

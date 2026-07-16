@@ -13,13 +13,19 @@ write, so concurrent writers from different processes don't interleave.
 from __future__ import annotations
 
 import os
+import sys
 import time
 from pathlib import Path
 
-from alle import paths
+from alle import fsio, paths
 
 
 MAX_LOG_BYTES = 5 * 1024 * 1024  # rotate a log file that grows past this
+
+# Foreground mode (`alle run`, the container's PID 1): every log line is also
+# written to stderr so `docker logs` sees the same timeline as `alle logs`.
+# Off by default — background daemons and CLI calls keep file-only logging.
+echo_stderr = False
 
 
 def _log_path() -> Path:
@@ -43,11 +49,22 @@ def rotate_if_needed(p: Path, max_bytes: int) -> None:
 def log(message: str) -> None:
     """Append one timestamped line. Best-effort: never raises into the caller."""
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {message}\n"
+    if echo_stderr:
+        try:
+            sys.stderr.write(line)
+            sys.stderr.flush()
+        except OSError:
+            pass
     try:
         p = _log_path()
         rotate_if_needed(p, MAX_LOG_BYTES)
+        existed = p.exists()
         with open(p, "a") as f:
             f.write(line)
+        if not existed:
+            # a root-run CLI (docker exec, sudo) creating the log must not
+            # own it — the unprivileged daemon appends here too
+            fsio._preserve_owner(p, p.parent)
     except OSError:
         pass
 
