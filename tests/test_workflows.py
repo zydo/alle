@@ -21,7 +21,13 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 SHA = re.compile(r"^[0-9a-f]{40}$")
 
-WORKFLOW_NAMES = ["ci.yml", "publish.yml", "supply-chain.yml"]
+WORKFLOW_NAMES = [
+    "ci.yml",
+    "publish-docker.yml",
+    "publish-pypi.yml",
+    "publish.yml",
+    "supply-chain.yml",
+]
 
 
 def _load(name: str) -> dict:
@@ -102,13 +108,57 @@ def test_ci_gates_match_the_publish_gate():
 
 def test_publish_reuses_the_one_built_artifact():
     wf = _load("publish.yml")
-    assert "build" in wf["jobs"]["publish-pypi"]["needs"]
-    assert "publish-pypi" in wf["jobs"]["github-release"]["needs"]
-    for name in ("publish-pypi", "github-release"):
-        steps = wf["jobs"][name].get("steps", [])
+    publishers = {
+        "publish-pypi": "./.github/workflows/publish-pypi.yml",
+        "publish-docker": "./.github/workflows/publish-docker.yml",
+    }
+    for name, reusable in publishers.items():
+        job = wf["jobs"][name]
+        assert "build" in job["needs"]
+        assert job["uses"] == reusable
+    assert set(wf["jobs"]["github-release"]["needs"]) == {
+        "publish-pypi",
+        "publish-docker",
+    }
+    consumers = (
+        (_load("publish-pypi.yml"), "publish"),
+        (wf, "github-release"),
+    )
+    for workflow, name in consumers:
+        steps = workflow["jobs"][name].get("steps", [])
         assert any(
             s.get("uses", "").startswith("actions/download-artifact") for s in steps
         ), f"{name} must download the build artifact instead of rebuilding"
+
+
+def test_dockerhub_overview_publishes_the_readme():
+    wf = _load("publish-docker.yml")
+    steps = list(_steps(wf))
+    step = next(
+        s
+        for _job, s in steps
+        if s.get("uses", "").startswith("peter-evans/dockerhub-description")
+    )
+    image_push = next(
+        s
+        for _job, s in steps
+        if s.get("uses", "").startswith("docker/build-push-action")
+    )
+    assert steps.index(("publish", image_push)) < steps.index(("publish", step))
+    image_actions = (
+        "docker/setup-qemu-action",
+        "docker/setup-buildx-action",
+        "docker/login-action",
+        "docker/metadata-action",
+        "docker/build-push-action",
+    )
+    for _job, candidate in steps:
+        if candidate.get("uses", "").startswith(image_actions):
+            assert candidate["if"] == "github.event_name != 'workflow_dispatch'"
+    inputs = step["with"]
+    assert inputs["repository"] == "${{ vars.DOCKERHUB_USERNAME }}/alle"
+    assert inputs["readme-filepath"] == "./README.md"
+    assert inputs["enable-url-completion"] is True
 
 
 def test_supply_chain_scans_lockfile_and_secrets():
