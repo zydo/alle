@@ -226,7 +226,11 @@ current setup:
   first-match-wins an appended block can never hijack existing routing.
   Re-importing the same bundle therefore duplicates its rulesets — the shadow
   lint in `alle routes ls` flags the dead copies; remove and `reorder` as
-  needed.
+  needed. For a bundle you intend to apply repeatedly, use
+  [`alle sync`](cli-reference.md#alle-sync-file) instead — merge semantics
+  plus managed provenance, so repeat applies are idempotent and removals
+  prune only what sync created (it's what the Docker entrypoint runs on
+  every container start).
 - `killswitch` / `lan_direct` are applied when present in the file, left
   alone when absent.
 - A ruleset target may reference a channel from the bundle *or* one that

@@ -556,13 +556,13 @@ def _resolve_credential(credential: dict, path: str, errors: list) -> dict:
             )
             continue
         if source == "env":
-            got = os.environ.get(value)
-            if not (got or "").strip():
+            got = (os.environ.get(value) or "").strip()
+            if not got:
                 errors.append(
                     (f"{path}.{key}", f"environment variable {value!r} is not set")
                 )
                 continue
-            resolved[field_name] = got.strip()
+            resolved[field_name] = got
         elif source == "file":
             try:
                 got = Path(value).expanduser().read_text()
@@ -1021,6 +1021,150 @@ def apply_import(text: str, *, location_lookup=None) -> dict:
             "unchanged": merged["unchanged"],
         },
         "rulesets_added": merged["rulesets_added"],
+        "wg_resolved": wg_resolved,
+        "wg_fallback": wg_fallback,
+        "killswitch": router["killswitch"],
+        "lan_direct": router["lan_direct"],
+    }
+
+
+def apply_sync(text: str, *, location_lookup=None) -> dict:
+    """Converge the **managed** setup on a bundle — the startup-sync apply mode
+    (the Docker entrypoint runs it on every boot; hosts can use it for the same
+    declarative workflow).
+
+    Interactive ``import`` keeps its append/merge semantics; sync adds
+    provenance on top of the same upsert rules: state this mode creates is
+    marked managed, and each sync updates/prunes **only** the managed blocks
+    (see :meth:`Store.sync_setup`), so the same mounted bundle across N boots
+    is idempotent — no duplicated rulesets — while hand-made channels,
+    rulesets, and ad-hoc ``channels disable`` state survive untouched.
+
+    All-or-nothing like import: validation + network resolution stage first,
+    then ONE state transaction commits. Credential writes, when the bundle's
+    credential actually differs from the stored one, wrap the commit in a
+    setup transaction; an unchanged bundle performs no credential write and
+    leaves ``state.json`` byte-identical. Credentials of pruned providers are
+    removed post-commit (best-effort, like provider removal).
+    """
+    data = loads(text)
+    store = Store.load()
+
+    # A managed channel the bundle no longer declares is about to be pruned —
+    # it must not validate as a ruleset target. Bundle refs are read from the
+    # raw parse defensively; validate() re-checks the shapes right after.
+    raw_refs: set[str] = set()
+    raw_providers = data.get("providers")
+    if isinstance(raw_providers, dict):
+        for provider, entry in raw_providers.items():
+            chans = entry.get("channels") if isinstance(entry, dict) else None
+            if isinstance(chans, dict):
+                raw_refs |= {f"{provider}/{cid}" for cid in chans}
+    existing_refs = {
+        f"{provider}/{cid}"
+        for provider, prov in (store.data.get("providers") or {}).items()
+        for cid, ch in (prov.get("channels") or {}).items()
+        if not (ch.get("managed") and f"{provider}/{cid}" not in raw_refs)
+    }
+
+    parsed = validate(
+        data,
+        text=text,
+        extra_channel_refs=existing_refs,
+        stored_credentials_ok=True,
+        location_lookup=location_lookup,
+        check_locations="disabled",
+    )
+    wg_resolved, wg_fallback = _resolve_token_wg(
+        parsed, store, stored_credentials_ok=True
+    )
+
+    creds_added: list[str] = []
+    creds_replaced: list[str] = []
+    planned_creds: dict[str, dict] = {}
+    for provider, entry in parsed["providers"].items():
+        if entry["credential"] is None:
+            continue
+        old = credentials.get(provider)
+        if old != entry["credential"]:
+            planned_creds[provider] = entry["credential"]
+            (creds_added if old is None else creds_replaced).append(provider)
+
+    router = parsed["router"]
+
+    def commit_state() -> dict:
+        return store.sync_setup(
+            {p: e["channels"] for p, e in parsed["providers"].items()},
+            router["rulesets"] or [],
+            killswitch=router["killswitch"],
+            lan_direct=router["lan_direct"],
+            router_port=router["port"],
+        )
+
+    try:
+        if planned_creds:
+            with txn.setup_transaction("bundle sync") as t:
+                for provider, creds in planned_creds.items():
+                    credentials.set_(provider, creds)
+                synced = commit_state()
+                t.commit()
+        else:
+            # No credential writes: the state transaction IS the whole commit,
+            # and an unchanged bundle re-writes byte-identical state (no setup
+            # transaction id to churn it).
+            synced = commit_state()
+    except PortInUseError as e:
+        raise BundleError([("providers", str(e))]) from e
+    except ReferencedError as e:
+        raise BundleError(
+            [
+                (
+                    "providers.{}.channels.{}.enabled".format(*ref.split("/", 1)),
+                    "cannot disable — routing rule(s) still reference it: "
+                    + ", ".join(r["id"] for r in rules_)
+                    + " (retarget or remove them first)",
+                )
+                for ref, rules_ in sorted(e.blockers.items())
+            ]
+        ) from e
+
+    # Post-commit best-effort work, mirroring import/restore: drop pruned
+    # identities' credentials and metrics, lift tombstones on (re)created ones.
+    for provider in synced["providers_pruned"]:
+        credentials.remove(provider)
+        metrics.remove_provider(provider)
+    for ref in synced["pruned"]:
+        provider, _, cid = ref.partition("/")
+        if provider not in synced["providers_pruned"]:
+            metrics.remove_channel(provider, cid)
+    for provider in synced["providers_added"]:
+        metrics.revive_provider(provider)
+    for ref in synced["created"]:
+        provider, _, cid = ref.partition("/")
+        metrics.revive_channel(provider, cid)
+
+    return {
+        "mode": "sync",
+        "providers_added": synced["providers_added"],
+        "providers_pruned": synced["providers_pruned"],
+        "credentials": {
+            "added": creds_added,
+            "replaced": creds_replaced,
+            "removed": synced["providers_pruned"],
+        },
+        "channels": {
+            "created": synced["created"],
+            "updated": synced["updated"],
+            "unchanged": synced["unchanged"],
+            "pruned": synced["pruned"],
+            "kept_referenced": synced["kept_referenced"],
+        },
+        "rulesets": {
+            "added": synced["rulesets_added"],
+            "updated": synced["rulesets_updated"],
+            "unchanged": synced["rulesets_unchanged"],
+            "pruned": synced["rulesets_pruned"],
+        },
         "wg_resolved": wg_resolved,
         "wg_fallback": wg_fallback,
         "killswitch": router["killswitch"],

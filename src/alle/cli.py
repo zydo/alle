@@ -862,6 +862,61 @@ def cmd_import(args):
     _print_bundle_summary(result)
 
 
+def cmd_sync(args):
+    result = service.setup_sync(_read_bundle_file(args.file))
+    print(f"Synced {args.file} (managed desired state):")
+    ch, rs = result["channels"], result["rulesets"]
+    for ref in ch["created"]:
+        print(f"  + channel {ref}")
+    for ref in ch["updated"]:
+        print(f"  ~ channel {ref} updated")
+    for ref in ch["pruned"]:
+        print(f"  - channel {ref} pruned (no longer in the bundle)")
+    for ref, names in ch["kept_referenced"].items():
+        print(
+            f"  ! channel {ref} is no longer in the bundle but was KEPT — "
+            f"routing rule(s) still reference it: {', '.join(names)}"
+        )
+    for provider in result["providers_pruned"]:
+        print(f"  - provider {provider} pruned (with its credential)")
+    for provider in result["credentials"]["added"]:
+        print(f"  + credential for {provider}")
+    for provider in result["credentials"]["replaced"]:
+        print(f"  ~ credential for {provider} REPLACED (was different)")
+    for name in rs["added"]:
+        print(f"  + ruleset {name!r} (appended at the lowest priority)")
+    for name in rs["updated"]:
+        print(f"  ~ ruleset {name!r} updated in place")
+    for name in rs["pruned"]:
+        print(f"  - ruleset {name!r} pruned (no longer in the bundle)")
+    for ref in result["wg_resolved"]:
+        print(f"  ~ {ref}: fresh server resolved via the provider token")
+    for ref in result["wg_fallback"]:
+        print(
+            f"  ! {ref}: could not resolve a fresh server — kept the "
+            "bundle's snapshot (auto-reconnect refreshes it when possible)"
+        )
+    for note in result.get("notes", []):
+        print(f"  note: {note}")
+    unchanged = len(ch["unchanged"])
+    if unchanged:
+        print(f"  = {unchanged} channel(s) already up to date")
+    if not any(
+        (
+            ch["created"],
+            ch["updated"],
+            ch["pruned"],
+            result["providers_pruned"],
+            result["credentials"]["added"],
+            result["credentials"]["replaced"],
+            rs["added"],
+            rs["updated"],
+            rs["pruned"],
+        )
+    ):
+        print("  Nothing to change — the managed setup already matches the bundle.")
+
+
 def cmd_validate(args):
     result = service.setup_validate(_read_bundle_file(args.file))
     print(
@@ -1449,6 +1504,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --replace: skip the confirmation prompt (required when not a TTY)",
     )
     im.set_defaults(func=cmd_import)
+    sy = sub.add_parser(
+        "sync",
+        help="converge on a bundle as the managed desired state: repeat syncs "
+        "are idempotent; edits/removals touch only what sync itself created "
+        "(the Docker entrypoint runs this on every boot)",
+    )
+    sy.add_argument("file", help="bundle file (the declared desired state)")
+    sy.set_defaults(func=cmd_sync)
     va = sub.add_parser(
         "validate",
         help="check a bundle file against every rule without applying it "

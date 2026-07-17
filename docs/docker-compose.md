@@ -42,7 +42,7 @@ important for compose — **declared ports**, so your compose file can name
 them. Save as `bundle.yaml` next to your `compose.yaml`:
 
 ```yaml
-# bundle.yaml — applied (idempotent merge) on every container start
+# bundle.yaml — the managed desired state, synced on every container start
 kind: alle-bundle
 bundle_version: 1
 providers:
@@ -97,7 +97,10 @@ services:
     restart: unless-stopped
     volumes:
       - alle-state:/var/lib/alle                 # channels/keys/binary cache survive recreates
-      - ./bundle.yaml:/etc/alle/bundle.yaml:ro   # the declarative setup
+      - type: bind                               # the declarative setup;
+        source: ./bundle.yaml                    # long syntax: a missing host
+        target: /etc/alle/bundle.yaml            # file fails `up` instead of
+        read_only: true                          # mounting an empty directory
     environment:
       NORDVPN_TOKEN: ${NORDVPN_TOKEN}            # from .env or your shell
     # Publish ONLY if machines outside this compose network need the proxies.
@@ -161,7 +164,10 @@ services:
       NORDVPN_TOKEN: ${NORDVPN_TOKEN}
     volumes:
       - alle-state:/var/lib/alle
-      - ./bundle.yaml:/etc/alle/bundle.yaml:ro
+      - type: bind
+        source: ./bundle.yaml
+        target: /etc/alle/bundle.yaml
+        read_only: true
     # ports for JOINED services are declared HERE (they share this netns):
     # ports:
     #   - "8080:8080"                  # e.g. app's web port
@@ -210,7 +216,10 @@ services:
     secrets: [nordvpn_token]
     volumes:
       - alle-state:/var/lib/alle
-      - ./bundle.yaml:/etc/alle/bundle.yaml:ro
+      - type: bind
+        source: ./bundle.yaml
+        target: /etc/alle/bundle.yaml
+        read_only: true
 
 secrets:
   nordvpn_token:
@@ -249,7 +258,10 @@ services:
       ALLE_API_SECRET: ${ALLE_API_SECRET}  # ...authenticated by this Bearer secret
     volumes:
       - alle-state:/var/lib/alle
-      - ./bundle.yaml:/etc/alle/bundle.yaml:ro
+      - type: bind
+        source: ./bundle.yaml
+        target: /etc/alle/bundle.yaml
+        read_only: true
 
   manager:
     build: ./manager                       # your automation
@@ -293,10 +305,12 @@ Rules of the road:
 ## Day-2 operations
 
 - **Change the setup** — edit `bundle.yaml`, then `docker compose restart
-  alle`. Import is an idempotent merge: changed channels update in place,
-  unchanged ones aren't touched, and removed *rulesets* re-append (prune old
-  ones with `alle routes …` or do a one-off destructive sync:
-  `docker compose exec alle alle import --replace --yes /etc/alle/bundle.yaml`).
+  alle`. The entrypoint's `alle sync` converges on the bundle: changed
+  channels/rulesets update in place, unchanged ones aren't touched, and
+  entries you removed from the bundle are pruned — while anything you created
+  ad hoc (`docker exec`, Web UI) is left alone. A pruned channel one of your
+  ad-hoc rules still references is kept and reported in the logs instead of
+  breaking the rule.
 - **Upgrade alle** — run `docker compose pull alle`, then `docker compose up
   -d` (recreates the container; the volume carries the setup over). If you pin
   a release tag, update that tag in `compose.yaml` first. There is no
@@ -312,6 +326,7 @@ Rules of the road:
 | Symptom                                                   | Likely cause / fix                                                                                                                                                                                                                                                                                                        |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Container exits immediately at start                      | The bundle failed validation — the entrypoint fails loudly. `docker compose logs alle` shows every blocker with line numbers; fix `bundle.yaml`.                                                                                                                                                                          |
+| `bundle.yaml is a directory` in logs                      | A short `-v` mount with a missing host file made Docker create a directory at the bundle path. Delete that stray directory, restore the host file, and use the long `type: bind` volume syntax (as in every example here) so a missing file fails at `up` time instead.                                                   |
 | `environment variable 'NORDVPN_TOKEN' is not set` in logs | The variable didn't reach the container: set it in `.env`, the shell, or switch to compose secrets + `token_file`.                                                                                                                                                                                                        |
 | A service can't reach `alle:20010`                        | The port isn't declared in the bundle (allocation order gave it another number — `docker compose exec alle alle status` shows actual ports), the channel is **disabled** (a disabled channel's port isn't listening — `alle channels ls` shows STATUS; enable it), or the two services are on different compose networks. |
 | First start is slow / unhealthy briefly                   | The one-time sing-box download into the volume. The health check's start period covers it; it never repeats while the volume lives.                                                                                                                                                                                       |

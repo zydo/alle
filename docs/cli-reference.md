@@ -43,6 +43,7 @@ omit the prefix.
   - [`alle test`](#alle-test)
   - [`alle export [--out <file>]`](#alle-export---out-file)
   - [`alle import <file> [--replace] [--yes]`](#alle-import-file---replace---yes)
+  - [`alle sync <file>`](#alle-sync-file)
   - [`alle validate <file>`](#alle-validate-file)
   - [`alle logs`](#alle-logs)
   - [`alle ui`](#alle-ui)
@@ -862,6 +863,39 @@ The whole file is validated first — every WireGuard field, matcher, and target
 reference — and rejected as a whole with a per-entry error list (path +
 reason) on any problem. An import never half-applies. Full semantics and
 caveats: [bundle.md](bundle.md).
+
+---
+
+## `alle sync <file>`
+
+Converge on a bundle as the **managed desired state** — the startup-sync
+apply mode. This is what the Docker entrypoint runs on every container start;
+it works the same on a host for a version-controlled, repeatedly-applied
+setup file.
+
+Same upsert rules as a merge import (ports, labels, fresh token resolution,
+the `enabled` tri-state — an *unstated* `enabled` still preserves an ad-hoc
+`alle channels disable`), plus **provenance**: everything sync creates is
+marked as owned by the bundle, and each sync updates/prunes only that owned
+state:
+
+- **Idempotent** — syncing the same bundle again changes nothing (state stays
+  byte-identical; rulesets never duplicate, unlike repeated `import`).
+- **Edits update in place** — a changed managed ruleset is rewritten at its
+  existing priority position; a changed channel updates in place.
+- **Removals prune** — a channel/ruleset/provider dropped from the bundle is
+  removed (a dropped provider's credential too). Channels and rulesets
+  created *outside* sync (CLI, Web UI, `alle import`) are never pruned or
+  adopted. A managed channel that a hand-made rule still references is kept
+  and reported instead of breaking the rule.
+
+`alle import` keeps its append/merge semantics; use `sync` when the file is
+the single source of truth, `import` when layering a backup or template onto
+an existing setup.
+
+```bash
+alle sync my-setup.yaml     # converge: idempotent, prunes what the file dropped
+```
 
 ---
 

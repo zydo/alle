@@ -111,14 +111,21 @@ jobs:
                     address: [10.5.0.2/32]
                     peer: {public_key: $key, endpoint_host: 192.0.2.10, endpoint_port: 51820,
                            allowed_ips: [0.0.0.0/0], keepalive: 25}
-          router: {killswitch: false, lan_direct: true}
+          router:
+            killswitch: false
+            lan_direct: true
+            rulesets:
+              - name: ci-direct
+                target: direct
+                matchers: [all]
           EOF
           docker network create alle-ci-net
           docker run -d --name alle-ci --network alle-ci-net \
             -e ALLE_API_LISTEN=0.0.0.0:8080 \
             -e ALLE_API_SECRET=ci-test-secret-0123456789 \
-            -v alle-ci-state:/var/lib/alle \
-            -v /tmp/alle-bundle.yaml:/etc/alle/bundle.yaml:ro alle:ci
+            --mount type=volume,src=alle-ci-state,dst=/var/lib/alle \
+            --mount type=bind,src=/tmp/alle-bundle.yaml,dst=/etc/alle/bundle.yaml,readonly \
+            alle:ci
       - name: Wait for health
         run: |
           for i in $(seq 1 30); do
@@ -136,6 +143,28 @@ jobs:
           # the image profile widens binds to the container network
           docker exec alle-ci sh -c 'grep -o "\"listen\": \"[^\"]*\"" /var/lib/alle/singbox.json | sort -u' \
             | grep -q '0.0.0.0'
+      # Startup sync must be idempotent: a restart re-syncs the same bundle
+      # and must neither duplicate its ruleset nor change the managed setup.
+      - name: Assert restart idempotency (startup sync)
+        run: |
+          docker restart alle-ci
+          for i in $(seq 1 30); do
+            if docker exec alle-ci alle health; then break; fi
+            sleep 5
+          done
+          count=$(docker exec alle-ci alle export --out - | grep -c "ci-direct")
+          [ "$count" = "1" ] || { echo "::error::ruleset duplicated on restart (count=$count)"; exit 1; }
+      # The mount contract fails loud: a directory at the bundle path (what a
+      # short -v mount creates from a missing host file) must refuse the boot.
+      - name: Assert a directory bundle path is refused
+        run: |
+          mkdir -p /tmp/alle-empty-dir
+          if docker run --rm --mount type=bind,src=/tmp/alle-empty-dir,dst=/etc/alle/bundle.yaml,readonly \
+              alle:ci alle run 2>/tmp/dir-bundle.log; then
+            echo "::error::entrypoint accepted a directory at the bundle path"
+            exit 1
+          fi
+          grep -q "is a directory" /tmp/dir-bundle.log
       # The compose-sibling contract for the control API: on an explicit
       # network bind, a valid Bearer (the injected secret) passes a foreign
       # Host, an unauthenticated request is refused, and /health serves

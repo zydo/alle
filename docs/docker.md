@@ -31,15 +31,21 @@ Two ways to use it:
 ```bash
 docker pull ziyudo/alle:latest
 docker run -d --name alle --restart unless-stopped \
-  -v alle-state:/var/lib/alle \
-  -v ./bundle.yaml:/etc/alle/bundle.yaml:ro \
+  --mount type=volume,src=alle-state,dst=/var/lib/alle \
+  --mount type=bind,src="$PWD/bundle.yaml",dst=/etc/alle/bundle.yaml,readonly \
   ziyudo/alle:latest
 docker exec alle alle status        # manage with the same CLI, via exec
 ```
 
 The container is configured declaratively: the mounted
-[setup bundle](declarative-config.md) is applied on every start (tokens can
-stay out of the file via `token_env`/`token_file` — see below).
+[setup bundle](declarative-config.md) is synced on every start (tokens can
+stay out of the file via `token_env`/`token_file` — see below). Use the long
+`--mount` syntax as shown: with short `-v`, a missing host file silently
+mounts an empty *directory* at the bundle path — `--mount` makes it a
+`docker run` error instead, and the entrypoint refuses a directory or other
+non-regular file at the bundle path rather than skipping it. Run without a
+bundle mount for the interactive profile (configure via `docker exec`/Web
+UI), or set `ALLE_BUNDLE=none` to declare the no-bundle profile explicitly.
 
 ## Image design
 
@@ -81,9 +87,24 @@ stay out of the file via `token_env`/`token_file` — see below).
 
 Mount a [declarative bundle](declarative-config.md) at
 `/etc/alle/bundle.yaml` (override the path with `ALLE_BUNDLE`); the
-entrypoint applies it with `alle import` on **every start**, which merges
-idempotently — so the container always converges on the declared setup, and a
-broken bundle fails the start loudly in `docker logs`.
+entrypoint converges on it with `alle sync` on **every start**, and a broken
+bundle fails the start loudly in `docker logs`, before anything is imported.
+
+Sync is the *managed* apply mode: everything it creates is marked as owned by
+the bundle, and each boot updates or prunes **only that owned state** —
+
+- the same bundle across N restarts is idempotent (state stays
+  byte-identical; rulesets never duplicate);
+- an edited bundle updates each managed channel/ruleset once, in place, at
+  its existing priority position;
+- entries removed from the bundle are pruned — including a dropped
+  provider's credential — while channels and rulesets you created ad hoc
+  (via `docker exec` or the Web UI) are never touched, and a pruned channel
+  that one of *your* rules still references is kept and reported instead of
+  breaking your routing.
+
+Interactive `alle import` keeps its append/merge semantics — sync provenance
+exists only for this startup path.
 
 Keep tokens out of the file with credential indirection (also works on
 hosts):
@@ -130,7 +151,10 @@ services:
     restart: unless-stopped
     volumes:
       - alle-state:/var/lib/alle
-      - ./bundle.yaml:/etc/alle/bundle.yaml:ro
+      - type: bind                        # long syntax: a missing host file
+        source: ./bundle.yaml             # fails `up` instead of mounting a
+        target: /etc/alle/bundle.yaml     # fresh empty directory
+        read_only: true
     environment:
       NORDVPN_TOKEN: ${NORDVPN_TOKEN}
     # ports:                     # only if the LAN should reach the proxies
@@ -196,7 +220,10 @@ services:
       NORDVPN_TOKEN: ${NORDVPN_TOKEN}
     volumes:
       - alle-state:/var/lib/alle
-      - ./bundle.yaml:/etc/alle/bundle.yaml:ro
+      - type: bind
+        source: ./bundle.yaml
+        target: /etc/alle/bundle.yaml
+        read_only: true
 
   app:
     image: some/app

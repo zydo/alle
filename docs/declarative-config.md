@@ -313,7 +313,14 @@ router:
 alle validate my-setup.yaml             # check it first — every problem with line numbers
 alle import my-setup.yaml               # merge into the current setup
 alle import my-setup.yaml --replace     # or REPLACE the whole setup (confirms first)
+alle sync my-setup.yaml                 # or converge on it as the managed desired state
 ```
+
+`sync` is the mode for a file you keep applying (the Docker entrypoint uses
+it on every container start): repeat syncs are idempotent, edits update in
+place, and entries removed from the file are pruned — but only entries sync
+itself created; hand-made channels/rulesets are never touched. See
+[`alle sync`](cli-reference.md#alle-sync-file).
 
 Run `alle validate` while authoring: it checks the whole file at once (kind,
 supported providers, token presence, unique channel ids, country/city against

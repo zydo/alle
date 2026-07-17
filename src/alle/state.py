@@ -1530,6 +1530,273 @@ class Store:
         self.data = _read_raw()
         return summary
 
+    def sync_setup(
+        self,
+        providers: dict[str, dict],
+        rulesets: list[dict],
+        killswitch: bool | None,
+        lan_direct: bool | None,
+        router_port: int | None = None,
+    ) -> dict:
+        """Converge the **managed** setup on a bundle in ONE transaction — the
+        startup-sync commit point (the Docker entrypoint's boot apply).
+
+        Same upsert semantics as :meth:`merge_setup` (ports, labels, the
+        ``enabled`` tri-state — an unstated ``enabled`` still keeps an ad-hoc
+        ``channels disable`` across boots), plus **provenance**: everything
+        this method creates is marked ``managed`` in state, and on each sync
+        the managed set converges on the bundle while hand-made state is never
+        touched:
+
+        * A ruleset block matches a managed block **by name** (in order).
+          Matched + identical → untouched (ids and position stable, so the
+          same bundle across N boots is byte-idempotent). Matched + edited →
+          rewritten in place at the same priority position. Unmatched bundle
+          blocks append at the bottom, marked managed; unmatched managed
+          blocks are pruned. Ad-hoc blocks are never touched, and never
+          adopted — but an ad-hoc matcher *inside* a managed block belongs to
+          the bundle's block and is converged away.
+        * A managed channel the bundle no longer declares is pruned — unless a
+          surviving rule still references it, in which case it is kept and
+          reported (``kept_referenced``) instead of breaking the restrict-only
+          invariant or the boot. Hand-added channels are never pruned, and an
+          existing unmanaged channel the bundle also declares is updated but
+          never adopted as managed.
+        * A managed provider the bundle dropped is pruned once its last
+          channel is gone (the caller removes its credential post-commit).
+
+        ``None`` toggles change nothing (like merge); ``rulesets`` is the
+        bundle's *complete* managed set — an absent/empty router block prunes
+        every managed ruleset. Explicitly disabling a channel a surviving rule
+        references raises :class:`ReferencedError` (checked against the
+        post-sync rules, so a rule pruned in the same sync is no blocker).
+        """
+        summary: dict = {
+            "providers_added": [],
+            "providers_pruned": [],
+            "created": [],
+            "updated": [],
+            "unchanged": [],
+            "pruned": [],
+            "kept_referenced": {},
+            "rulesets_added": [],
+            "rulesets_updated": [],
+            "rulesets_unchanged": [],
+            "rulesets_pruned": [],
+        }
+        with transaction() as data:
+            # Channels the sync explicitly disables. The restrict-only check
+            # runs *after* the ruleset sync, against the surviving rules — a
+            # managed rule pruned by this same sync must not block a disable.
+            disabling = {
+                (provider, cid)
+                for provider, channels in providers.items()
+                for cid, spec in channels.items()
+                if spec.get("enabled") is False
+                and ((data["providers"].get(provider) or {}).get("channels") or {})
+                .get(cid, {})
+                .get("enabled", True)
+            }
+
+            # ---- converge the managed ruleset blocks on the bundle's list.
+            # Rules go first so channel pruning sees the *surviving* rule set,
+            # but target existence is checked only after the upserts below —
+            # a bundle block may target a channel this same sync creates.
+            router = data.setdefault("router", _router_blank())
+            rules = router.setdefault("rules", [])
+            blocks = _ruleset_blocks(rules) if rules else []
+            desired = list(rulesets)
+            matched: dict[str, int] = {}  # ruleset id -> desired index
+            claimed: set[int] = set()
+            for i, spec in enumerate(desired):
+                for block in blocks:
+                    if block["id"] in matched:
+                        continue
+                    if not any(r.get("managed") for r in block["rules"]):
+                        continue
+                    if block["name"] == spec["name"]:
+                        matched[block["id"]] = i
+                        claimed.add(i)
+                        break
+            new_rules: list[dict] = []
+            pending_targets: list[str] = []
+            max_rule = max((_rule_num(r) for r in rules), default=0)
+            max_rsid = max((_ruleset_num(r) for r in rules), default=0)
+
+            def managed_rows(spec: dict, rsid: str) -> list[dict]:
+                nonlocal max_rule
+                pending_targets.append(spec["target"])
+                rows = []
+                for matcher_type, value in spec["matchers"]:
+                    max_rule += 1
+                    rows.append(
+                        {
+                            "id": f"r{max_rule}",
+                            "type": matcher_type,
+                            "value": value,
+                            "target": spec["target"],
+                            "ruleset": rsid,
+                            "ruleset_name": spec["name"],
+                            "managed": True,
+                        }
+                    )
+                return rows
+
+            for block in blocks:
+                if block["id"] in matched:
+                    spec = desired[matched[block["id"]]]
+                    identical = (
+                        block["target"] == spec["target"]
+                        and [(r["type"], r["value"]) for r in block["rules"]]
+                        == list(spec["matchers"])
+                        and all(r.get("managed") for r in block["rules"])
+                    )
+                    if identical:
+                        new_rules.extend(block["rules"])
+                        summary["rulesets_unchanged"].append(spec["name"])
+                    else:
+                        new_rules.extend(managed_rows(spec, block["id"]))
+                        summary["rulesets_updated"].append(spec["name"])
+                elif any(r.get("managed") for r in block["rules"]):
+                    summary["rulesets_pruned"].append(block["name"])
+                else:
+                    new_rules.extend(block["rules"])
+            for i, spec in enumerate(desired):
+                if i in claimed:
+                    continue
+                max_rsid += 1
+                new_rules.extend(managed_rows(spec, f"rs{max_rsid}"))
+                summary["rulesets_added"].append(spec["name"])
+            router["rules"] = new_rules
+
+            # ---- prune managed channels the bundle no longer declares.
+            # Before the upserts, so a declared port moving between managed
+            # identities (a rename) is free to claim, and against the final
+            # rules, so a rule pruned above is no blocker.
+            bundle_refs = {
+                (provider, cid)
+                for provider, channels in providers.items()
+                for cid in channels
+            }
+            candidates = [
+                (provider, cid)
+                for provider, prov in data["providers"].items()
+                for cid, ch in (prov.get("channels") or {}).items()
+                if ch.get("managed") and (provider, cid) not in bundle_refs
+            ]
+            blockers = _rules_referencing(data, set(candidates))
+            for provider, cid in candidates:
+                ref = f"{provider}/{cid}"
+                if ref in blockers:
+                    names: list[str] = []
+                    for rule in blockers[ref]:
+                        name = str(rule.get("ruleset_name") or rule.get("id"))
+                        if name not in names:
+                            names.append(name)
+                    summary["kept_referenced"][ref] = names
+                    continue
+                del data["providers"][provider]["channels"][cid]
+                summary["pruned"].append(ref)
+
+            # ---- prune managed providers the bundle dropped, once empty
+            dropped = [
+                provider
+                for provider, prov in data["providers"].items()
+                if provider not in providers
+                and prov.get("managed")
+                and not (prov.get("channels") or {})
+            ]
+            for provider in dropped:
+                del data["providers"][provider]
+                summary["providers_pruned"].append(provider)
+
+            # ---- upsert the bundle's channels (merge semantics + provenance)
+            for provider, channels in providers.items():
+                prov = data["providers"].get(provider)
+                if prov is None:
+                    prov = data["providers"][provider] = {
+                        "channels": {},
+                        "managed": True,
+                    }
+                    summary["providers_added"].append(provider)
+                chans = prov.setdefault("channels", {})
+                for cid, spec in channels.items():
+                    ref = f"{provider}/{cid}"
+                    ch = chans.get(cid)
+                    label = spec.get("label") or ""
+                    port = int(spec.get("port") or 0)
+                    enabled = spec.get("enabled")
+                    if enabled is None:
+                        enabled = ch.get("enabled", True) if ch is not None else True
+                    wg = spec["wg"] or {}
+                    if ch is None:
+                        entry = {
+                            "country": spec.get("country", ""),
+                            "city": spec.get("city", ""),
+                            "port": _claim_port(data, port)
+                            if port
+                            else _next_free_port(data),
+                            "wg": wg,
+                            "managed": True,
+                        }
+                        if enabled:
+                            entry["probe"] = {}
+                        else:
+                            entry["enabled"] = False
+                        if label:
+                            entry["label"] = label
+                        chans[cid] = entry
+                        summary["created"].append(ref)
+                    elif (
+                        ch.get("country", "") == spec.get("country", "")
+                        and ch.get("city", "") == spec.get("city", "")
+                        and ch.get("wg") == wg
+                        and ch.get("enabled", True) == enabled
+                        and (not label or ch.get("label", "") == label)
+                        and (not port or int(ch.get("port") or 0) == port)
+                    ):
+                        summary["unchanged"].append(ref)
+                    else:
+                        # update in place; the existing managed/unmanaged
+                        # provenance is deliberately untouched (never adopt)
+                        ch["country"] = spec.get("country", "")
+                        ch["city"] = spec.get("city", "")
+                        ch["wg"] = wg
+                        if port and port != int(ch.get("port") or 0):
+                            ch["port"] = _claim_port(
+                                data, port, exclude=(provider, cid)
+                            )
+                        if label:
+                            ch["label"] = label
+                        if enabled:
+                            ch.pop("enabled", None)
+                        else:
+                            ch["enabled"] = False
+                            ch.pop("probe", None)
+                        ch.pop("reconnect", None)
+                        summary["updated"].append(ref)
+
+            for target in pending_targets:
+                _ensure_channel_target(data, target)
+
+            if disabling:
+                blockers = _rules_referencing(data, disabling)
+                if blockers:
+                    raise ReferencedError(blockers)
+
+            if killswitch is not None:
+                router["killswitch"] = bool(killswitch)
+            if lan_direct is not None:
+                router["lan_direct"] = bool(lan_direct)
+            if router_port and router_port != int(router.get("port") or 0):
+                used = _used_ports(data)
+                used.pop(int(router.get("port") or 0), None)
+                if router_port in used:
+                    raise PortInUseError(router_port, used[router_port])
+                router["port"] = router_port
+        self.data = _read_raw()
+        return summary
+
     def restore_setup(
         self,
         providers: dict[str, dict],

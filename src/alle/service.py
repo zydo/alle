@@ -1497,6 +1497,40 @@ def setup_import(text: str) -> dict:
     return summary
 
 
+def setup_sync(text: str) -> dict:
+    """Converge the managed setup on a bundle (the startup-sync apply mode —
+    what the container entrypoint runs on every boot).
+
+    Same staging discipline as import (validate-all, resolve, then commit),
+    but with managed provenance: repeat syncs of the same bundle are
+    idempotent, edits update each managed block once, and removals prune only
+    managed state — hand-made channels/rulesets and ad-hoc ``channels
+    disable`` survive. See ``alle sync`` / docs/docker.md.
+    """
+    lookup, notes = _bundle_location_lookup()
+    try:
+        summary = bundle.apply_sync(text, location_lookup=lookup)
+    except bundle.BundleError as e:
+        raise ServiceError(str(e)) from e
+    summary["notes"] = notes
+    ch, rs = summary["channels"], summary["rulesets"]
+    applog.log(
+        f"synced bundle: +{len(ch['created'])} channel(s), "
+        f"{len(ch['updated'])} updated, {len(ch['pruned'])} pruned; "
+        f"rulesets +{len(rs['added'])}, {len(rs['updated'])} updated, "
+        f"{len(rs['pruned'])} pruned; "
+        f"{len(summary['wg_resolved'])} resolved fresh, "
+        f"{len(summary['wg_fallback'])} from snapshot"
+    )
+    for ref, names in ch["kept_referenced"].items():
+        applog.log(
+            f"sync kept {ref} (no longer in the bundle) — routing rule(s) "
+            f"still reference it: {', '.join(names)}"
+        )
+    daemon.ensure_running()
+    return summary
+
+
 def setup_restore_plan(text: str) -> dict:
     """Validate a bundle for restore and report both sides' counts — the
     caller's confirmation step. Changes nothing."""
