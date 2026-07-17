@@ -1,0 +1,8 @@
+{
+  "name": "alle-web-regression",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check:web": "node scripts/check-web-assets.mjs && node --test tests/web_protocol.test.mjs"
+  }
+}

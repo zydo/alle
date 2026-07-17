@@ -6,6 +6,7 @@ import { api, toast, confirmDialog } from "./core.js";
 
 let view = null;
 let mounted = false;
+let lifetime = null;
 let refreshStatus = () => { };
 
 // A stable identity for a File, so an in-flight validate/import can tell if the
@@ -82,6 +83,9 @@ const PAGE = `
 export function mount(v, ctx) {
   view = v;
   mounted = true;
+  lifetime = ctx?.lifetime || null;
+  const owned = lifetime;
+  const active = () => mounted && lifetime === owned && (!owned || owned.active());
   refreshStatus = ctx?.refresh || (() => { });
   view.innerHTML = PAGE;
 
@@ -94,8 +98,9 @@ export function mount(v, ctx) {
     try {
       let res;
       try {
-        res = await fetch("/api/v1/export");
+        res = await fetch("/api/v1/export", { signal: owned?.signal });
       } catch (err) {
+        if (!active()) return;
         const detail = err instanceof Error ? err.message : String(err);
         toast(`Can't reach the daemon: ${detail}`, "err");
         return;
@@ -107,9 +112,9 @@ export function mount(v, ctx) {
         toast(detail, "err");
         return;
       }
-      if (!mounted) return;
+      if (!active()) return;
       const blob = await res.blob();
-      if (!mounted) return;
+      if (!active()) return;
       const disp = res.headers.get("Content-Disposition") || "";
       const m = /filename="([^"]+)"/.exec(disp);
       const a = document.createElement("a");
@@ -122,7 +127,7 @@ export function mount(v, ctx) {
       URL.revokeObjectURL(url);
       toast("Downloaded bundle.");
     } finally {
-      if (mounted) { btn.disabled = false; btn.textContent = label; }
+      if (active()) { btn.disabled = false; btn.textContent = label; }
     }
   };
 
@@ -146,21 +151,22 @@ export function mount(v, ctx) {
     const file = input.files[0];
     if (!file) { err.textContent = "Choose a bundle file."; return; }
     const startedWith = fileKey(file);
-    const text = await file.text();
     const label = validateBtn.textContent;
     validateBtn.disabled = true; validateBtn.textContent = "Validating…";
     try {
-      const res = await api.post("/api/v1/validate", { text });
+      const text = await file.text();
+      if (!active()) return;
+      const res = await api.post("/api/v1/validate", { text }, { signal: owned?.signal });
       // A different file was selected while we were awaiting: the result is for
       // the old file and must not mark the new one valid (setName already
       // cleared the message); and stop if the page navigated away.
-      if (!mounted || fileKey(input.files[0]) !== startedWith) return;
+      if (!active() || fileKey(input.files[0]) !== startedWith) return;
       if (!res.ok) { err.textContent = res.error; return; }
       const d = res.data;
       okMsg.textContent = `Valid — ${d.providers} provider(s), ${d.channels} channel(s), `
         + `${d.rulesets} ruleset(s).` + (d.notes?.length ? ` (${d.notes.join("; ")})` : "");
     } finally {
-      if (mounted && fileKey(input.files[0]) === startedWith) {
+      if (active() && fileKey(input.files[0]) === startedWith) {
         validateBtn.disabled = false; validateBtn.textContent = label;
       }
     }
@@ -201,31 +207,32 @@ export function mount(v, ctx) {
     err.textContent = "";
     const file = input.files[0];
     if (!file) { err.textContent = "Choose a bundle file."; return; }
-    const startedWith = fileKey(file);
-    const text = await file.text();
-    if (!mounted || fileKey(input.files[0]) !== startedWith) return;
-    if (isRestore && !(await confirmDialog(
-      "Replace the entire setup?",
-      `Everything not in "${file.name}" — providers, channels, rulesets — will be removed. This cannot be undone.`,
-      { confirmText: "Replace setup", danger: true },
-    ))) return;
-    if (!mounted) return;
-    const active = isRestore ? replaceBtn : mergeBtn;
-    const label = active.textContent;
+    if (mergeBtn.disabled || replaceBtn.disabled) return;
     mergeBtn.disabled = true; replaceBtn.disabled = true;
-    active.textContent = isRestore ? "Replacing…" : "Merging…";
+    const startedWith = fileKey(file);
+    const activeBtn = isRestore ? replaceBtn : mergeBtn;
+    const label = activeBtn.textContent;
     try {
-      const res = await api.post("/api/v1/import", { text, replace: isRestore });
-      if (!mounted) return;
+      const text = await file.text();
+      if (!active() || fileKey(input.files[0]) !== startedWith) return;
+      if (isRestore && !(await confirmDialog(
+        "Replace the entire setup?",
+        `Everything not in "${file.name}" — providers, channels, rulesets — will be removed. This cannot be undone.`,
+        { confirmText: "Replace setup", danger: true },
+      ))) return;
+      if (!active()) return;
+      activeBtn.textContent = isRestore ? "Replacing…" : "Merging…";
+      const res = await api.post("/api/v1/import", { text, replace: isRestore }, { signal: owned?.signal });
+      if (!active()) return;
       if (!res.ok) { err.textContent = res.error; return; }
       input.value = ""; setName("");
       toast(bundleSummaryText(res.data));
       bundleFallbackToast(res.data);
       refreshStatus();
     } finally {
-      if (mounted) {
+      if (active()) {
         mergeBtn.disabled = false; replaceBtn.disabled = false;
-        active.textContent = label;
+        activeBtn.textContent = label;
       }
     }
   }
@@ -234,7 +241,7 @@ export function mount(v, ctx) {
   replaceBtn.onclick = () => apply(true);
 }
 
-export function unmount() { view = null; mounted = false; }
+export function unmount() { view = null; mounted = false; lifetime = null; }
 
 function bundleSummaryText(d) {
   if (d.mode === "restore") {

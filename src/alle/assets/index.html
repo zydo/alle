@@ -50,10 +50,11 @@
     </div>
   </header>
 
-  <div id="banner" class="banner"><span class="dot"></span><span>Disconnected from the daemon — retrying…</span></div>
+  <output id="banner" class="banner" aria-live="polite"><span class="dot"></span><span>Disconnected from the
+      daemon — retrying…</span></output>
 
   <main id="view"></main>
-  <div id="toasts"></div>
+  <output id="toasts" aria-live="polite"></output>
 
   <script type="module" src="/app.js"></script>
 </body>

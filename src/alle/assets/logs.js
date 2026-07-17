@@ -5,9 +5,11 @@ import { api, toast, customSelectHTML, wireCustomSelects } from "./core.js";
 let view = null;
 let timer = null;
 let lines = 200;
+let lifetime = null;
 
-export function mount(v) {
+export function mount(v, ctx) {
   view = v;
+  lifetime = ctx?.lifetime || null;
   view.innerHTML = `
     <section>
       <div class="section-head"><span class="eyebrow">Logs</span>
@@ -21,21 +23,31 @@ export function mount(v) {
   wireCustomSelects(view);
   view.querySelector("#lines").onchange = (e) => { lines = Number(e.target.value); refresh(); };
   refresh();
-  timer = setInterval(refresh, 3000);
+  schedule();
 }
 
 export function unmount() {
-  if (timer) clearInterval(timer);
+  if (timer) clearTimeout(timer);
   timer = null;
+  lifetime = null;
   view = null;
+}
+
+function schedule() {
+  if (!view) return;
+  timer = setTimeout(async () => { await refresh(); schedule(); }, 3000);
 }
 
 async function refresh() {
   if (!view) return;
   const pre = view.querySelector("#log");
   const pinned = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
-  const res = await api.get(`/api/v1/logs?lines=${lines}`);
-  if (!view) return;
+  const owned = view;
+  const res = await api.get(
+    `/api/v1/logs?lines=${lines}`,
+    { signal: lifetime?.signal },
+  );
+  if (!view || view !== owned || lifetime && !lifetime.active()) return;
   if (!res.ok) { toast(res.error, "err"); return; }
   pre.textContent = res.data.text || "No log lines yet.";
   if (pinned) pre.scrollTop = pre.scrollHeight;

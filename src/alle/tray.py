@@ -1,8 +1,9 @@
 """macOS menu-bar companion — a v1 thin-client spike over :mod:`alle.companion`.
 
-Deliberately tiny and rendering-only: every action is a one-liner onto
-:class:`alle.companion.CompanionClient`, so the tray adds no capability the
-client does not already expose (the tray-scope guardrail). ``rumps`` is an
+Deliberately tiny and rendering-only: every action delegates to
+:class:`alle.companion.CompanionClient` through one coalescing background
+worker, so the tray adds no capability the client does not already expose and
+never blocks the AppKit callback thread. ``rumps`` is an
 optional dependency (``pip install alle-proxy[tray]``, macOS only); importing
 this module without it raises a clear message rather than a bare ImportError.
 
@@ -11,16 +12,96 @@ summary, start/stop/restart, tun on/off, kill-switch, open Web UI. Rule editing
 and everything else stays in the CLI and Web UI.
 
 Not unit-tested through a live GUI (rumps drives a real NSStatusItem); the
-logic that *is* tested lives in :mod:`alle.companion`. Quitting the tray
+client and worker concurrency logic are tested without AppKit. Quitting the tray
 deactivates TUN mode (a machine-wide route table should not outlive the app
 that turned it on) but never stops alled unless the user explicitly asks.
 """
 
 from __future__ import annotations
 
-from alle.companion import CompanionClient, CompanionError, DaemonUnavailable
+import threading
+from collections.abc import Callable
+from typing import Any
+
+from alle.companion import CompanionClient, DaemonUnavailable
 
 REFRESH_SECONDS = 5
+
+
+class CoalescingWorker:
+    """One latest-wins network worker for AppKit callbacks.
+
+    ``submit`` never performs I/O and never queues an unbounded list: a newer
+    pending status/action replaces an older pending one. Results carry their
+    generation back to the main thread and stale completions are discarded.
+    """
+
+    def __init__(self, dispatch: Callable[[Callable[[], None]], None]):
+        self._dispatch = dispatch
+        self._condition = threading.Condition()
+        self._pending: (
+            tuple[int, Callable[[], Any], Callable[[bool, Any], None]] | None
+        ) = None
+        self._generation = 0
+        self._closed = False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def submit(
+        self, work: Callable[[], Any], done: Callable[[bool, Any], None]
+    ) -> None:
+        with self._condition:
+            if self._closed:
+                return
+            self._generation += 1
+            self._pending = (self._generation, work, done)
+            self._condition.notify()
+
+    def _run(self):
+        while True:
+            with self._condition:
+                while self._pending is None and not self._closed:
+                    self._condition.wait()
+                if self._closed:
+                    return
+                pending = self._pending
+                if pending is None:
+                    continue
+                generation, work, done = pending
+                self._pending = None
+            try:
+                result = (True, work())
+            except Exception as error:  # noqa: BLE001 — delivered to UI callback
+                result = (False, error)
+            with self._condition:
+                current = generation == self._generation and not self._closed
+            if current:
+                self._dispatch(lambda done=done, result=result: done(*result))
+
+    def finish(self, work, timeout=2.0):
+        """Run final cleanup off-main and wait for at most ``timeout``."""
+        finished = threading.Event()
+
+        def run():
+            try:
+                work()
+            finally:
+                finished.set()
+
+        threading.Thread(target=run, daemon=True).start()
+        return finished.wait(timeout)
+
+    def close(self):
+        with self._condition:
+            self._closed = True
+            self._pending = None
+            self._condition.notify()
+
+
+def _dispatch_main(callback):
+    from Foundation import NSOperationQueue
+
+    NSOperationQueue.mainQueue().addOperationWithBlock_(callback)
 
 
 def _require_rumps():
@@ -68,22 +149,27 @@ def build_app():
                 None,
                 rumps.MenuItem("Quit alle tray", callback=self.on_quit),
             ]
+            self.worker = CoalescingWorker(_dispatch_main)
             self._refresh(None)
             rumps.Timer(self._refresh, REFRESH_SECONDS).start()
 
         # -- rendering --
         def _refresh(self, _):
-            try:
-                st = client.tray_state()
-            except DaemonUnavailable:
-                self.title = "alle ○"
-                self.status_item.title = "Daemon not running — alle start"
-                self.channels_item.title = ""
-                self.tun_item.state = self.ks_item.state = False
+            self.worker.submit(client.tray_state, self._status_done)
+
+        def _status_done(self, ok, value):
+            if not ok:
+                if isinstance(value, DaemonUnavailable):
+                    self.title = "alle ○"
+                    self.status_item.title = "Daemon not running — alle start"
+                    self.channels_item.title = ""
+                    self.tun_item.state = self.ks_item.state = False
+                else:
+                    self.status_item.title = f"Error: {value}"
                 return
-            except CompanionError as e:
-                self.status_item.title = f"Error: {e}"
-                return
+            self._render(value)
+
+        def _render(self, st):
             self.title = "alle ●" if st.running else "alle ○"
             ver = f" v{st.installed_version}" if st.installed_version else ""
             self.status_item.title = ("Running" if st.running else "Stopped") + ver
@@ -95,14 +181,19 @@ def build_app():
             self.ks_item.state = st.killswitch
 
         def _act(self, fn):
-            rumps = _require_rumps()
-            try:
+            def work():
                 fn()
-            except CompanionError as e:
-                rumps.alert("alle", str(e))
-            self._refresh(None)
+                return client.tray_state()
 
-        # -- actions (each a one-liner onto the client; no logic here) --
+            def done(ok, value):
+                if ok:
+                    self._render(value)
+                else:
+                    _require_rumps().alert("alle", str(value))
+
+            self.worker.submit(work, done)
+
+        # -- actions (delegated to the client on the background worker) --
         def toggle_tun(self, sender):
             self._act(lambda: client.set_tun(not sender.state))
 
@@ -121,18 +212,19 @@ def build_app():
         def open_web_ui(self, _):
             import webbrowser
 
-            try:
-                webbrowser.open(client.web_ui_login_url())
-            except CompanionError as e:
-                _require_rumps().alert("alle", str(e))
+            def done(ok, value):
+                if ok:
+                    webbrowser.open(value)
+                else:
+                    _require_rumps().alert("alle", str(value))
+
+            self.worker.submit(client.web_ui_login_url, done)
 
         def on_quit(self, _):
             # Deactivating tun is best-effort: a machine-wide route table must
             # not outlive the app that armed it. alled itself is left running.
-            try:
-                client.set_tun(False)
-            except CompanionError:
-                pass
+            self.worker.finish(lambda: client.set_tun(False), timeout=2.0)
+            self.worker.close()
             _require_rumps().quit_application()
 
     return AlleTray()

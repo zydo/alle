@@ -44,7 +44,10 @@ def test_status_output_shows_web_ui_url():
             "skew": False,
         },
         "web_ui": "http://127.0.0.1:8123",
+        "rest_api": "http://127.0.0.1:8123/api/v1",
     }
     text = output.status(snap)
     assert "Web UI    http://127.0.0.1:8123" in text
+    assert "REST API  http://127.0.0.1:8123/api/v1" in text
+    assert "shares the Web UI listener; Bearer auth required" in text
     assert "alle ui" in text

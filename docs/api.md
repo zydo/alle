@@ -17,6 +17,11 @@ disagree.
 
 ## Reaching the API
 
+`alle status` prints the canonical REST base explicitly, and `alle status
+--json` exposes it as `rest_api`. It is the Web UI origin plus `/api/v1`: both
+surfaces share one listener, but REST requests use the separate Bearer contract
+below. Status never prints the secret.
+
 **Host installs (default):** the server binds `127.0.0.1` on a per-install
 port recorded in `~/.alle/control_api.json` (`{"address", "secret", "host"}`,
 mode 0600). The port is stable across restarts.

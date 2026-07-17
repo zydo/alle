@@ -1,7 +1,7 @@
 // App shell: hash router, nav, and the single status poll that feeds the
 // masthead + the active page. Pages are plain modules with mount/unmount/onStatus.
 
-import { $, api } from "./core.js";
+import { $, api, createLifetime, dismissDialogs } from "./core.js";
 import * as dashboard from "./dashboard.js";
 import * as bundle from "./bundle.js";
 import * as logs from "./logs.js";
@@ -11,6 +11,10 @@ const pages = { "": dashboard, bundle, logs };
 const el = { pill: $("pill"), pillText: $("pill-text"), ver: $("ver"), banner: $("banner") };
 let current = null;
 let lastStatus = null;
+let lifetime = null;
+let statusRequest = null;
+let statusGeneration = 0;
+let appliedGeneration = 0;
 
 function setPill(up, text) { el.pill.classList.toggle("up", up); el.pillText.textContent = text; }
 
@@ -31,18 +35,27 @@ function route() {
   const known = Object.hasOwn(pages, key);
   const page = known ? pages[key] : dashboard;
   const activeKey = known ? key : "";
+  lifetime?.close();
+  dismissDialogs();
   current?.unmount?.();
   document.querySelectorAll(".nav a").forEach((a) =>
     a.classList.toggle("active", (a.dataset.route || "") === activeKey));
   const view = $("view");
   view.innerHTML = "";
   current = page;
-  page.mount(view, { refresh: tick });
+  lifetime = createLifetime();
+  page.mount(view, { refresh: tick, lifetime });
   if (lastStatus) current?.onStatus?.(lastStatus);
 }
 
 async function tick() {
-  const { ok, data } = await api.get("/api/v1/status");
+  if (statusRequest) return statusRequest;
+  const generation = ++statusGeneration;
+  statusRequest = api.get("/api/v1/status");
+  const { ok, data } = await statusRequest;
+  statusRequest = null;
+  if (generation < appliedGeneration) return;
+  appliedGeneration = generation;
   if (ok) {
     lastStatus = data;
     updateMasthead(data);
@@ -55,8 +68,7 @@ async function tick() {
 }
 
 async function scheduleNextTick() {
-  await tick();
-  setTimeout(scheduleNextTick, 3000);
+  try { await tick(); } finally { setTimeout(scheduleNextTick, 3000); }
 }
 
 $("logout").addEventListener("click", async () => {

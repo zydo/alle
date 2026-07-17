@@ -53,9 +53,12 @@ let paused = false;
 // change. Apply posts this order; refreshRoutes clears it.
 let pendingIds = null;
 let refreshStatus = () => { };
+let lifetime = null;
+let configRevision = null;
 
 export function mount(view, ctx) {
   refreshStatus = ctx?.refresh || (() => { });
+  lifetime = ctx?.lifetime || null;
   view.innerHTML = SHELL;
   el = {
     entry: view.querySelector("#entry"), entryAddr: view.querySelector("#entry-addr"),
@@ -65,12 +68,15 @@ export function mount(view, ctx) {
     probeAll: null, speedAll: null,
   };
   el.tunToggle.onclick = toggleTun;
+  el.tunToggle.onkeydown = activateOnKey;
   view.addEventListener("click", (e) => {
     const t = e.target.closest("[data-copy]");
     if (t?.dataset.copy) { copy(t.dataset.copy); e.stopPropagation(); }
   });
   el.channels.addEventListener("click", onChannelClick);
+  el.channels.addEventListener("keydown", activateOnKey);
   el.routes.addEventListener("click", onRouteClick);
+  el.routes.addEventListener("keydown", activateOnKey);
   el.routes.addEventListener("dragstart", onRouteDragStart);
   el.routes.addEventListener("dragover", onRouteDragOver);
   el.routes.addEventListener("drop", onRouteDrop);
@@ -78,7 +84,14 @@ export function mount(view, ctx) {
   refreshRoutes();
 }
 
-export function unmount() { el = {}; status = null; rulesets = []; router = null; measured = new Map(); busy = new Set(); dragRuleId = null; paused = false; pendingIds = null; }
+export function unmount() { el = {}; status = null; rulesets = []; router = null; measured = new Map(); busy = new Set(); dragRuleId = null; paused = false; pendingIds = null; lifetime = null; configRevision = null; }
+
+function activateOnKey(event) {
+  if ((event.key === "Enter" || event.key === " ") && event.target.matches('[role="button"]')) {
+    event.preventDefault();
+    event.target.click();
+  }
+}
 
 export function onStatus(s) {
   status = s;
@@ -89,7 +102,11 @@ export function onStatus(s) {
   // detaches the node being dragged and reverts the staged order. The routes
   // panel is reconciled on demand by refreshRoutes(); the periodic tick only
   // needs to refresh channels/entry above.
-  if (router && !dragRuleId) renderRoutes();
+  // Object spread already ignores null/undefined, so no empty fallbacks are
+  // needed while merging the latest flags into the last route snapshot.
+  router = { ...router, ...s.router };
+  if (configRevision !== null && s.config_revision !== configRevision && !dragRuleId) refreshRoutes();
+  configRevision = s.config_revision ?? configRevision;
 }
 
 function renderEntry(s) {
@@ -114,6 +131,7 @@ function renderEntry(s) {
 function renderTun(r) {
   const on = !!r.tun;
   el.tunToggle.classList.toggle("on", on);
+  el.tunToggle.setAttribute("aria-pressed", String(on));
   el.tunBead.classList.toggle("live", on);
   // The scope framing lives here: with tun on, the kill-switch (unmatched →
   // block) is genuinely system-wide, and the user must see that shift.
@@ -254,12 +272,22 @@ function chanRow(c) {
 function renderChannels() {
   const chans = status?.channels || [];
   const addRow = `<div class="row dashchan add" data-add-channel role="button" tabindex="0"><span class="add-cell" aria-hidden="true">＋</span><span class="add-label">Add Channel</span></div>`;
-  if (!chans.length) {
-    el.channels.innerHTML = `<div class="grid">${addRow}</div>`;
-    return;
-  }
+  let grid = el.channels.querySelector(".grid");
+  if (!grid) { grid = document.createElement("div"); grid.className = "grid"; el.channels.replaceChildren(grid); }
   const head = `<div class="row dashchan head"><span>Channel</span><span>Location</span><span>Port</span><span>IP</span><span>Latency</span><span>Sent</span><span>Received</span><span>Down Speed</span><span>Up Speed</span><span class="row-actions channel-actions channel-all-actions"><button class="icon-btn" id="probe-all" title="Probe All" aria-label="Probe all" data-probe-all>◉</button><button class="icon-btn" id="speed-all" title="Speed Test All" aria-label="Speed test all" data-speed-all>${GAUGE}</button></span></div>`;
-  el.channels.innerHTML = `<div class="grid">${head}${chans.map(chanRow).join("")}${addRow}</div>`;
+  const htmlNode = (html) => { const template = document.createElement("template"); template.innerHTML = html.trim(); return template.content.firstElementChild; };
+  const wanted = [];
+  if (chans.length) wanted.push(grid.querySelector(".dashchan.head") || htmlNode(head));
+  for (const channel of chans) {
+    const key = chanKey(channel);
+    const signature = JSON.stringify([channel, measured.get(key), [...busy].filter((item) => item.startsWith(key))]);
+    const current = grid.querySelector(`.dashchan.body[data-provider="${CSS.escape(channel.provider)}"][data-id="${CSS.escape(channel.name)}"]`);
+    if (current?.dataset.render === signature) wanted.push(current);
+    else { const row = htmlNode(chanRow(channel)); row.dataset.render = signature; wanted.push(row); }
+  }
+  const currentAdd = grid.querySelector("[data-add-channel]");
+  wanted.push(currentAdd || htmlNode(addRow));
+  grid.replaceChildren(...wanted);
   syncHeaderBusy();
 }
 
@@ -285,7 +313,7 @@ async function runTest(channel, speed) {
       toast("Speed Test In Progress.");
       await runSpeedStream(channel);
     } else {
-      const res = await api.post("/api/v1/test", { speed: false, channel: channel ? channel.name : null });
+      const res = await api.post("/api/v1/test", { speed: false, channel: channel ? chanKey(channel) : null });
       if (!res.ok) { toast(res.error, "err"); return; }
       // Test rows carry everything the table shows — fresh probe results and
       // the cumulative sent/received totals; there is no separate metrics call.
@@ -321,7 +349,8 @@ async function startSpeedStream(channel) {
     res = await fetch("/api/v1/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ speed: true, channel: channel ? channel.name : null }),
+      body: JSON.stringify({ speed: true, channel: channel ? chanKey(channel) : null }),
+      signal: lifetime?.signal,
     });
   } catch (err) {
     toast(`Can't reach the daemon: ${err instanceof Error ? err.message : String(err)}`, "err");
@@ -343,39 +372,63 @@ async function streamErrorMsg(res) {
 // Read the NDJSON body line by line, applying each row as it lands. Returns true
 // if an error event was seen (so the caller skips the success toast/refresh).
 async function consumeSpeedStream(body) {
-  const reader = body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  let errored = false;
-  for (; ;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (line && applySpeedEvent(line)) errored = true;
+  try {
+    const terminal = await parseSpeedStream(body, applySpeedRow);
+    if (terminal.type === "error") {
+      toast(terminal.data.error || "Speed test failed.", "err");
+      return true;
     }
-  }
-  return errored;
-}
-
-function applySpeedEvent(line) {
-  let evt;
-  try { evt = JSON.parse(line); } catch { return false; }
-  if (evt.type === "row" && evt.data) {
-    const r = evt.data;
-    // Each streamed row already carries post-test sent/received totals.
-    measured.set(`${r.provider}/${r.name}`, r);
-    busy.delete(`${r.provider}/${r.name}:speed`);
-    renderChannels();
-  } else if (evt.type === "error" && evt.data) {
-    toast(evt.data.error || "Speed test failed.", "err");
+    return false;
+  } catch (err) {
+    toast(`Speed test interrupted: ${err.message || err}`, "err");
     return true;
   }
-  // "done" carries only summary counts; nothing to render.
-  return false;
+}
+
+export async function parseSpeedStream(body, onRow = () => { }) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let terminal = null;
+
+  const accept = (line) => {
+    if (!line.trim()) return;
+    let event;
+    try { event = JSON.parse(line); } catch { throw new Error("malformed NDJSON record"); }
+    if (!event || typeof event !== "object" || !event.data || typeof event.data !== "object") {
+      throw new Error("invalid NDJSON record");
+    }
+    if (terminal) throw new Error("record after terminal event");
+    if (event.type === "row") onRow(event.data);
+    else if (event.type === "done" || event.type === "error") terminal = event;
+    else throw new Error(`unknown NDJSON event ${String(event.type)}`);
+  };
+
+  try {
+    for (; ;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let newline;
+      while ((newline = buffer.indexOf("\n")) >= 0) {
+        accept(buffer.slice(0, newline));
+        buffer = buffer.slice(newline + 1);
+      }
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) accept(buffer);
+    if (!terminal) throw new Error("stream ended without a terminal event");
+    return terminal;
+  } catch (error) {
+    await reader.cancel().catch(() => { });
+    throw error;
+  }
+}
+
+function applySpeedRow(r) {
+  measured.set(`${r.provider}/${r.name}`, r);
+  busy.delete(`${r.provider}/${r.name}:speed`);
+  renderChannels();
 }
 
 async function onChannelClick(e) {
@@ -438,7 +491,9 @@ function startRelabel(rowEl, c, current) {
 }
 
 async function refreshRoutes() {
-  const res = await api.get("/api/v1/routes");
+  const owned = lifetime;
+  const res = await api.get("/api/v1/routes", { signal: owned?.signal });
+  if (owned && (!owned.active() || owned !== lifetime)) return;
   if (!res.ok) { toast(res.error, "err"); return; }
   rulesets = res.data.rulesets || [];
   router = res.data.router || {};
@@ -490,6 +545,7 @@ function rulesetBar(rs, index) {
       <span class="hh rest">${GRIP} Priority ${index + 1}</span>
       <span class="hh sort">${GRAB} Sort</span>
     </div>
+    <span class="rule-moves"><button class="icon-btn" data-move="up" data-move-id="${esc(rs.id)}" aria-label="Move ${esc(name)} up"${index === 0 ? " disabled" : ""}>↑</button><button class="icon-btn" data-move="down" data-move-id="${esc(rs.id)}" aria-label="Move ${esc(name)} down"${index === orderedRulesets().length - 1 ? " disabled" : ""}>↓</button></span>
     <div class="rule-name" title="${esc(name)}">${esc(name)}</div>
     <button class="rule-addrs" data-id-edit="${esc(rs.id)}" title="Edit matchers">${addrsInner}</button>
     ${via}
@@ -505,7 +561,7 @@ function renderRoutes() {
     <div class="lan-text">${lanOn
       ? `LAN traffic (printers, NAS, router admin, local discovery, etc.) bypass VPN`
       : `LAN traffic follows the rules below; local devices (printers, NAS, router admin, local discovery, etc.) may not be reachable`}</div>
-    <span class="toggle ${lanOn ? "on" : ""}" data-lan-toggle role="button" tabindex="0" aria-label="Toggle LAN/local direct"><span class="toggle-knob"></span></span>
+    <button type="button" class="toggle ${lanOn ? "on" : ""}" data-lan-toggle aria-pressed="${lanOn}" aria-label="Toggle LAN/local direct"><span class="toggle-knob"></span></button>
   </div>`;
   const addRow = `<div class="rule-row add" data-add-rule role="button" tabindex="0"><span class="rule-add-cell" aria-hidden="true">＋</span><span class="add-label">Add Rule</span></div>`;
   const bars = list.map((rs, i) => rulesetBar(rs, i)).join("");
@@ -514,7 +570,7 @@ function renderRoutes() {
   const unmatchedRow = `<div class="rule-row unmatched${allow ? "" : " off"}">
     <div class="unmatched-priority">Unmatched</div>
     <div class="unmatched-text">For all other Internet traffic that is not matched by any of the VPN rulesets above, control whether you want it to go to the Internet.</div>
-    <div class="unmatched-control"><span class="unmatched-label">Allow Non-VPN Traffic</span><span class="toggle ${allow ? "on" : ""}" data-unmatched-toggle role="button" tabindex="0" aria-label="Toggle allow non-VPN traffic"><span class="toggle-knob"></span></span></div>
+    <div class="unmatched-control"><span class="unmatched-label">Allow Non-VPN Traffic</span><button type="button" class="toggle ${allow ? "on" : ""}" data-unmatched-toggle aria-pressed="${allow}" aria-label="Toggle allow non-VPN traffic"><span class="toggle-knob"></span></button></div>
   </div>`;
   const body = lanBar + bars + addRow + unmatchedRow;
   const dirty = !!pendingIds;
@@ -532,6 +588,8 @@ function renderRoutes() {
 }
 
 async function onRouteClick(e) {
+  const move = e.target.closest("[data-move]");
+  if (move) { moveRuleset(move.dataset.moveId, move.dataset.move); return; }
   if (e.target.closest("[data-add-rule]")) { openAddRule(); return; }
   const editId = e.target.closest("[data-id-edit]")?.dataset.idEdit;
   if (editId) { openEditRuleset(editId); return; }
@@ -542,6 +600,16 @@ async function onRouteClick(e) {
   if (!(await confirmDialog("Remove ruleset", `Remove the ruleset "${name}"?`, { confirmText: "Remove", danger: true }))) return;
   const res = await api.del(`/api/v1/routes/rulesets/${encodeURIComponent(removeId)}`);
   if (res.ok) { toast(`Removed ${name}.`); refreshRoutes(); refreshStatus(); } else toast(res.error, "err");
+}
+
+function moveRuleset(id, direction) {
+  const ids = orderedRulesets().map((rs) => rs.id);
+  const from = ids.indexOf(id); const to = from + (direction === "up" ? -1 : 1);
+  if (from < 0 || to < 0 || to >= ids.length) return;
+  [ids[from], ids[to]] = [ids[to], ids[from]];
+  pendingIds = ids;
+  renderRoutes();
+  el.routes.querySelector(`[data-move-id="${CSS.escape(id)}"][data-move="${direction}"]`)?.focus();
 }
 
 function onRouteDragStart(e) {
@@ -843,7 +911,7 @@ async function openAddChannel() {
     const grid = wiz.querySelector("#loc-grid");
     wiz.querySelector("#loc-search").oninput = (e) => {
       const q = e.target.value.toLowerCase();
-      [...grid.children].forEach((b) => { b.style.display = b.dataset.country.toLowerCase().includes(q) ? "" : "none"; });
+      [...grid.children].forEach((b) => { b.hidden = !b.dataset.country.toLowerCase().includes(q); });
     };
     wiz.querySelector("[data-back]").onclick = renderProviders;
     grid.onclick = (e) => {
@@ -866,7 +934,7 @@ async function openAddChannel() {
     const grid = wiz.querySelector("#loc-grid");
     wiz.querySelector("#loc-search").oninput = (e) => {
       const q = e.target.value.toLowerCase();
-      [...grid.children].forEach((b) => { const v = (b.dataset.city || "any city"); b.style.display = v.toLowerCase().includes(q) ? "" : "none"; });
+      [...grid.children].forEach((b) => { const v = (b.dataset.city || "any city"); b.hidden = !v.toLowerCase().includes(q); });
     };
     wiz.querySelector("[data-back]").onclick = renderCountryStep;
     grid.onclick = (e) => {

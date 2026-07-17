@@ -36,6 +36,8 @@ jobs:
         run: uv run ruff check
       - name: Check format
         run: uv run ruff format --check
+      - name: Check browser modules and stream protocols
+        run: npm run check:web
       # The same package smoke publish gates on: catch sdist/wheel/README
       # regressions pre-merge instead of on the release tag.
       - name: Package smoke (build + metadata/README render)

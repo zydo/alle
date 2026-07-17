@@ -105,25 +105,95 @@ _SECURITY_HEADERS = {
     "Referrer-Policy": "no-referrer",
 }
 
+
 # The HTTP methods each top-level /api/v1/<resource> accepts. A request whose
 # path names one of these resources but whose method isn't listed is a 405
 # (with an Allow header); a path whose first segment isn't here is a 404.
+def _api_route_methods(seg: list[str]) -> set[str] | None:
+    """Methods for one exact REST target, or ``None`` when it is unknown.
+
+    This registry is deliberately shape-only and body-free. Dispatch consults
+    it before media-type/JSON parsing so an unknown nested target remains 404
+    and a known target under the wrong verb remains 405 with its exact Allow.
+    """
+    exact: dict[tuple[str, ...], set[str]] = {
+        ("status",): {"GET"},
+        ("providers",): {"GET", "POST"},
+        ("providers", "catalog"): {"GET"},
+        ("providers", "remove"): {"POST"},
+        ("channels",): {"GET", "POST"},
+        ("channels", "enabled"): {"POST"},
+        ("channels", "remove"): {"POST"},
+        ("routes",): {"GET"},
+        ("routes", "rulesets"): {"POST"},
+        ("routes", "reorder"): {"POST"},
+        ("routes", "killswitch"): {"POST"},
+        ("routes", "lan"): {"POST"},
+        ("locations",): {"GET"},
+        ("metrics",): {"GET"},
+        ("logs",): {"GET"},
+        ("test",): {"POST"},
+        ("tun",): {"POST"},
+        ("export",): {"GET"},
+        ("import",): {"POST"},
+        ("validate",): {"POST"},
+        ("login",): {"POST"},
+        ("logout",): {"POST"},
+    }
+    methods = exact.get(tuple(seg))
+    if methods is not None:
+        return methods
+    if len(seg) == 2 and seg[0] == "providers":
+        return {"DELETE"}
+    if len(seg) == 3 and seg[0] == "providers" and seg[2] == "token":
+        return {"POST"}
+    if len(seg) == 3 and seg[0] == "channels":
+        return {"DELETE"}
+    if len(seg) == 4 and seg[0] == "channels" and seg[3] in {"label", "enabled"}:
+        return {"POST"}
+    if len(seg) == 3 and seg[:2] == ["routes", "rulesets"]:
+        return {"POST", "DELETE"}
+    if (
+        len(seg) == 4
+        and seg[:2] == ["routes", "rulesets"]
+        and seg[3] in {"rename", "target", "update"}
+    ):
+        return {"POST"}
+    if len(seg) == 2 and seg[0] == "routes":
+        return {"DELETE"}
+    if (
+        len(seg) == 2
+        and seg[0] == "lifecycle"
+        and seg[1]
+        in {
+            "start",
+            "stop",
+            "restart",
+        }
+    ):
+        return {"POST"}
+    return None
+
+
+# Public contract summary retained for OpenAPI drift tests and tooling. Actual
+# dispatch uses the exact shape registry above, so this cannot make an unknown
+# nested path look like a known resource.
 _API_RESOURCE_METHODS = {
     "status": {"GET"},
-    "providers": {"GET", "POST", "DELETE"},
-    "channels": {"GET", "POST", "DELETE"},
-    "routes": {"GET", "POST", "DELETE"},
-    "locations": {"GET"},
     "metrics": {"GET"},
     "logs": {"GET"},
     "test": {"POST"},
+    "lifecycle": {"POST"},
+    "providers": {"GET", "POST", "DELETE"},
+    "channels": {"GET", "POST", "DELETE"},
+    "locations": {"GET"},
+    "routes": {"GET", "POST", "DELETE"},
     "tun": {"POST"},
     "export": {"GET"},
-    "import": {"POST"},
     "validate": {"POST"},
+    "import": {"POST"},
     "login": {"POST"},
     "logout": {"POST"},
-    "lifecycle": {"POST"},
 }
 
 
@@ -216,7 +286,13 @@ def _valid_control_api(cfg) -> dict | None:
     address = cfg.get("address")
     secret = cfg.get("secret")
     host = cfg.get("host")
-    if not all(isinstance(v, str) for v in (address, secret, host)):
+    # Spell these checks out so static type checkers narrow each value; the
+    # equivalent ``all(...)`` predicate does not preserve per-variable types.
+    if (
+        not isinstance(address, str)
+        or not isinstance(secret, str)
+        or not isinstance(host, str)
+    ):
         return None
     bind_host, sep, port_text = address.rpartition(":")
     if bind_host != "127.0.0.1" or sep != ":" or not port_text.isdigit():
@@ -443,14 +519,11 @@ def mint_login_url() -> str:
     cfg = _read_control_api()
     if cfg is None:
         raise ApiConfigError("the daemon control endpoint is not configured")
-    try:
-        api = {
-            "address": _listen_config(cfg)["client"],
-            "secret": _api_secret(cfg),
-            "host": cfg["host"],
-        }
-    except ApiConfigError:
-        raise
+    api = {
+        "address": _listen_config(cfg)["client"],
+        "secret": _api_secret(cfg),
+        "host": cfg["host"],
+    }
     if not _health_ok(api):
         raise ApiConfigError(
             f"no alle daemon owns the control endpoint at {api['address']}"
@@ -657,6 +730,10 @@ class _Handler(BaseHTTPRequestHandler):
         for header, value in _SECURITY_HEADERS.items():
             self.send_header(header, value)
 
+    def end_headers(self):
+        self._response_started = True
+        super().end_headers()
+
     def log_message(self, *args):  # quiet: the app log is the record, not stderr
         pass
 
@@ -767,6 +844,24 @@ class _Handler(BaseHTTPRequestHandler):
         headers = {"Cache-Control": "no-store", **(extra or {})}
         self._send(code, body, "application/json", headers)
 
+    def _unexpected(self) -> None:
+        """Bound unexpected handler failures without exposing request data."""
+        request_id = secrets.token_hex(6)
+        path = self.path.partition("?")[0][:256]
+        applog.log(
+            f"api: unexpected handler failure request={request_id} "
+            f"method={self.command} path={path}"
+        )
+        if getattr(self, "_response_started", False):
+            return
+        try:
+            self._json(
+                500,
+                {"error": "internal server error", "request_id": request_id},
+            )
+        except Exception:  # noqa: BLE001 — the socket itself may be unusable
+            pass
+
     def _cookie_header_value(self, cookie: str) -> str:
         return (
             f"alle_session={cookie}; Path=/; HttpOnly; SameSite=Strict; "
@@ -795,6 +890,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._get()
         except _BadRequest as e:
             self._json(e.status, {"error": e.message})
+        except Exception:  # noqa: BLE001 — top-level credential-free boundary
+            self._unexpected()
 
     def _get(self):
         parsed = urlparse(self.path)
@@ -864,6 +961,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._mutate_checked(method)
         except _BadRequest as e:
             self._json(e.status, {"error": e.message})
+        except Exception:  # noqa: BLE001 — top-level credential-free boundary
+            self._unexpected()
 
     def _mutate_checked(self, method: str):
         path = urlparse(self.path).path
@@ -1086,8 +1185,18 @@ class _Handler(BaseHTTPRequestHandler):
         except (service.ServiceError, ProviderError) as e:
             write({"type": "error", "data": {"error": str(e)}})
             return
-        except Exception as e:  # surface any failure on the stream
-            write({"type": "error", "data": {"error": str(e)}})
+        except Exception:  # keep unexpected failures credential-free on the wire
+            request_id = secrets.token_hex(6)
+            applog.log(
+                f"web request {request_id} failed: "
+                f"{self.command} {urlparse(self.path).path}"
+            )
+            write(
+                {
+                    "type": "error",
+                    "data": {"error": f"internal server error ({request_id})"},
+                }
+            )
             return
 
         # Summary only: the client already collected the rows above, so the full
@@ -1107,12 +1216,10 @@ class _Handler(BaseHTTPRequestHandler):
             }
         )
 
-    def _api_no_match(self, seg: list[str]):
-        """405 (with an Allow header) when ``seg`` names a known API resource
-        reached under the wrong method; 404 only for a path that is no resource
-        at all."""
-        methods = _API_RESOURCE_METHODS.get(seg[0]) if seg else None
-        if methods:
+    def _api_no_match(self, seg: list[str], method: str):
+        """Exact 404/405 result from the body-free route registry."""
+        methods = _api_route_methods(seg)
+        if methods is not None and method not in methods:
             return self._json(
                 405,
                 {"error": "method not allowed"},
@@ -1124,6 +1231,9 @@ class _Handler(BaseHTTPRequestHandler):
         from alle import service
 
         seg = path.strip("/").split("/")[2:]  # drop "api/v1"
+        methods = _api_route_methods(seg)
+        if methods is None or "GET" not in methods:
+            return self._api_no_match(seg, "GET")
 
         if seg == ["export"]:
             return self._export_get()
@@ -1139,7 +1249,7 @@ class _Handler(BaseHTTPRequestHandler):
         }
         fn = routes_.get(tuple(seg))
         if fn is None:
-            return self._api_no_match(seg)
+            return self._api_no_match(seg, "GET")
         self._call(fn)  # same ServiceError -> 400 mapping as mutations
 
     def _export_get(self):
@@ -1176,6 +1286,9 @@ class _Handler(BaseHTTPRequestHandler):
         from alle import service
 
         seg = path.strip("/").split("/")[2:]  # drop "api/v1"
+        methods = _api_route_methods(seg)
+        if methods is None or method not in methods:
+            return self._api_no_match(seg, method)
         body = self._json_body()
 
         if method == "POST" and seg == ["logout"]:
@@ -1409,7 +1522,7 @@ class _Handler(BaseHTTPRequestHandler):
         if method == "POST" and seg == ["lifecycle", "restart"]:
             _fields(body)
             return self._call(service.restart)
-        return self._api_no_match(seg)
+        return self._api_no_match(seg, method)
 
 
 def _add_provider(body: dict) -> dict:

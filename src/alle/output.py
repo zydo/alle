@@ -497,6 +497,11 @@ def status(snapshot: dict) -> str:
             )
     if snapshot.get("web_ui"):
         lines.append(f"  Web UI    {snapshot['web_ui']}  (open it: alle ui)")
+    if snapshot.get("rest_api"):
+        lines.append(
+            f"  REST API  {snapshot['rest_api']} — shares the Web UI listener; "
+            "Bearer auth required"
+        )
     if not channels:
         lines.append(
             '  (no channels yet — add one: alle channels add nordvpn --country "United States")'

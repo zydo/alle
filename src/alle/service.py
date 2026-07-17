@@ -51,6 +51,7 @@ from alle.state import (
     ReferencedError,
     Store,
     channel_id_from_filename,
+    config_signature,
 )
 
 
@@ -1010,6 +1011,7 @@ def _routes_payload(
         "filter": channel,
         "flat": flat,
         "router": _router_info(store),
+        "config_revision": config_signature(store.data),
     }
 
 
@@ -1880,12 +1882,14 @@ def status_snapshot() -> dict:
             }
         )
     enabled_count = sum(1 for c in channels if c["enabled"])
+    web_ui = web_ui_url()
     return {
         "running": running,
         "state": "running" if running else "stopped",
         "router": _router_info(store),
         "daemon": _daemon_info(),
-        "web_ui": web_ui_url(),
+        "web_ui": web_ui,
+        "rest_api": f"{web_ui.rstrip('/')}/api/v1",
         "channels": channels,
         "provider_count": len({c["provider"] for c in channels}),
         "channel_count": len(channels),

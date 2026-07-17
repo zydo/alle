@@ -549,7 +549,8 @@ alle locations nordvpn --country "United States"
 `alle status [--json]`
 
 The system-level summary: whether `alle` is running, per-provider channel
-counts, the router entrypoint's address and posture, and the Web UI URL —
+counts, the router entrypoint's address and posture, and the Web UI and REST
+API endpoints —
 deliberately **no per-channel table**. Channel detail lives in one place,
 [`alle test`](#alle-test) (fresh probes + traffic totals); rendering the same
 rows here from cached probes would just duplicate that table behind a probe-age
@@ -561,6 +562,7 @@ Alle - Active
   Channels  NordVPN: 6 channels (4 enabled), Proton VPN: 1 channel  (details: alle channels ls)
   Router    127.0.0.1:54585 — 2 rule(s), LAN bypasses VPN, unmatched → direct  (details: alle routes ls)
   Web UI    http://alle-cb9cd104.localhost:58601  (open it: alle ui)
+  REST API  http://alle-cb9cd104.localhost:58601/api/v1 — shares the Web UI listener; Bearer auth required
 ```
 
 A provider's count shows the enabled split (`6 channels (4 enabled)`) only
@@ -571,8 +573,9 @@ The router line always states the entrypoint's full posture — `pass-through
 LAN block (`LAN bypasses VPN` / `LAN follows rules`) and unmatched handling
 (`unmatched → direct`, or `… → block — kill-switch ON`) — so it is never
 ambiguous whether traffic is inside a VPN. `--json` still carries the full
-per-channel state (the Web UI and scripts read it); only the human rendering
-is a summary.
+per-channel state (the Web UI and scripts read it), plus additive `web_ui` and
+`rest_api` endpoint fields. Neither output includes the Bearer secret; only the
+human rendering is a summary.
 
 ---
 

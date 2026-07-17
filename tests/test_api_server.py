@@ -613,7 +613,8 @@ def test_toggle_channel_enabled(live):
         data={"enabled": False},
     )
     assert st == 200 and json.loads(body)["changed"] == ["protonvpn/wg_jp_1"]
-    assert Store.load().get_channel("protonvpn", "wg_jp_1").enabled is False
+    ch = Store.load().get_channel("protonvpn", "wg_jp_1")
+    assert ch is not None and ch.enabled is False
 
     # the channel list carries the flag for the UI
     st, body, _ = _req(base + "/api/v1/channels", headers=origin)
@@ -648,7 +649,8 @@ def test_toggle_channel_enabled(live):
         data={"enabled": True},
     )
     assert st == 200
-    assert Store.load().get_channel("protonvpn", "wg_jp_1").enabled is True
+    ch = Store.load().get_channel("protonvpn", "wg_jp_1")
+    assert ch is not None and ch.enabled is True
 
 
 def test_disable_channel_blocked_by_rule_returns_verbatim_message(live):
@@ -688,7 +690,8 @@ def test_disable_channel_blocked_by_rule_returns_verbatim_message(live):
     error = json.loads(body)["error"]
     assert "Cannot disable" in error and "“protonvpn/wg_de_1”" in error
     assert "alle routes" not in error and "r1" not in error
-    assert Store.load().get_channel("protonvpn", "wg_de_1").enabled is True
+    ch = Store.load().get_channel("protonvpn", "wg_de_1")
+    assert ch is not None and ch.enabled is True
 
 
 def test_remove_channel_blocked_by_rule_returns_verbatim_message(live):
@@ -1377,7 +1380,7 @@ def test_login_url_is_minted_only_for_the_live_verified_endpoint(live):
     parsed = urllib.parse.urlparse(url)
     token = urllib.parse.parse_qs(parsed.query)["token"][0]
 
-    assert parsed.hostname.startswith("alle-")
+    assert parsed.hostname is not None and parsed.hostname.startswith("alle-")
     assert auth.verify_login_token(secret, token) is True
 
 
@@ -1475,7 +1478,8 @@ def test_batch_channel_enabled_with_dry_run(live):
     assert st == 200
     out = json.loads(body)
     assert out["dry_run"] is True and out["channels"][0]["changed"] is True
-    assert Store.load().get_channel("nordvpn", "us_1").enabled is True
+    ch = Store.load().get_channel("nordvpn", "us_1")
+    assert ch is not None and ch.enabled is True
 
     # the real toggle, scoped by provider + glob (the CLI grammar)
     st, body, _ = _req(
@@ -1486,7 +1490,8 @@ def test_batch_channel_enabled_with_dry_run(live):
     )
     assert st == 200
     assert json.loads(body)["changed"] == ["nordvpn/us_1"]
-    assert Store.load().get_channel("nordvpn", "us_1").enabled is False
+    ch = Store.load().get_channel("nordvpn", "us_1")
+    assert ch is not None and ch.enabled is False
 
 
 def test_batch_channel_enabled_all_requires_provider(live):
@@ -1553,3 +1558,51 @@ def test_batch_provider_remove_dry_run(live):
         data={},
     )
     assert st == 400
+
+
+def test_exact_route_and_method_win_before_malformed_body(live):
+    base, secret = live
+    headers = {
+        "Authorization": f"Bearer {secret}",
+        "Origin": base,
+        "Content-Type": "text/plain",
+    }
+    st, body, response = _req(
+        base + "/api/v1/status",
+        method="POST",
+        headers=headers,
+        raw=b"{not json",
+    )
+    assert st == 405 and response["Allow"] == "GET"
+    assert json.loads(body)["error"] == "method not allowed"
+
+    st, body, response = _req(
+        base + "/api/v1/status/nested",
+        method="POST",
+        headers=headers,
+        raw=b"{not json",
+    )
+    assert st == 404 and "Allow" not in response
+    assert json.loads(body)["error"] == "not found"
+
+
+def test_unexpected_handler_error_is_bounded_and_secret_free(live, monkeypatch):
+    from alle import applog
+
+    base, secret = live
+    monkeypatch.setattr(
+        service,
+        "status_snapshot",
+        lambda: (_ for _ in ()).throw(RuntimeError(f"boom {secret}")),
+    )
+    st, body, headers = _req(
+        base + "/api/v1/status?token=never-log-this",
+        headers={"Authorization": f"Bearer {secret}"},
+    )
+    data = json.loads(body)
+    assert st == 500 and data["error"] == "internal server error"
+    assert len(data["request_id"]) == 12
+    assert headers["Content-Security-Policy"]
+    log = applog.tail()
+    assert data["request_id"] in log and "method=GET path=/api/v1/status" in log
+    assert secret not in log and "never-log-this" not in log and "boom" not in log
