@@ -7,7 +7,7 @@ info:
   title: alle REST API
   version: "1"
   description: |
-    The control API of the alle daemon (`alled`) — a 1:1 projection of the
+    The control API of the alle daemon (`alle run`) — a 1:1 projection of the
     same service layer the CLI drives. Everything the CLI can do to
     providers, channels, routing, and lifecycle, this API can do.
 

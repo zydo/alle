@@ -107,6 +107,19 @@ def test_all_served_assets_present_in_wheel(built):
     assert not missing, f"served Web UI assets missing from wheel: {missing}"
 
 
+def test_only_safe_daemon_entrypoint_is_shipped(built):
+    """The supported foreground path owns PID markers, API, signals, and
+    children; the old direct ``alled`` function entry point bypassed them."""
+    _, wheel = built
+    with zipfile.ZipFile(wheel) as archive:
+        entry_points = next(
+            name for name in archive.namelist() if name.endswith("entry_points.txt")
+        )
+        text = archive.read(entry_points).decode()
+    assert "alle = alle.cli:main" in text
+    assert "alled" not in text
+
+
 def test_readme_images_render_on_pypi():
     """PyPI renders README images from absolute URLs (raw.githubusercontent); a
     relative src would not render, now that screenshots aren't shipped in the

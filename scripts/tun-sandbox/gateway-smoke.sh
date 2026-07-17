@@ -12,7 +12,7 @@
 #   2. readiness (`alle health`) is red before the daemon exists, and stays
 #      red without a viable channel while a namespace process — the joined
 #      app's view — gets ZERO direct egress (fail-closed, not half-up);
-#   3. an alled-style direct provider-API call is equally blocked: the
+#   3. a daemon-style direct provider-API call is equally blocked: the
 #      documented fail-closed control-plane stance (diagnostic, no bypass);
 #   4. readiness turns green only once privileges + declared policy + tun
 #      interface + sing-box control + a viable channel ALL hold (viability is
@@ -89,7 +89,7 @@ if curl -sf --max-time 5 https://1.1.1.1/cdn-cgi/trace >/dev/null; then
 fi
 pass "readiness red + unmatched egress rejected (fail-closed)"
 
-say "control-plane stance: alled-style direct egress is policy-blocked too"
+say "control-plane stance: daemon-style direct egress is policy-blocked too"
 if python3 -c 'import urllib.request; urllib.request.urlopen("https://1.1.1.1/cdn-cgi/trace", timeout=5)' 2>/dev/null; then
 	fail "a plain python https call escaped the killswitch"
 fi

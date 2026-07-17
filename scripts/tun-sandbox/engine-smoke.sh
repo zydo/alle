@@ -144,7 +144,7 @@ code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$CLASH/" || t
 pass "loopback contract ports bypass the tun (plain listener + clash api)"
 
 # loop safety finding to document: an ordinary process's DIRECT outbound
-# call (alled's provider API calls are exactly this) IS subject to the
+# call (the daemon's provider API calls are exactly this) IS subject to the
 # killswitch — only sing-box's own sockets bypass the tun.
 if python3 -c 'import urllib.request; urllib.request.urlopen("https://1.1.1.1/cdn-cgi/trace", timeout=5)' 2>/dev/null; then
 	fail "expected a plain python https call to be blocked under killswitch"

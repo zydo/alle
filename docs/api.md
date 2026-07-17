@@ -1,6 +1,6 @@
 # The alle REST API
 
-alle's daemon (`alled`) serves a REST API at `/api/v1` — the same interface
+alle's daemon (`alle run`) serves a REST API at `/api/v1` — the same interface
 the bundled Web UI uses, exposed for scripts, sibling containers, and anything
 else that manages alle programmatically. It is a 1:1 projection of the same
 service layer the CLI drives: everything the CLI can do to channels,

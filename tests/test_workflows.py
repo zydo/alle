@@ -175,3 +175,41 @@ def test_supply_chain_scans_lockfile_and_secrets():
         s.get("uses", "").startswith("gitleaks/gitleaks-action")
         for s in wf["jobs"]["gitleaks"]["steps"]
     ), "no gitleaks secret-scan step"
+
+
+def test_every_environment_checks_and_uses_the_lock():
+    for name in ("ci.yml", "publish.yml", "supply-chain.yml"):
+        runs = " ".join(step.get("run", "") for _job, step in _steps(_load(name)))
+        assert "uv lock --check" in runs, name
+        if "uv sync" in runs:
+            assert "uv sync --locked" in runs, name
+
+
+def test_release_image_consumes_gated_wheel_and_gates_latest():
+    wf = _load("publish-docker.yml")
+    runs = " ".join(step.get("run", "") for _job, step in _steps(wf))
+    assert "sha256sum dist/*.whl" in runs
+    assert "linux/amd64" in runs and "linux/arm64" in runs
+    assert "imagetools inspect" in runs
+    meta = next(
+        step
+        for _job, step in _steps(wf)
+        if step.get("uses", "").startswith("docker/metadata-action")
+    )
+    assert "value=latest,enable=" in meta["with"]["tags"]
+    build = next(
+        step
+        for _job, step in _steps(wf)
+        if step.get("uses", "").startswith("docker/build-push-action")
+    )
+    assert "ALLE_WHEEL_SHA256" in build["with"]["build-args"]
+    assert "type=gha" in build["with"]["cache-from"]
+
+
+def test_ci_cancels_superseded_work_and_jobs_are_bounded():
+    ci = _load("ci.yml")
+    assert ci["concurrency"]["cancel-in-progress"] is True
+    for name, workflow in ((name, _load(name)) for name in WORKFLOW_NAMES):
+        for job_name, job in workflow.get("jobs", {}).items():
+            if "uses" not in job:
+                assert "timeout-minutes" in job, f"{name}.{job_name} has no timeout"

@@ -26,7 +26,8 @@ exec docker run --rm -i \
 	--user 0:0 \
 	--cap-add NET_ADMIN \
 	--device /dev/net/tun \
-	-v "$repo:/repo" \
+	-v "$repo:/repo:ro" \
 	-v "$repo/.tun-sandbox-cache:/cache" \
+	--tmpfs /tmp:rw,nosuid,nodev \
 	alle-tun-sandbox \
 	"${@:-/repo/scripts/tun-sandbox/smoke.sh}"

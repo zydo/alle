@@ -32,8 +32,9 @@ Docker Hub (Compose will also pull it automatically on first use):
 docker pull ziyudo/alle:latest
 ```
 
-The examples use `latest`; pin a release tag instead when you want reproducible
-deployments.
+The examples use `latest`. A release tag is a convenient version selector but
+is still mutable; use `ziyudo/alle@sha256:…` when deployment must select the
+exact tested manifest bytes.
 
 ## Step 1 — author the bundle
 

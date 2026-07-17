@@ -1,6 +1,13 @@
 name: CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -8,6 +15,7 @@ permissions:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -18,7 +26,12 @@ jobs:
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           cache-suffix: lint-py3.14
-      - run: uv sync --all-extras
+      - run: uv lock --check
+      - run: uv sync --locked --all-extras
+      - name: Verify Docker runtime export matches the lock
+        run: |
+          uv export --locked --no-dev --no-emit-project --format requirements-txt --output-file docker/requirements.lock
+          git diff --exit-code -- docker/requirements.lock
       - name: Check lint
         run: uv run ruff check
       - name: Check format
@@ -27,8 +40,10 @@ jobs:
       # regressions pre-merge instead of on the release tag.
       - name: Package smoke (build + metadata/README render)
         run: |
-          uv build
+          uv build --no-build-isolation
           uvx twine check dist/*
+          scripts/release-artifact-smoke.sh dist/*.whl
+          scripts/release-artifact-smoke.sh dist/*.tar.gz
       # The OpenAPI spec is a hand-maintained committed contract nothing
       # executes at runtime — validate it so it can't rot into invalid
       # YAML/schema. (Spec↔code drift is covered by the test suite:
@@ -62,6 +77,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
@@ -76,7 +92,8 @@ jobs:
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           cache-suffix: test-py${{ matrix.python-version }}
-      - run: uv sync --all-extras
+      - run: uv lock --check
+      - run: uv sync --locked --all-extras
       - run: uv run pytest -q
 
   # Build the container image and boot it against a synthetic no-credential
@@ -89,12 +106,23 @@ jobs:
   # on first start.
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
-      - name: Build image
-        run: docker build -t alle:ci .
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - run: uv lock --check && uv sync --locked && uv build --no-build-isolation --wheel
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build image from the gated wheel
+        run: |
+          wheel_sha=$(sha256sum dist/*.whl | awk '{print $1}')
+          docker buildx build --load --build-arg ALLE_WHEEL_SHA256="$wheel_sha" \
+            --cache-from type=gha,scope=ci-docker \
+            --cache-to type=gha,mode=max,scope=ci-docker -t alle:ci .
       - name: Boot with a synthetic bundle
         run: |
           key=$(python3 -c 'import base64; print(base64.b64encode(bytes([7]*32)).decode())')

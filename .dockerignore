@@ -3,8 +3,11 @@
 !src
 !pyproject.toml
 !uv.lock
+!dist
 !README.md
 !LICENSE
 !THIRD_PARTY_NOTICES.md
 !docker
+dist/*
+!dist/*.whl
 src/**/__pycache__

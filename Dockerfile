@@ -24,21 +24,24 @@
 # CI Actions; the trailing comment records the tag each digest was resolved
 # from (2026-07-16). The digests are the multi-arch manifest lists.
 # python 3.14-slim
-FROM python@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS build
-# uv 0.11.29
-COPY --from=ghcr.io/astral-sh/uv@sha256:eb2843a1e56fd9e30c7276ce1a52cba86e64c7b385f5e3279a0e08e02dd058fc /uv /usr/local/bin/uv
-WORKDIR /src
-COPY pyproject.toml uv.lock README.md LICENSE THIRD_PARTY_NOTICES.md ./
-COPY src ./src
-RUN uv build --wheel --out-dir /dist
-
-# python 3.14-slim
 FROM python@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015
+ARG ALLE_WHEEL_SHA256
+LABEL org.opencontainers.image.alle-wheel-sha256=$ALLE_WHEEL_SHA256
 RUN useradd --uid 1000 --user-group --home-dir /var/lib/alle --create-home \
     --shell /usr/sbin/nologin alle \
     && mkdir -p /etc/alle
-COPY --from=build /dist/*.whl /tmp/
-RUN pip install --no-cache-dir /tmp/*.whl && rm /tmp/*.whl
+COPY docker/requirements.lock /tmp/requirements.lock
+COPY dist/*.whl /tmp/
+RUN set -eu; \
+    wheel=$(find /tmp -maxdepth 1 -name 'alle_proxy-*.whl' -type f); \
+    [ "$(printf '%s\n' $wheel | wc -l)" = 1 ]; \
+    actual=$(sha256sum "$wheel" | awk '{print $1}'); \
+    [ -z "$ALLE_WHEEL_SHA256" ] || [ "$actual" = "$ALLE_WHEEL_SHA256" ]; \
+    pip install --no-cache-dir --require-hashes -r /tmp/requirements.lock; \
+    pip install --no-cache-dir --no-deps "$wheel"; \
+    python -c 'import importlib.metadata as m; assert m.version("pycountry") == "26.2.16"'; \
+    python -c 'import importlib.metadata as m; assert m.version("pyyaml") == "6.0.3"'; \
+    rm /tmp/*.whl /tmp/requirements.lock
 COPY docker/entrypoint.sh /usr/local/bin/alle-entrypoint
 RUN chmod 0755 /usr/local/bin/alle-entrypoint
 

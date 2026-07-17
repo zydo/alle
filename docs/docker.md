@@ -11,8 +11,9 @@ OS-assigned port numbers, `alle daemon install` lifecycle); the image simply
 ships with the container knobs turned on.
 
 The official image is [`ziyudo/alle`](https://hub.docker.com/r/ziyudo/alle) on
-Docker Hub. The examples use `latest`; pin a release tag instead when you want
-reproducible deployments.
+Docker Hub. The examples use `latest`; release tags are convenient version
+selectors but remain mutable registry references. Pin the tested manifest
+digest (`ziyudo/alle@sha256:…`) when deployment must select identical bytes.
 
 Two ways to use it:
 

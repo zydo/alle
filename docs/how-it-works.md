@@ -27,7 +27,7 @@ The runtime model, in one page. The security counterpart is
   declared ports are honored as written and clash loudly rather than being
   silently moved.
 
-- The background runtime (`alled`) applies state changes, keeps the `sing-box`
+- The background runtime (`alle applier`, or foreground `alle run`) applies state changes, keeps the `sing-box`
   process in sync, probes channel health, and records per-channel traffic
   totals. It also serves the control API — the Web UI and the REST API — as a
   thread in the same process.
