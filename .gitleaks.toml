@@ -19,4 +19,6 @@ regexes = [
   '''^WEVHcHJpdmF0ZUtleUV4YW1wbGVCYXNlNjRQYWRkaW5nU1hvPQ==$''',
   # tests/test_auth_input.py credential-masking fixture
   '''^nGx4SECRETa91k$''',
+  # .github/workflows/ci.yml ephemeral Docker-network API credential
+  '''^ci-test-secret-0123456789$''',
 ]
