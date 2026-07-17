@@ -1,7 +1,7 @@
 // App shell: hash router, nav, and the single status poll that feeds the
 // masthead + the active page. Pages are plain modules with mount/unmount/onStatus.
 
-import { $, api, createLifetime, dismissDialogs } from "./core.js";
+import { $, api, confirmDialog, createLifetime, dismissDialogs, toast } from "./core.js";
 import * as dashboard from "./dashboard.js";
 import * as bundle from "./bundle.js";
 import * as logs from "./logs.js";
@@ -74,6 +74,38 @@ async function scheduleNextTick() {
 $("logout").addEventListener("click", async () => {
   await api.post("/api/v1/logout"); // revokes every session, clears the cookie
   location.href = "/"; // back to the sign-in page
+});
+
+// Version badge = on-demand update check. PyPI is contacted only on this
+// click, never on a timer; the upgrade itself delegates to the install
+// channel server-side, and the daemon's restart surfaces as the usual
+// offline banner until the status poll reconnects on the new version.
+let upgradeBusy = false;
+$("ver").addEventListener("click", async () => {
+  if (upgradeBusy) return;
+  upgradeBusy = true;
+  try {
+    const check = await api.get("/api/v1/upgrade/check");
+    if (!check.ok) { toast(check.error, "err"); return; }
+    if (!check.data.update_available) {
+      toast(`alle ${check.data.current} is the latest release.`);
+      return;
+    }
+    const go = await confirmDialog(
+      "Update available",
+      `alle ${check.data.latest} is available (this is ${check.data.current}). ` +
+      "Upgrade now? The daemon restarts when it finishes.",
+      { confirmText: "Upgrade" },
+    );
+    if (!go) return;
+    const res = await api.post("/api/v1/upgrade");
+    if (!res.ok) { toast(res.error, "err"); return; }
+    toast(res.data.changed
+      ? `Upgraded to ${res.data.after} — restarting…`
+      : "Already the latest release.");
+  } finally {
+    upgradeBusy = false;
+  }
 });
 
 globalThis.addEventListener("hashchange", route);

@@ -1062,6 +1062,52 @@ def test_lifecycle_endpoints_call_service(live, monkeypatch):
     assert calls == ["start", "stop", "restart"]
 
 
+def test_upgrade_check_is_get_and_authed(live, monkeypatch):
+    base, secret = live
+    monkeypatch.setattr(
+        service,
+        "upgrade_check",
+        lambda: {"current": "0.1.8", "latest": "0.1.9", "update_available": True},
+    )
+    st, body, _ = _req(base + "/api/v1/upgrade/check")
+    assert st == 401  # no credentials, no version disclosure
+    st, body, _ = _req(
+        base + "/api/v1/upgrade/check",
+        headers={"Authorization": f"Bearer {secret}"},
+    )
+    assert st == 200
+    assert json.loads(body) == {
+        "current": "0.1.8",
+        "latest": "0.1.9",
+        "update_available": True,
+    }
+
+
+def test_upgrade_post_calls_service_and_surfaces_refusals(live, monkeypatch):
+    base, secret = live
+    origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    monkeypatch.setattr(
+        service,
+        "upgrade_run",
+        lambda: {"channel": "uv-tool", "before": "0.1.8", "after": "0.1.9",
+                 "changed": True},
+    )
+    st, body, _ = _req(base + "/api/v1/upgrade", method="POST", headers=origin, data={})
+    assert st == 200 and json.loads(body)["changed"] is True
+
+    def refuse():
+        raise service.ServiceError("this alle is a git checkout — upgrade with git")
+
+    monkeypatch.setattr(service, "upgrade_run", refuse)
+    st, body, _ = _req(base + "/api/v1/upgrade", method="POST", headers=origin, data={})
+    assert st == 400 and "git checkout" in json.loads(body)["error"]
+    # GET on the mutation target is a clean 405 naming POST
+    st, _, headers = _req(
+        base + "/api/v1/upgrade", headers={"Authorization": f"Bearer {secret}"}
+    )
+    assert st == 405 and headers.get("Allow") == "POST"
+
+
 # ---- strict request validation (fail closed, never coerce) ----
 
 

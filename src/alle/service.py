@@ -2372,6 +2372,36 @@ def daemon_status() -> dict:
     return {"service": daemonctl.status(), "daemon": _daemon_info()}
 
 
+# ---- upgrade (delegated to the owning install channel) -----------------------
+
+
+def upgrade_run() -> dict:
+    """Upgrade alle via its install channel, then bounce the daemon onto the
+    new code. Refusal channels (container, checkout, unknown) surface as
+    :class:`ServiceError` with the instruction for that channel."""
+    from alle import upgrade
+
+    try:
+        result = upgrade.run()
+    except upgrade.UpgradeError as e:
+        raise ServiceError(str(e)) from e
+    if result["changed"] and (daemon.in_daemon_process() or daemon.is_running()):
+        # From the Web UI this schedules the restart after the response is
+        # flushed; from the CLI it restarts through whatever owns the daemon.
+        result["restart"] = restart()
+    return result
+
+
+def upgrade_check() -> dict:
+    """current vs latest-on-PyPI — runs only when explicitly invoked."""
+    from alle import upgrade
+
+    try:
+        return upgrade.check_latest()
+    except upgrade.UpgradeError as e:
+        raise ServiceError(str(e)) from e
+
+
 # ---- privileged tun helper (macOS root LaunchDaemon) -------------------------
 
 

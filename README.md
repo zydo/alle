@@ -117,10 +117,14 @@ docker run -d --name alle --restart unless-stopped \
 docker exec alle alle status
 ```
 
-Host installs may add `alle daemon install` to start at login. Containers use
-`alle run` as PID 1 and Docker's restart policy instead; those lifecycle
-commands are intentionally inapplicable there. See [Getting started](docs/getting-started.md)
-for all three choices and [Docker](docs/docker.md) for bundles and gateway scope.
+Host installs may add `alle daemon install` to start at login, and later
+upgrade with `alle upgrade` (it delegates to whichever of uv/pipx installed
+alle, then restarts the daemon; `alle upgrade --check` just asks PyPI for the
+latest version). Containers use `alle run` as PID 1 and Docker's restart
+policy instead; those lifecycle commands are intentionally inapplicable there,
+and a container upgrades by pulling a new image tag. See
+[Getting started](docs/getting-started.md) for all three choices and
+[Docker](docs/docker.md) for bundles and gateway scope.
 
 ## Quick start
 

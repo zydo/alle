@@ -37,6 +37,7 @@ omit the prefix.
   - [`alle locations`](#alle-locations)
   - [`alle status`](#alle-status)
   - [`alle start` / `stop` / `restart`](#alle-start--stop--restart)
+  - [`alle upgrade [--check]`](#alle-upgrade---check)
   - [`alle run`](#alle-run)
   - [`alle health [--json]`](#alle-health---json)
   - [`alle tun [on|off]`](#alle-tun-onoff)
@@ -592,6 +593,28 @@ alle start
 alle restart
 alle stop
 ```
+
+---
+
+## `alle upgrade [--check]`
+
+Upgrade alle through the tool that installed it — alle never replaces its own
+files. The install channel (uv tool, pipx, or pip) is detected and the upgrade
+delegated to it; the daemon then restarts on the new version (or, when a
+service unit owns it, self-exits for the supervisor to respawn).
+
+```bash
+alle upgrade --check   # ask PyPI for the latest version; changes nothing
+alle upgrade           # delegate to uv tool/pipx/pip, then restart the daemon
+```
+
+- `--check` contacts PyPI **only when you run it** — alle never checks for
+  updates in the background. The Web UI's version badge does the same check on
+  click.
+- A **git checkout** refuses (upgrade it with git), a **container** refuses
+  (the image is immutable — pull a new tag and recreate the container), and an
+  undetectable channel refuses rather than guess.
+- `--json` prints the machine-readable result.
 
 ---
 

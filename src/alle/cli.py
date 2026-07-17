@@ -996,6 +996,37 @@ def cmd_restart(args):
     print("Alle restarted. See: alle status")
 
 
+def cmd_upgrade(args):
+    import json as json_mod
+
+    if args.check:
+        result = service.upgrade_check()
+        if args.json:
+            print(json_mod.dumps(result))
+        elif result["update_available"]:
+            print(
+                f"alle {result['current']} — {result['latest']} is available "
+                "on PyPI. Run: alle upgrade"
+            )
+        else:
+            print(f"alle {result['current']} is the latest release.")
+        return
+    result = service.upgrade_run()
+    if args.json:
+        print(json_mod.dumps(result))
+        return
+    if not result["changed"]:
+        print(
+            f"Already the latest ({result['after']}); nothing to do "
+            f"(via {result['channel']})."
+        )
+        return
+    line = f"Upgraded {result['before']} → {result['after']} via {result['channel']}."
+    if result.get("restart"):
+        line += " Daemon restarted on the new version."
+    print(line)
+
+
 def cmd_health(args):
     """Liveness probe with a strict exit code: 0 healthy, 1 not. Made for
     monitoring (container HEALTHCHECK, cron, scripts) — `alle status` is the
@@ -1443,6 +1474,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "restart", help="stop then start (reload after upgrades/config)"
     ).set_defaults(func=cmd_restart)
+    up = sub.add_parser(
+        "upgrade",
+        help="upgrade alle via the tool that installed it (uv tool/pipx/pip), "
+        "then restart the daemon on the new version",
+    )
+    up.add_argument(
+        "--check",
+        action="store_true",
+        help="only ask PyPI for the latest version and report; change nothing",
+    )
+    up.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    up.set_defaults(func=cmd_upgrade)
     sub.add_parser(
         "run",
         help="run the daemon in the foreground (containers/PID 1, debugging; "

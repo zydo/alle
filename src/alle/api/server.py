@@ -134,6 +134,8 @@ def _api_route_methods(seg: list[str]) -> set[str] | None:
         ("logs",): {"GET"},
         ("test",): {"POST"},
         ("tun",): {"POST"},
+        ("upgrade",): {"POST"},
+        ("upgrade", "check"): {"GET"},
         ("export",): {"GET"},
         ("import",): {"POST"},
         ("validate",): {"POST"},
@@ -189,6 +191,7 @@ _API_RESOURCE_METHODS = {
     "locations": {"GET"},
     "routes": {"GET", "POST", "DELETE"},
     "tun": {"POST"},
+    "upgrade": {"GET", "POST"},
     "export": {"GET"},
     "validate": {"POST"},
     "import": {"POST"},
@@ -1246,6 +1249,9 @@ class _Handler(BaseHTTPRequestHandler):
             ("locations",): lambda: _locations(self.path),
             ("metrics",): lambda: service.metrics_totals(_channel_query(self.path)),
             ("logs",): lambda: {"text": service.logs_tail(_log_lines(self.path))},
+            # on-demand only: PyPI is contacted because the user clicked, never
+            # on a timer — alle's no-background-traffic posture
+            ("upgrade", "check"): service.upgrade_check,
         }
         fn = routes_.get(tuple(seg))
         if fn is None:
@@ -1513,6 +1519,16 @@ class _Handler(BaseHTTPRequestHandler):
             if _bool_field(body, "speed"):
                 return self._stream_test(channel)
             return self._call(service.test, speed=False, channel=channel or None)
+        if method == "POST" and seg == ["upgrade"]:
+            # Delegates to the owning install channel; a refusal (container,
+            # checkout, unknown) is a 400 whose message the UI shows verbatim.
+            # Single-flight: a second click must not race a live upgrade. The
+            # daemon restart is scheduled after this response is flushed.
+            _fields(body)
+            with _guarded("upgrade") as acquired:
+                if not acquired:
+                    return self._json(503, {"error": "an upgrade is already running"})
+                return self._call(service.upgrade_run)
         if method == "POST" and seg == ["lifecycle", "start"]:
             _fields(body)
             return self._call(service.start)

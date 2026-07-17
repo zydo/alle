@@ -247,6 +247,60 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /api/v1/upgrade/check:
+    get:
+      tags: [system]
+      summary: Check PyPI for the latest release (on demand only)
+      description: >-
+        Contacts PyPI only when this endpoint is called — alle never checks
+        for updates in the background.
+      operationId: upgradeCheck
+      responses:
+        "200":
+          description: Current vs latest version
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [current, latest, update_available]
+                properties:
+                  current: { type: string }
+                  latest: { type: string }
+                  update_available: { type: boolean }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/upgrade:
+    post:
+      tags: [system]
+      summary: Upgrade alle via its install channel and restart the daemon
+      description: >-
+        Delegates to the tool that installed alle (uv tool / pipx / pip) —
+        alle never replaces its own files. Refuses (400) in a container image
+        (pull a new tag instead) and in a git checkout; 503 while another
+        upgrade is running.
+      operationId: upgradeRun
+      requestBody: { $ref: "#/components/requestBodies/EmptyObject" }
+      responses:
+        "200":
+          description: Upgrade result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [channel, before, after, changed]
+                properties:
+                  channel: { type: string }
+                  before: { type: string }
+                  after: { type: string }
+                  changed: { type: boolean }
+                  restart:
+                    type: object
+                    description: Present when the daemon was restarted
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Busy" }
+
   /api/v1/providers:
     get:
       tags: [providers]
