@@ -1254,7 +1254,6 @@ _TUN_HELPER_HINT = (
 _TUN_SETCAP_HINT = (
     "grant the binary the capability once, then no root:\n"
     '  sudo setcap cap_net_admin,cap_net_raw+ep "$(alle version --singbox-path)"'
-    " && sudo alle restart"
 )
 
 _TUN_SUDO_HINT = 'one-off: alle stop && sudo ALLE_HOME="$HOME/.alle" alle tun on'
@@ -1277,6 +1276,38 @@ def _tun_privilege_hint() -> str:
     if sys.platform == "linux":
         return _TUN_SETCAP_HINT + "\nOr " + _TUN_SUDO_HINT
     return _TUN_SUDO_HINT
+
+
+def _capeff_has_net_admin(status_text: str) -> bool:
+    """CAP_NET_ADMIN (bit 12) set in a ``/proc/<pid>/status`` CapEff line?"""
+    for line in status_text.splitlines():
+        if line.startswith("CapEff:"):
+            try:
+                return bool(int(line.split()[1], 16) & (1 << 12))
+            except (IndexError, ValueError):
+                return False
+    return False
+
+
+def _running_singbox_has_net_admin() -> bool | None:
+    """Does the LIVE sing-box process hold CAP_NET_ADMIN (Linux only)?
+
+    The authoritative check: file capabilities are acquired at exec time, so
+    the binary's ``getcap`` says nothing about a process started before the
+    grant. Returns None when there is nothing to inspect (no running process,
+    not Linux, or /proc unreadable) — the binary check predicts the *next*
+    exec then (tun enable forces a re-exec, so that prediction holds).
+    """
+    if sys.platform != "linux":
+        return None
+    pid = singbox.Runner().running_pid()
+    if pid is None:
+        return None
+    try:
+        text = Path(f"/proc/{pid}/status").read_text()
+    except OSError:
+        return None
+    return _capeff_has_net_admin(text)
 
 
 def _singbox_has_net_admin() -> bool:
@@ -1338,8 +1369,13 @@ def _require_tun_privileges() -> None:
     hp = helper_mod.probe()
     if hp["state"] == "ok":
         return  # the helper will run sing-box as root — no privilege needed here
+    if _running_singbox_has_net_admin():
+        return  # Linux: the live process provably holds CAP_NET_ADMIN
     if _singbox_has_net_admin():
-        return  # Linux setcap path — no root anywhere required
+        # Linux setcap path — no root anywhere required. The binary check is
+        # the right predictor here even with a pre-grant process running:
+        # enabling tun forces a re-exec, so the next process holds the cap.
+        return
     info = daemon.daemon_info()
     if info is None and os.geteuid() == 0:
         return
@@ -1591,14 +1627,11 @@ def _dev_net_tun_exists() -> bool:
 
 
 def _has_net_admin_capability() -> bool:
-    """CAP_NET_ADMIN (bit 12) in this process's effective capability set."""
+    """CAP_NET_ADMIN in this process's own effective capability set."""
     try:
-        for line in Path("/proc/self/status").read_text().splitlines():
-            if line.startswith("CapEff:"):
-                return bool(int(line.split()[1], 16) & (1 << 12))
-    except (OSError, ValueError, IndexError):
+        return _capeff_has_net_admin(Path("/proc/self/status").read_text())
+    except OSError:
         return False
-    return False
 
 
 def _gateway_privilege_problems() -> list[str]:

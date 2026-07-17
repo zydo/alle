@@ -154,6 +154,47 @@ def test_apply_runtime_failure_when_control_api_never_answers(monkeypatch):
     assert "control API" in result.detail
 
 
+# ---- Linux tun enable forces a re-exec (capabilities are per-process) -------
+
+
+def test_apply_restarts_not_reloads_when_tun_is_added_on_linux(monkeypatch):
+    """Enabling tun must re-exec sing-box on Linux: a SIGHUP reload keeps the
+    old process, and a process started before `setcap` never gains
+    CAP_NET_ADMIN at runtime — the tun would silently fail EPERM."""
+    r = _runner()
+    r.config_path.write_text('{"old": true}')  # no tun inbound before
+    monkeypatch.setattr(singbox.sys, "platform", "linux")
+    monkeypatch.setattr(r, "running_pid", lambda: 123)
+    monkeypatch.setattr(r, "check", lambda binary=None: True)
+    monkeypatch.setattr(r, "_verify_healthy", lambda: True)
+    reloaded: list[int] = []
+    monkeypatch.setattr(r, "reload", lambda: reloaded.append(1) or True)
+    restarted: list[int] = []
+    monkeypatch.setattr(r, "restart", lambda binary=None: restarted.append(1))
+    cfg = {"inbounds": [{"type": "tun", "tag": "in-tun"}]}
+    assert _outcome(r.apply(cfg)) is singbox.ApplyOutcome.APPLIED
+    assert reloaded == []  # never SIGHUP into a tun transition on Linux
+    assert restarted == [1]
+
+
+def test_apply_still_reloads_a_tun_to_tun_config_change_on_linux(monkeypatch):
+    # Once tun is on, the live process was exec'd with the capability; rule
+    # edits while tun stays on must keep the cheap in-place reload.
+    r = _runner()
+    old = {"inbounds": [{"type": "tun", "tag": "in-tun"}], "route": {"rules": []}}
+    r.config_path.write_text(json.dumps(old, indent=2))
+    monkeypatch.setattr(singbox.sys, "platform", "linux")
+    monkeypatch.setattr(r, "running_pid", lambda: 123)
+    monkeypatch.setattr(r, "check", lambda binary=None: True)
+    monkeypatch.setattr(r, "_verify_healthy", lambda: True)
+    monkeypatch.setattr(r, "reload", lambda: True)
+    restarted: list[int] = []
+    monkeypatch.setattr(r, "restart", lambda binary=None: restarted.append(1))
+    new = {"inbounds": [{"type": "tun", "tag": "in-tun"}], "route": {"rules": [{}]}}
+    assert _outcome(r.apply(new)) is singbox.ApplyOutcome.APPLIED
+    assert restarted == []  # reloaded in place
+
+
 # ---- privileged-helper delegation (tun mode) --------------------------------
 
 

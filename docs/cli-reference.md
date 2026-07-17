@@ -663,12 +663,13 @@ alle tun off
 
     ```bash
     sudo setcap cap_net_admin,cap_net_raw+ep "$(alle version --singbox-path)"
-    sudo alle restart   # re-exec sing-box so it picks up the capability
     ```
 
-    Re-run both after any sing-box version bump (the pinned path changes, and
-    a SIGHUP reload does not re-acquire the cap). Verified in the Tier 2
-    sandbox.
+    No restart step is needed: enabling tun re-execs sing-box automatically
+    (file capabilities are acquired at exec time, so a plain reload would not
+    pick them up), and the privilege gate checks the *running* process's
+    capabilities, not just the binary's. Re-run the grant after any sing-box
+    version bump (the pinned path changes). Verified in the Tier 2 sandbox.
 
   - **Any platform — sudo one-off (fallback).** If you haven't installed the
     helper (macOS) or setcap (Linux), sing-box must run as root for the

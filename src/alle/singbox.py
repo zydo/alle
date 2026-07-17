@@ -525,7 +525,23 @@ class Runner:
                     "a pre-home-scoping privileged helper is running sing-box; "
                     f"reinstall it before continuing: {helper_mod.REINSTALL_HINT}",
                 )
-        if self.is_running():
+        # Linux: adding a tun inbound must re-exec sing-box, never SIGHUP it.
+        # File capabilities (setcap cap_net_admin) are acquired at exec time —
+        # a process started before the grant keeps its old (empty) capability
+        # set through any number of reloads, and the tun would silently fail
+        # EPERM. Once tun is on, tun-to-tun config edits reload as usual (the
+        # live process was exec'd with the capability).
+        old_had_tun = False
+        if old is not None:
+            try:
+                old_had_tun = any(
+                    i.get("type") == "tun"
+                    for i in json.loads(old).get("inbounds", [])
+                )
+            except (ValueError, AttributeError):
+                pass
+        force_reexec = has_tun and not old_had_tun and sys.platform == "linux"
+        if self.is_running() and not force_reexec:
             if self.reload() and self._verify_healthy():  # noqa: S1066
                 return ApplyResult(ApplyOutcome.APPLIED)  # reloaded in place
             # SIGHUP undeliverable, or the process/control API did not come

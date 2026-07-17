@@ -276,6 +276,29 @@ def test_tun_on_allowed_when_singbox_has_net_admin(monkeypatch):
     assert on["changed"] is True and on["router"]["tun"] is True
 
 
+def test_tun_on_allowed_when_live_process_has_net_admin(monkeypatch):
+    # The live process's CapEff is authoritative: a running sing-box that
+    # already holds CAP_NET_ADMIN passes the gate even when the binary check
+    # cannot confirm the capability (e.g. the binary was since replaced).
+    monkeypatch.setattr(service, "_running_singbox_has_net_admin", lambda: True)
+    monkeypatch.setattr(service, "_singbox_has_net_admin", lambda: False)
+    monkeypatch.setattr(service.daemon, "daemon_info", lambda: {"pid": 4242})
+    monkeypatch.setattr(service, "_process_uid", lambda pid: 501)
+    monkeypatch.setattr("os.geteuid", lambda: 501)
+    on = service.tun_mode(True)
+    assert on["changed"] is True and on["router"]["tun"] is True
+
+
+def test_capeff_net_admin_bit_parsing():
+    # CAP_NET_ADMIN is bit 12: 0x1000 has it, 0x0800 does not.
+    has = "Name:\tsing-box\nCapEff:\t0000000000003000\n"
+    lacks = "Name:\tsing-box\nCapEff:\t0000000000000800\n"
+    assert service._capeff_has_net_admin(has) is True
+    assert service._capeff_has_net_admin(lacks) is False
+    assert service._capeff_has_net_admin("no such line") is False
+    assert service._capeff_has_net_admin("CapEff:\tnot-hex\n") is False
+
+
 def test_tun_root_error_mentions_setcap_on_linux(monkeypatch):
     monkeypatch.setattr("alle.helper.reachable", lambda: False)
     monkeypatch.setattr(service, "_singbox_has_net_admin", lambda: False)
