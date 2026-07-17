@@ -89,7 +89,7 @@ def test_launchd_linger_is_rejected(fake_home, recorded_run):
 def test_systemd_unit_execs_shim_with_service_env_and_restart(fake_home):
     text = daemonctl.SystemdManager()._unit_text()
     assert "ExecStart=" in text and "applier" in text
-    assert "Environment=ALLE_SERVICE=1" in text
+    assert 'Environment="ALLE_SERVICE=1"' in text
     # always, not on-failure: the self-restart-on-upgrade exit must respawn
     assert "Restart=always" in text
     assert "WantedBy=default.target" in text
@@ -261,3 +261,191 @@ def test_install_on_unsupported_platform_errors(monkeypatch):
     monkeypatch.setattr(daemonctl.platform, "system", lambda: "Windows")
     with pytest.raises(daemonctl.DaemonCtlError, match="no user-level service backend"):
         daemonctl.install()
+
+
+# ---- unit-file safety: native escaping, no raw interpolation -------------------
+
+
+def test_systemd_unit_escapes_percent_and_quotes_values(fake_home, monkeypatch):
+    # `%` is a systemd specifier and spaces split arguments: a home like
+    # "/tmp/my %state dir" must round-trip through the unit file literally.
+    home = str(fake_home / "my %state dir")
+    monkeypatch.setenv("ALLE_HOME", home)
+    monkeypatch.setattr(daemonctl, "_service_exec", lambda: ["/usr/bin/alle", "applier"])
+    text = daemonctl.SystemdManager()._unit_text()
+    assert 'Environment="ALLE_HOME=' in text
+    assert home.replace("%", "%%") in text
+    # every % is escaped: no occurrence of the token with a single (bare) %
+    assert text.count("%state") == text.count("%%state")
+
+
+def test_systemd_unit_quotes_exec_arguments(fake_home, monkeypatch):
+    monkeypatch.setattr(
+        daemonctl, "_service_exec", lambda: ["/opt/od d/alle 100%", "applier"]
+    )
+    monkeypatch.delenv("ALLE_HOME", raising=False)
+    text = daemonctl.SystemdManager()._unit_text()
+    line = next(ln for ln in text.splitlines() if ln.startswith("ExecStart="))
+    assert '"/opt/od d/alle 100%%"' in line
+    assert '"applier"' in line
+
+
+def test_systemd_refuses_values_a_unit_cannot_represent(fake_home, monkeypatch):
+    monkeypatch.setenv("ALLE_HOME", str(fake_home) + "/bad\nname")
+    with pytest.raises(daemonctl.DaemonCtlError, match="newline"):
+        daemonctl.SystemdManager()._unit_text()
+
+
+# ---- rollback safety: a failed install must not strand the previous setup ------
+
+
+def _failing_systemctl_enable(monkeypatch):
+    class _Result:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    class _Fail(_Result):
+        returncode = 1
+        stderr = "enable refused"
+
+    def fake(cmd):
+        if cmd[:2] == ["systemctl", "--user"] and "enable" in cmd:
+            return _Fail()
+        return _Result()
+
+    monkeypatch.setattr(daemonctl, "_run", fake)
+
+
+def test_systemd_failed_fresh_install_leaves_no_unit_file(fake_home, monkeypatch):
+    monkeypatch.setattr(daemonctl.shutil, "which", lambda name: f"/usr/bin/{name}")
+    _failing_systemctl_enable(monkeypatch)
+    m = daemonctl.SystemdManager()
+    with pytest.raises(daemonctl.DaemonCtlError, match="enable refused"):
+        m.install()
+    assert not m.is_installed()  # no half-installed unit left behind
+
+
+def test_systemd_failed_reinstall_restores_previous_unit(fake_home, monkeypatch):
+    monkeypatch.setattr(daemonctl.shutil, "which", lambda name: f"/usr/bin/{name}")
+    m = daemonctl.SystemdManager()
+    m.unit_path().parent.mkdir(parents=True, exist_ok=True)
+    m.unit_path().write_text("[Unit]\nDescription=previous generation\n")
+    _failing_systemctl_enable(monkeypatch)
+    with pytest.raises(daemonctl.DaemonCtlError):
+        m.install()
+    assert "previous generation" in m.unit_path().read_text()
+
+
+def test_launchd_failed_fresh_install_leaves_no_plist(fake_home, monkeypatch):
+    class _Result:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    class _Fail(_Result):
+        returncode = 1
+        stderr = "load refused"
+
+    def fake(cmd):
+        return _Fail() if cmd[:2] == ["launchctl", "load"] else _Result()
+
+    monkeypatch.setattr(daemonctl, "_run", fake)
+    m = daemonctl.LaunchdManager()
+    with pytest.raises(daemonctl.DaemonCtlError, match="load refused"):
+        m.install()
+    assert not m.is_installed()
+
+
+def test_service_daemon_install_restores_manual_daemon_on_failure(monkeypatch):
+    from alle import service
+
+    monkeypatch.setattr(service.daemonctl, "require_backend", lambda: None)
+    monkeypatch.setattr(service.daemon, "is_running", lambda: True)
+    stops, restores = [], []
+    monkeypatch.setattr(service.daemon, "stop", lambda: stops.append(1) or True)
+    monkeypatch.setattr(service.daemon, "ensure_running", lambda: restores.append(1))
+
+    def failing_install(linger=False):
+        raise service.daemonctl.DaemonCtlError("launchctl load failed")
+
+    monkeypatch.setattr(service.daemonctl, "install", failing_install)
+    with pytest.raises(service.ServiceError, match="load failed"):
+        service.daemon_install()
+    # the manually running daemon was brought back, not left stopped
+    assert stops == [1] and restores == [1]
+
+
+# ---- uninstall keeps evidence when the stop half fails -------------------------
+
+
+def test_systemd_uninstall_keeps_unit_when_disable_fails_live(fake_home, monkeypatch):
+    m = daemonctl.SystemdManager()
+    m.unit_path().parent.mkdir(parents=True, exist_ok=True)
+    m.unit_path().write_text("[Unit]\n")
+
+    class _Result:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    class _Fail(_Result):
+        returncode = 1
+        stderr = "disable refused"
+
+    def fake(cmd):
+        if "disable" in cmd:
+            return _Fail()
+        return _Result()  # is-active reports active (returncode 0)
+
+    monkeypatch.setattr(daemonctl, "_run", fake)
+    with pytest.raises(daemonctl.DaemonCtlError, match="disable"):
+        m.uninstall()
+    assert m.is_installed()  # evidence kept for diagnosis
+
+
+def test_launchd_uninstall_keeps_plist_when_unload_fails_live(fake_home, monkeypatch):
+    m = daemonctl.LaunchdManager()
+    m.unit_path().parent.mkdir(parents=True, exist_ok=True)
+    m.unit_path().write_bytes(b"plist")
+
+    class _Result:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    class _Fail(_Result):
+        returncode = 1
+        stderr = "unload refused"
+
+    def fake(cmd):
+        if cmd[:2] == ["launchctl", "unload"]:
+            return _Fail()
+        return _Result()  # launchctl list says the job is still alive
+
+    monkeypatch.setattr(daemonctl, "_run", fake)
+    with pytest.raises(daemonctl.DaemonCtlError, match="unload"):
+        m.uninstall()
+    assert m.is_installed()
+
+
+def test_systemd_linger_failure_names_the_installed_service(monkeypatch, fake_home):
+    # enable succeeds, linger fails: the error must say the service itself was
+    # installed and started, so the user doesn't uninstall a working setup.
+    monkeypatch.setattr(daemonctl.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    class _Result:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    class _Fail(_Result):
+        returncode = 1
+        stderr = "linger refused"
+
+    def fake(cmd):
+        return _Fail() if cmd[:1] == ["loginctl"] else _Result()
+
+    monkeypatch.setattr(daemonctl, "_run", fake)
+    with pytest.raises(daemonctl.DaemonCtlError, match="service was installed"):
+        daemonctl.SystemdManager().install(linger=True)

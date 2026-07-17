@@ -129,17 +129,36 @@ class LaunchdManager(_Manager):
             )
         p = self.unit_path()
         p.parent.mkdir(parents=True, exist_ok=True)
+        previous = p.read_bytes() if p.exists() else None
         _run(["launchctl", "unload", str(p)])  # idempotent: clear any prior load
         p.write_bytes(self._plist_bytes())
         r = _run(["launchctl", "load", "-w", str(p)])
         if r.returncode != 0:
+            # Roll back: a failed load must not leave a plist that reads as
+            # "installed" — restore the previous generation (and best-effort
+            # reload it) or remove the fresh one entirely.
+            if previous is not None:
+                p.write_bytes(previous)
+                _run(["launchctl", "load", "-w", str(p)])
+            else:
+                p.unlink(missing_ok=True)
             raise DaemonCtlError(f"launchctl load failed: {r.stderr.strip()}")
 
     def uninstall(self) -> None:
         p = self.unit_path()
-        if p.exists():
-            _run(["launchctl", "unload", "-w", str(p)])
-            p.unlink(missing_ok=True)
+        if not p.exists():
+            return
+        r = _run(["launchctl", "unload", "-w", str(p)])
+        if r.returncode != 0 and self.is_active():
+            # The job is still alive and would keep running headless; keep the
+            # plist as evidence + handle instead of deleting it out from under
+            # a live job we failed to stop.
+            raise DaemonCtlError(
+                "launchctl unload failed and the job is still running: "
+                f"{r.stderr.strip() or r.stdout.strip()} — the plist is kept "
+                f"at {p} for diagnosis."
+            )
+        p.unlink(missing_ok=True)
 
     def is_active(self) -> bool:
         return _run(["launchctl", "list", LAUNCHD_LABEL]).returncode == 0
@@ -175,6 +194,31 @@ class LaunchdManager(_Manager):
             self.start()
 
 
+def _systemd_quote(value: str) -> str:
+    """One ExecStart argument / Environment value, escaped by systemd's own
+    quoting rules (systemd.syntax(7)) rather than raw interpolation.
+
+    ``%`` doubles (it is a unit specifier everywhere), ``$`` doubles (variable
+    expansion in command lines), backslash and double-quote get C-style
+    escapes, and the result is double-quoted so spaces survive word
+    splitting. A value systemd's line-based parser cannot carry at all
+    (newlines, control characters) is refused loudly — writing it mangled
+    would exec the wrong thing as a login service.
+    """
+    if any(ch in value for ch in "\n\r") or any(ord(ch) < 0x20 for ch in value):
+        raise DaemonCtlError(
+            f"cannot represent {value!r} in a systemd unit (it contains a "
+            "newline or control character) — use a plainer path."
+        )
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("%", "%%")
+        .replace("$", "$$")
+    )
+    return f'"{escaped}"'
+
+
 class SystemdManager(_Manager):
     name = "systemd"
 
@@ -182,8 +226,11 @@ class SystemdManager(_Manager):
         return Path.home() / ".config" / "systemd" / "user" / SYSTEMD_UNIT
 
     def _unit_text(self) -> str:
-        exec_line = " ".join(_service_exec())
-        env_lines = "\n".join(f"Environment={k}={v}" for k, v in _service_env().items())
+        exec_line = " ".join(_systemd_quote(arg) for arg in _service_exec())
+        env_lines = "\n".join(
+            f"Environment={_systemd_quote(f'{k}={v}')}"
+            for k, v in _service_env().items()
+        )
         return (
             "[Unit]\n"
             "Description=alle VPN daemon\n"
@@ -213,28 +260,52 @@ class SystemdManager(_Manager):
     def install(self, linger: bool = False) -> None:
         if not shutil.which("systemctl"):
             raise DaemonCtlError("systemctl not found — is this a systemd system?")
+        # Unit text is generated (and its values validated) BEFORE anything is
+        # touched, so an unrepresentable value can never half-install.
+        text = self._unit_text()
         p = self.unit_path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(self._unit_text())
+        previous = p.read_text() if p.exists() else None
+        p.write_text(text)
         self._systemctl("daemon-reload")
         r = self._systemctl("enable", "--now", SYSTEMD_UNIT)
         if r.returncode != 0:
+            # Roll back to whatever was true before: the previous unit (with a
+            # reload so systemd sees it again) or no unit at all.
+            if previous is not None:
+                p.write_text(previous)
+            else:
+                p.unlink(missing_ok=True)
+            self._systemctl("daemon-reload")
             raise DaemonCtlError(f"systemctl enable failed: {r.stderr.strip()}")
         if linger:
             # An ignored linger failure would silently break the "survives
-            # logout" promise the flag exists for — fail the install instead.
+            # logout" promise the flag exists for — fail loudly. The unit
+            # itself is installed and running at this point; say so, or the
+            # error would invite uninstalling a working setup.
             if not shutil.which("loginctl"):
                 raise DaemonCtlError(
-                    "loginctl not found — cannot enable logout survival (--linger)"
+                    "the service was installed and started, but logout survival "
+                    "could not be enabled: loginctl not found (--linger)."
                 )
             lr = _run(["loginctl", "enable-linger"])
             if lr.returncode != 0:
                 raise DaemonCtlError(
-                    f"loginctl enable-linger failed: {lr.stderr.strip()}"
+                    "the service was installed and started, but logout survival "
+                    f"could not be enabled: loginctl enable-linger failed: "
+                    f"{lr.stderr.strip()}"
                 )
 
     def uninstall(self) -> None:
-        self._systemctl("disable", "--now", SYSTEMD_UNIT)
+        r = self._systemctl("disable", "--now", SYSTEMD_UNIT)
+        if r.returncode != 0 and self.is_active():
+            # Still running and we failed to stop it: keep the unit file — it
+            # is the evidence (and the handle) needed to diagnose and retry.
+            raise DaemonCtlError(
+                "systemctl disable failed and the service is still active: "
+                f"{r.stderr.strip() or r.stdout.strip()} — the unit is kept at "
+                f"{self.unit_path()} for diagnosis."
+            )
         self.unit_path().unlink(missing_ok=True)
         self._systemctl("daemon-reload")
 

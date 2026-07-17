@@ -2351,9 +2351,21 @@ def daemon_install(linger: bool = False) -> dict:
         # a doomed install must never take the running daemon down (in a
         # container that daemon is PID 1 — stopping it stops the container).
         daemonctl.require_backend()
-        daemon.stop()  # a hand-spawned daemon would double up with the service
+    except daemonctl.DaemonCtlError as e:
+        raise ServiceError(str(e)) from e
+    was_running = daemon.is_running()
+    daemon.stop()  # a hand-spawned daemon would double up with the service
+    try:
         result = daemonctl.install(linger=linger)
     except daemonctl.DaemonCtlError as e:
+        # The install itself rolled back its unit file; bring back whatever
+        # was running before, so a failed install never leaves the user with
+        # less than they started with.
+        if was_running:
+            try:
+                daemon.ensure_running()
+            except Exception:  # noqa: BLE001 — the install error is the one to surface
+                applog.log("daemon restore after failed service install also failed")
         raise ServiceError(str(e)) from e
     daemon.ensure_running()  # now routes through the supervisor
     return result

@@ -1049,6 +1049,12 @@ the service starts ready. Idempotent — re-running refreshes the unit (e.g. aft
 a format change). `--linger` (Linux only) enables `loginctl enable-linger` so the
 daemon keeps running after you log out.
 
+A failed install rolls back: the previous unit (or no unit) is restored, and a
+manually started daemon that was stopped for the handoff is brought back — you
+never end up with less than you started with. If `--linger` itself fails, the
+error says so explicitly; the service is installed and running at that point,
+only logout survival is missing.
+
 ```bash
 alle daemon install
 alle daemon install --linger      # Linux: survive logout
