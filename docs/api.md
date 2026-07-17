@@ -10,6 +10,11 @@ This document is the public contract. Endpoints not listed here (the login
 and session machinery the browser UI uses, the `/` page and its assets) are
 internal and may change without notice.
 
+A machine-readable OpenAPI 3.1 description of the same contract lives in
+[openapi.yaml](openapi.yaml) — use it for client codegen and request
+validation; this page stays the prose authority where the two could ever
+disagree.
+
 ## Reaching the API
 
 **Host installs (default):** the server binds `127.0.0.1` on a per-install

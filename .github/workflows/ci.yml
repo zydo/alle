@@ -29,6 +29,36 @@ jobs:
         run: |
           uv build
           uvx twine check dist/*
+      # The OpenAPI spec is a hand-maintained committed contract nothing
+      # executes at runtime — validate it so it can't rot into invalid
+      # YAML/schema. (Spec↔code drift is covered by the test suite:
+      # tests/test_openapi_contract.py.)
+      - name: Validate the OpenAPI spec
+        run: uvx --from openapi-spec-validator openapi-spec-validator docs/openapi.yaml
+      # The docs are an entry-frame README + cross-linked topic pages; a
+      # rename or move must not leave dangling relative links. Relative
+      # targets only — external URLs are out of scope (flaky, and covered
+      # nowhere better by failing CI on someone else's outage).
+      - name: Check relative doc links
+        run: |
+          python3 - <<'EOF'
+          import pathlib, re, sys
+
+          broken = []
+          files = [pathlib.Path("README.md"), *sorted(pathlib.Path("docs").glob("*.md"))]
+          for md in files:
+              for m in re.finditer(r"\]\(([^)\s]+)\)", md.read_text()):
+                  target = m.group(1).split("#")[0]
+                  if not target or target.startswith(("http://", "https://", "mailto:")):
+                      continue
+                  if not (md.parent / target).resolve().exists():
+                      broken.append(f"{md}: {m.group(1)}")
+          if broken:
+              print("::error::broken relative doc links:")
+              print("\n".join(broken))
+              sys.exit(1)
+          print(f"doc links ok ({len(files)} files)")
+          EOF
 
   test:
     runs-on: ubuntu-latest
@@ -53,9 +83,10 @@ jobs:
   # bundle, gated on the same `alle health` check the image's HEALTHCHECK
   # runs — so a PR can't silently break the Dockerfile, the entrypoint, or
   # the bundle-apply-at-start contract. The dummy WireGuard keys never pass
-  # probes; everything under test (build, import, ports, health) is
-  # independent of tunnel health. The only network fetch is the pinned,
-  # checksum-verified sing-box download on first start.
+  # probes; everything under test (build, import, ports, health, the control
+  # API's network bind + secret injection) is independent of tunnel health.
+  # The only network fetch is the pinned, checksum-verified sing-box download
+  # on first start.
   docker:
     runs-on: ubuntu-latest
     steps:
@@ -82,7 +113,10 @@ jobs:
                            allowed_ips: [0.0.0.0/0], keepalive: 25}
           router: {killswitch: false, lan_direct: true}
           EOF
-          docker run -d --name alle-ci \
+          docker network create alle-ci-net
+          docker run -d --name alle-ci --network alle-ci-net \
+            -e ALLE_API_LISTEN=0.0.0.0:8080 \
+            -e ALLE_API_SECRET=ci-test-secret-0123456789 \
             -v alle-ci-state:/var/lib/alle \
             -v /tmp/alle-bundle.yaml:/etc/alle/bundle.yaml:ro alle:ci
       - name: Wait for health
@@ -102,6 +136,36 @@ jobs:
           # the image profile widens binds to the container network
           docker exec alle-ci sh -c 'grep -o "\"listen\": \"[^\"]*\"" /var/lib/alle/singbox.json | sort -u' \
             | grep -q '0.0.0.0'
+      # The compose-sibling contract for the control API: on an explicit
+      # network bind, a valid Bearer (the injected secret) passes a foreign
+      # Host, an unauthenticated request is refused, and /health serves
+      # without the secret. Probed from a sibling container on the same
+      # network — the exact posture docs/api.md promises operators.
+      - name: Assert the control API contract (network bind + Bearer)
+        run: |
+          docker run -i --rm --network alle-ci-net --entrypoint python3 alle:ci - <<'EOF'
+          import json, urllib.error, urllib.request
+
+          BASE = "http://alle-ci:8080"
+          AUTH = {"Authorization": "Bearer ci-test-secret-0123456789"}
+
+          # Bearer passes the foreign-Host gate; the injected secret is live
+          req = urllib.request.Request(BASE + "/api/v1/status", headers=AUTH)
+          data = json.load(urllib.request.urlopen(req, timeout=10))
+          assert data["channel_count"] == 1, data
+
+          # without the Bearer, a network caller is refused
+          try:
+              urllib.request.urlopen(BASE + "/api/v1/status", timeout=10)
+              raise SystemExit("unauthenticated network request was not refused")
+          except urllib.error.HTTPError as e:
+              assert e.code == 403, e.code
+
+          # /health answers its challenge without the secret (readiness gating)
+          data = json.load(urllib.request.urlopen(BASE + "/health?nonce=ci", timeout=10))
+          assert data.get("proof"), data
+          print("control API contract ok")
+          EOF
       - name: Container logs on failure
         if: failure()
         run: docker logs alle-ci || true

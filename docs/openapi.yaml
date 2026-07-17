@@ -1,0 +1,917 @@
+# The machine-readable form of docs/api.md. Same contract, same caveats:
+# request schemas are strict (unknown fields are rejected with a 400);
+# response schemas are additive (fields may be added without a version bump),
+# so response objects deliberately allow additional properties.
+openapi: 3.1.0
+info:
+  title: alle REST API
+  version: "1"
+  description: |
+    The control API of the alle daemon (`alled`) — a 1:1 projection of the
+    same service layer the CLI drives. Everything the CLI can do to
+    providers, channels, routing, and lifecycle, this API can do.
+
+    Authentication, reachability (`ALLE_API_LISTEN`), secret provisioning
+    (`ALLE_API_SECRET[_FILE]`), and the security model are documented in
+    `docs/api.md` and `docs/security.md`. Browser-only endpoints (login,
+    logout, the `/` page and assets) are internal and not part of this
+    contract.
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: http://{host}:{port}
+    description: >
+      Loopback by default (the minted port in control_api.json); a compose
+      service name and fixed port when the operator sets ALLE_API_LISTEN.
+    variables:
+      host:
+        default: 127.0.0.1
+      port:
+        default: "8080"
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: system
+    description: Health, status, logs, metrics, lifecycle
+  - name: providers
+  - name: channels
+  - name: routes
+  - name: bundle
+    description: Declarative setup export/import/validate
+
+paths:
+  /health:
+    get:
+      tags: [system]
+      security: []
+      summary: Unauthenticated readiness challenge
+      description: >
+        Answers an HMAC proof over the caller's nonce — proves the process
+        behind the port is alle without transporting the secret. Use it to
+        gate dependents; a plain HEAD works as a liveness probe.
+      operationId: health
+      parameters:
+        - name: nonce
+          in: query
+          required: true
+          schema: { type: string, maxLength: 128, minLength: 1 }
+      responses:
+        "200":
+          description: Proof of secret possession
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  proof:
+                    {
+                      type: string,
+                      description: 'HMAC-SHA256(secret, "health:"+nonce), urlsafe-base64',
+                    }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/status:
+    get:
+      tags: [system]
+      summary: The full status snapshot (alle status --json)
+      operationId: getStatus
+      responses:
+        "200":
+          description: Runtime, router, daemon, and per-channel state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  running: { type: boolean }
+                  state: { type: string, enum: [running, stopped] }
+                  router: { type: object }
+                  daemon: { type: object }
+                  web_ui: { type: string }
+                  channels:
+                    type: array
+                    items: { type: object }
+                  provider_count: { type: integer }
+                  channel_count: { type: integer }
+                  enabled_count: { type: integer }
+                  disabled_count: { type: integer }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/metrics:
+    get:
+      tags: [system]
+      summary: Cumulative per-channel traffic totals
+      description: >
+        A cheap read — probes nothing and touches no network (unlike POST
+        /api/v1/test). Counters persist across restarts; channels with no
+        recorded traffic report zeros.
+      operationId: getMetrics
+      parameters:
+        - name: channel
+          in: query
+          required: false
+          description: Filter by channel ref (bare id, provider/channel, or glob).
+          schema: { type: string }
+      responses:
+        "200":
+          description: Totals per channel
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  channels:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        provider: { type: string }
+                        display_provider: { type: string }
+                        name: { type: string }
+                        label: { type: string }
+                        enabled: { type: boolean }
+                        sent: { type: integer }
+                        received: { type: integer }
+                        updated_at:
+                          {
+                            type: integer,
+                            description: Unix epoch of the last counted delta; 0 = never,
+                          }
+                  channel_count: { type: integer }
+                  filter: { type: [string, "null"] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/logs:
+    get:
+      tags: [system]
+      summary: Tail of the daemon log
+      description: >
+        Single-shot only, by design — log *following* is a debugging
+        activity served by `alle logs -f` / `docker logs -f`, not the API.
+      operationId: getLogs
+      parameters:
+        - name: lines
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 200 }
+      responses:
+        "200":
+          description: The last N log lines
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  text: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/test:
+    post:
+      tags: [system]
+      summary: Probe channels now (optionally with a speed test)
+      description: >
+        `speed: false` returns one JSON result. `speed: true` streams
+        `application/x-ndjson`: one `{"type":"row","data":…}` line per
+        channel as it finishes, then exactly one terminal
+        `{"type":"done",…}` or `{"type":"error",…}` record.
+      operationId: runTest
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                speed: { type: boolean, default: false }
+                channel:
+                  { type: string, description: Optional channel ref filter }
+      responses:
+        "200":
+          description: Probe results (JSON), or an NDJSON stream when speed=true
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  probed: { type: boolean }
+                  running: { type: boolean }
+                  channel_count: { type: integer }
+                  healthy_count: { type: integer }
+                  failed_count: { type: integer }
+                  channels:
+                    type: array
+                    items: { type: object }
+            application/x-ndjson:
+              schema:
+                type: string
+                description: One JSON record per line; exactly one terminal done/error record.
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Busy" }
+
+  /api/v1/lifecycle/start:
+    post:
+      tags: [system]
+      summary: Start the runtime
+      operationId: lifecycleStart
+      requestBody: { $ref: "#/components/requestBodies/EmptyObject" }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/lifecycle/stop:
+    post:
+      tags: [system]
+      summary: Stop the runtime (channels kept in config)
+      operationId: lifecycleStop
+      requestBody: { $ref: "#/components/requestBodies/EmptyObject" }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/lifecycle/restart:
+    post:
+      tags: [system]
+      summary: Restart the runtime
+      operationId: lifecycleRestart
+      requestBody: { $ref: "#/components/requestBodies/EmptyObject" }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/providers:
+    get:
+      tags: [providers]
+      summary: Added providers with channel counts
+      operationId: listProviders
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [providers]
+      summary: Add a provider (idempotent for token providers)
+      description: >
+        Token providers validate the credential first; re-posting an added
+        one replaces its token and re-resolves its channels. Config
+        providers take no creds.
+      operationId: addProvider
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [provider]
+              properties:
+                provider: { type: string }
+                creds:
+                  type: object
+                  description: 'Credential fields per the provider catalog (e.g. {"token": "..."}). Write-only.'
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/providers/catalog:
+    get:
+      tags: [providers]
+      summary: The known-provider registry
+      operationId: providerCatalog
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/providers/{name}/token:
+    post:
+      tags: [providers]
+      summary: Replace an added token provider's credential
+      operationId: updateProviderToken
+      parameters: [{ $ref: "#/components/parameters/providerName" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [creds]
+              properties:
+                creds:
+                  { type: object, description: Write-only; never returned. }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Busy" }
+
+  /api/v1/providers/{name}:
+    delete:
+      tags: [providers]
+      summary: Remove one provider and its channels
+      operationId: removeProvider
+      parameters:
+        - { $ref: "#/components/parameters/providerName" }
+        - { $ref: "#/components/parameters/dryRun" }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/providers/remove:
+    post:
+      tags: [providers]
+      summary: Batch provider removal
+      operationId: removeProviders
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [names]
+              properties:
+                names:
+                  type: array
+                  items: { type: string }
+                dry_run: { type: boolean, default: false }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/channels:
+    get:
+      tags: [channels]
+      summary: All channels with ports, locations, enabled state
+      operationId: listChannels
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [channels]
+      summary: Add a channel
+      description: >
+        `country` (+`city`) for API providers; `conf_text` (+`conf_name`)
+        for config providers — mutually exclusive, exactly as the CLI's
+        --country/--config.
+      operationId: addChannel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [provider]
+              properties:
+                provider: { type: string }
+                country: { type: string }
+                city: { type: string }
+                label: { type: string }
+                conf_text:
+                  { type: string, description: Contents of a WireGuard .conf }
+                conf_name:
+                  {
+                    type: string,
+                    description: Original file name (names the channel),
+                  }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/channels/{provider}/{channel}/label:
+    post:
+      tags: [channels]
+      summary: Set or clear a channel's display label
+      operationId: setChannelLabel
+      parameters:
+        - { $ref: "#/components/parameters/providerPath" }
+        - { $ref: "#/components/parameters/channelId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [label]
+              properties:
+                label:
+                  { type: string, description: Empty string clears the label }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/channels/{provider}/{channel}/enabled:
+    post:
+      tags: [channels]
+      summary: Enable or disable one channel
+      description: >
+        Disabled = not materialised (no WireGuard endpoint, no connection
+        slot used). Disabling a channel a routing rule targets is refused
+        with the blocker list.
+      operationId: setChannelEnabled
+      parameters:
+        - { $ref: "#/components/parameters/providerPath" }
+        - { $ref: "#/components/parameters/channelId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/channels/enabled:
+    post:
+      tags: [channels]
+      summary: Batch enable/disable (full CLI ref grammar)
+      operationId: setChannelsEnabled
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [enabled]
+              properties:
+                refs:
+                  type: array
+                  items: { type: string }
+                  description: Channel refs (ids, provider/channel, globs). Omit with all=true.
+                enabled: { type: boolean }
+                provider: { type: string }
+                all:
+                  {
+                    type: boolean,
+                    default: false,
+                    description: Every channel of `provider` (requires provider),
+                  }
+                dry_run: { type: boolean, default: false }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/channels/remove:
+    post:
+      tags: [channels]
+      summary: Batch channel removal (one all-or-nothing transaction)
+      operationId: removeChannels
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                refs:
+                  type: array
+                  items: { type: string }
+                provider: { type: string }
+                all: { type: boolean, default: false }
+                dry_run: { type: boolean, default: false }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/channels/{provider}/{channel}:
+    delete:
+      tags: [channels]
+      summary: Remove one channel
+      operationId: removeChannel
+      parameters:
+        - { $ref: "#/components/parameters/providerPath" }
+        - { $ref: "#/components/parameters/channelId" }
+        - { $ref: "#/components/parameters/dryRun" }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/locations:
+    get:
+      tags: [channels]
+      summary: A provider's country/city catalog (API providers)
+      operationId: listLocations
+      parameters:
+        - name: provider
+          in: query
+          required: true
+          schema: { type: string }
+        - name: country
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/routes:
+    get:
+      tags: [routes]
+      summary: Routing rules/rulesets, kill switch, LAN policy
+      operationId: listRoutes
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/routes/rulesets:
+    post:
+      tags: [routes]
+      summary: Create a ruleset
+      operationId: createRuleset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, target, matchers]
+              properties:
+                name: { type: string }
+                target: { $ref: "#/components/schemas/Target" }
+                matchers: { $ref: "#/components/schemas/Matchers" }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/routes/rulesets/{id}:
+    post:
+      tags: [routes]
+      summary: Append matchers to a ruleset
+      operationId: appendMatchers
+      parameters: [{ $ref: "#/components/parameters/rulesetId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [matchers]
+              properties:
+                matchers: { $ref: "#/components/schemas/Matchers" }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      tags: [routes]
+      summary: Remove a ruleset
+      operationId: removeRuleset
+      parameters:
+        - { $ref: "#/components/parameters/rulesetId" }
+        - { $ref: "#/components/parameters/dryRun" }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/routes/rulesets/{id}/rename:
+    post:
+      tags: [routes]
+      summary: Rename a ruleset
+      operationId: renameRuleset
+      parameters: [{ $ref: "#/components/parameters/rulesetId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/routes/rulesets/{id}/target:
+    post:
+      tags: [routes]
+      summary: Retarget a ruleset
+      operationId: retargetRuleset
+      parameters: [{ $ref: "#/components/parameters/rulesetId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [target]
+              properties:
+                target: { $ref: "#/components/schemas/Target" }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/routes/rulesets/{id}/update:
+    post:
+      tags: [routes]
+      summary: Replace a ruleset's name, target, and matchers atomically
+      operationId: updateRuleset
+      parameters: [{ $ref: "#/components/parameters/rulesetId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, target, matchers]
+              properties:
+                name: { type: string }
+                target: { $ref: "#/components/schemas/Target" }
+                matchers: { $ref: "#/components/schemas/Matchers" }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/routes/reorder:
+    post:
+      tags: [routes]
+      summary: Reorder rules/rulesets (first match wins)
+      operationId: reorderRoutes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items: { type: string }
+                flat: { type: boolean, default: false }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/routes/killswitch:
+    post:
+      tags: [routes]
+      summary: Kill switch on/off (blocks unmatched router traffic)
+      operationId: setKillswitch
+      requestBody: { $ref: "#/components/requestBodies/EnabledFlag" }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/routes/lan:
+    post:
+      tags: [routes]
+      summary: LAN-direct policy on/off
+      operationId: setLanDirect
+      requestBody: { $ref: "#/components/requestBodies/EnabledFlag" }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/routes/{id}:
+    delete:
+      tags: [routes]
+      summary: Remove one rule
+      operationId: removeRoute
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - { $ref: "#/components/parameters/dryRun" }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/tun:
+    post:
+      tags: [routes]
+      summary: TUN (whole-machine capture) on/off
+      description: >
+        Privilege failures are a 400 whose message carries the platform
+        recipe (sudo/setcap on hosts, --cap-add in containers).
+      operationId: setTun
+      requestBody: { $ref: "#/components/requestBodies/EnabledFlag" }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/export:
+    get:
+      tags: [bundle]
+      summary: The full setup bundle as a YAML download
+      description: >
+        Contains WireGuard private keys and provider tokens — treat the
+        response like a password file.
+      operationId: exportBundle
+      responses:
+        "200":
+          description: The bundle, as an attachment
+          content:
+            application/yaml:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/validate:
+    post:
+      tags: [bundle]
+      summary: Validate a setup bundle without applying it
+      operationId: validateBundle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [text]
+              properties:
+                text: { type: string, description: The bundle YAML }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/import:
+    post:
+      tags: [bundle]
+      summary: Apply a setup bundle (merge, or destructive replace)
+      operationId: importBundle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [text, replace]
+              properties:
+                text: { type: string, description: The bundle YAML }
+                replace:
+                  type: boolean
+                  description: false = idempotent merge; true = replace the whole setup
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Busy" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        The per-install secret (control_api.json) or the injected
+        ALLE_API_SECRET[_FILE] value. Compared constant-time.
+
+  parameters:
+    providerName:
+      name: name
+      in: path
+      required: true
+      schema: { type: string }
+    providerPath:
+      name: provider
+      in: path
+      required: true
+      schema: { type: string }
+    channelId:
+      name: channel
+      in: path
+      required: true
+      schema: { type: string }
+    rulesetId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    dryRun:
+      name: dry_run
+      in: query
+      required: false
+      description: >
+        Return the plan without changing state. Strict: exactly 1, true, 0,
+        or false — anything else is a 400, never coerced to "actually
+        remove".
+      schema:
+        type: string
+        enum: ["1", "true", "0", "false"]
+
+  requestBodies:
+    EmptyObject:
+      required: false
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+    EnabledFlag:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [enabled]
+            properties:
+              enabled:
+                type: boolean
+                description: Required and strictly boolean — a missing field never silently flips state.
+
+  responses:
+    GenericResult:
+      description: >
+        The structured service result — the same shape as the corresponding
+        CLI --json output. Response fields are additive; clients must
+        tolerate new ones.
+      content:
+        application/json:
+          schema: { type: object }
+    BadRequest:
+      description: Invalid input, or the operation was refused (message is human-readable and specific)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing or wrong credential
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Busy:
+      description: A single-flight job (speed test, bundle import, token refresh) is already running
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+
+    Target:
+      type: string
+      description: A ruleset exit — "provider/channel", "direct", or "block".
+
+    Matchers:
+      type: array
+      minItems: 1
+      description: >
+        Matcher entries: bare strings (type inferred — CIDR/IP-looking
+        values become ip_cidr, "all" the catch-all, everything else
+        domain_suffix) or {value, type} objects. "domain" is accepted as a
+        legacy alias of domain_suffix.
+      items:
+        oneOf:
+          - type: string
+          - type: object
+            additionalProperties: false
+            required: [value]
+            properties:
+              value: { type: string }
+              type:
+                type: string
+                enum: [domain_suffix, domain, ip_cidr, all]
+              matcher_type:
+                type: string
+                description: Legacy alias of "type".

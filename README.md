@@ -144,7 +144,8 @@ cap — is in **[Getting started](docs/getting-started.md)**.
 
 - **[REST API](docs/api.md)** — the `/api/v1` contract: everything the CLI can
   do, over HTTP with Bearer auth. Loopback by default; opt-in network exposure
-  for compose siblings.
+  for compose siblings. Machine-readable spec:
+  [openapi.yaml](docs/openapi.yaml).
 - **[Declarative setup](docs/declarative-config.md)** and the
   **[bundle format](docs/bundle.md)** — the whole setup (providers, channels,
   rules) as one YAML file: backup/restore, startup config, secret indirection.
