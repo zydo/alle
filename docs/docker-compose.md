@@ -19,6 +19,7 @@ ports (proxy hub) or *joining* its network namespace (gateway).
   - [Step 3 — verify](#step-3--verify)
   - [Variant — VPN gateway: route a whole container through alle](#variant--vpn-gateway-route-a-whole-container-through-alle)
   - [Using compose secrets instead of environment variables](#using-compose-secrets-instead-of-environment-variables)
+  - [Variant — manage alle from a sibling container (REST API)](#variant--manage-alle-from-a-sibling-container-rest-api)
   - [Day-2 operations](#day-2-operations)
   - [Troubleshooting](#troubleshooting)
 
@@ -226,6 +227,69 @@ credential:
   token_file: /run/secrets/nordvpn_token
 ```
 
+## Variant — manage alle from a sibling container (REST API)
+
+`docker exec` covers hands-on management; for a service that manages alle
+*programmatically* (rotate channels, toggle the kill switch, read metrics),
+expose the REST API to the compose network — two env vars, both explicit
+opt-ins:
+
+```yaml
+# .env — one shared credential; generate with: openssl rand -hex 32
+ALLE_API_SECRET=change-me
+```
+
+```yaml
+services:
+  alle:
+    image: ziyudo/alle:latest
+    restart: unless-stopped
+    environment:
+      ALLE_API_LISTEN: "0.0.0.0:8080"      # bind the API onto the compose network
+      ALLE_API_SECRET: ${ALLE_API_SECRET}  # ...authenticated by this Bearer secret
+    volumes:
+      - alle-state:/var/lib/alle
+      - ./bundle.yaml:/etc/alle/bundle.yaml:ro
+
+  manager:
+    build: ./manager                       # your automation
+    depends_on:
+      alle:
+        condition: service_healthy         # /health needs no secret
+    environment:
+      ALLE_API_URL: http://alle:8080
+      ALLE_API_SECRET: ${ALLE_API_SECRET}  # same value -> sent as Bearer
+```
+
+From `manager`, every CLI capability is one authenticated call away
+(`docs/api.md` is the full contract):
+
+```bash
+AUTH="Authorization: Bearer $ALLE_API_SECRET"
+curl -s -H "$AUTH" $ALLE_API_URL/api/v1/status
+curl -s -H "$AUTH" $ALLE_API_URL/api/v1/metrics
+curl -s -H "$AUTH" -X POST -H 'Content-Type: application/json' \
+  -d '{"refs":["us_*"],"enabled":true,"provider":"nordvpn"}' \
+  $ALLE_API_URL/api/v1/channels/enabled
+```
+
+Rules of the road:
+
+- **Never run without the secret** — there is no unauthenticated mode. The
+  API can export your VPN credentials (`/api/v1/export`) and disable the
+  kill switch; treat the port like a database with its password.
+- **Don't mount alle's state volume into the manager** to read the secret —
+  the volume also carries `credentials.yaml` (WireGuard private keys,
+  provider tokens). Inject `ALLE_API_SECRET` instead; the file-based
+  `ALLE_API_SECRET_FILE` pairs with compose secrets exactly like
+  `token_file` above.
+- **Don't publish the API port** (`-p 8080:8080`) unless you mean to hand
+  control of your VPN egress to that network; anything crossing hosts wants
+  a TLS-terminating reverse proxy in front.
+- The Web UI does not ride along: on a network bind only Bearer calls and
+  `/health` are accepted from the network — browser access stays loopback
+  (`docker exec` + `alle ui`, or an SSH tunnel).
+
 ## Day-2 operations
 
 - **Change the setup** — edit `bundle.yaml`, then `docker compose restart
@@ -253,4 +317,6 @@ credential:
 | First start is slow / unhealthy briefly                   | The one-time sing-box download into the volume. The health check's start period covers it; it never repeats while the volume lives.                                                                                                                                                                                       |
 | `alle tun on` says it needs privileges                    | The gateway variant's three grants are missing: `cap_add: [NET_ADMIN]`, `devices: [/dev/net/tun]`, `ALLE_RUN_AS_ROOT=1` — then recreate the container.                                                                                                                                                                    |
 | Joined container has no network at all                    | Kill-switch doing its job while the tunnel is down (check `docker compose exec alle alle status`), or the alle container restarted and the joined service needs its compose-driven restart to finish.                                                                                                                     |
-| Web UI unreachable from the host                          | By design: it stays loopback-only inside the container (its auth model is built for one loopback caller). Use `docker exec` for management.                                                                                                                                                                               |
+| Web UI unreachable from the host                          | By design: the browser UI stays loopback-only inside the container. Use `docker exec` for management — or expose the REST API (Bearer-authenticated) with `ALLE_API_LISTEN` + `ALLE_API_SECRET` for programmatic control; see the sibling-container variant above.                                                        |
+| API returns 403 `bad host` from a sibling                 | `ALLE_API_LISTEN` isn't set (the server is loopback-only, and only loopback Hosts pass) or the request carries no/wrong Bearer — on a network bind a foreign `Host` is only accepted alongside a valid `Authorization: Bearer` header.                                                                                    |
+| `api: refusing to start` in logs                          | The secret injection is unusable: both `ALLE_API_SECRET` and `ALLE_API_SECRET_FILE` set, an unreadable file, or a value under 16 characters. The daemon runs; the API deliberately serves nothing until the config is fixed.                                                                                              |

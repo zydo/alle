@@ -1,17 +1,28 @@
-"""The Web UI control server: stdlib HTTP on loopback, served by alled.
+"""The control API server: stdlib HTTP on loopback, served by alled.
 
-Runs as a daemon thread inside the applier process (``start_in_thread``), so the
-UI ships and runs with the daemon — no separate service. Everything about the
-transport is deliberately small: a threaded ``http.server``, JSON that is a 1:1
-projection of ``alle.service`` (no business logic here), and static assets read
-from the package.
+Serves both the programmatic REST API (``/api/v1``, Bearer-authenticated) and
+the browser Web UI (static assets + cookie sessions) — one server, one
+contract. Runs as a daemon thread inside the applier process
+(``start_in_thread``), so it ships and runs with the daemon — no separate
+service. Everything about the transport is deliberately small: a threaded
+``http.server``, JSON that is a 1:1 projection of ``alle.service`` (no
+business logic here), and static assets read from the package.
 
 Security posture (the localhost-web-UI attack class is real — DNS rebinding and
 CSRF have burned loopback apps before):
 
-* Bound strictly to ``127.0.0.1``.
+* Bound to ``127.0.0.1`` unless the operator opts into a network bind with
+  ``ALLE_API_LISTEN`` (the container/compose knob; invalid values fall back to
+  loopback, never widen). The secret can be injected via ``ALLE_API_SECRET`` /
+  ``ALLE_API_SECRET_FILE`` so compose siblings can be handed the same value;
+  a conflicting or weak injection refuses to start rather than guess.
 * Every request's ``Host`` must be a loopback host:port — a rebound
   ``evil.com`` resolving to 127.0.0.1 sends a foreign Host and is refused.
+  On an explicit network bind, two carve-outs pass a foreign Host: requests
+  presenting a valid Bearer (no browser attaches one cross-origin, so
+  rebinding gains nothing) and ``/health`` (an unauthenticated challenge that
+  reveals nothing and mutates nothing). The cookie path — login page, assets,
+  sessions — stays loopback-only even then.
 * Browsers use a per-installation ``alle-<rand>.localhost`` hostname (cookies
   are scoped to hosts, not ports, so a cookie set for ``127.0.0.1`` would be
   sent to every other local web app): literal-host page loads redirect to the
@@ -31,6 +42,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
 import secrets
 import socket
 import threading
@@ -42,7 +54,7 @@ from threading import Thread
 from urllib.parse import parse_qs, urlparse
 
 from alle import applog, fsio, paths
-from alle.webui import auth
+from alle.api import auth
 
 _ASSET_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -101,7 +113,10 @@ _API_RESOURCE_METHODS = {
     "channels": {"GET", "POST", "DELETE"},
     "routes": {"GET", "POST", "DELETE"},
     "locations": {"GET"},
+    "metrics": {"GET"},
     "logs": {"GET"},
+    "test": {"POST"},
+    "tun": {"POST"},
     "export": {"GET"},
     "import": {"POST"},
     "validate": {"POST"},
@@ -239,10 +254,119 @@ def control_api() -> dict:
     return fsio.generated_endpoint(_config_path(), _valid_control_api, generate)
 
 
+class ApiConfigError(Exception):
+    """An unusable ``ALLE_API_*`` configuration. The server refuses to start
+    rather than guess — a wrong guess here is a security-posture change."""
+
+
+def _parse_listen(raw: str) -> tuple[str, int | None] | None:
+    """``host`` or ``host:port`` → ``(host, port-or-None)``; None if malformed.
+
+    IPv4/hostname only (the server is AF_INET); a port-less value keeps the
+    minted contract port.
+    """
+    host, sep, port_s = raw.partition(":")
+    host = host.strip()
+    if not host or "/" in host or " " in host or ":" in port_s:
+        return None
+    if not sep:
+        return host, None
+    if not port_s.isdigit():
+        return None
+    port = int(port_s)
+    if not 1 <= port <= 65535:
+        return None
+    return host, port
+
+
+def _listen_config(api: dict) -> dict:
+    """Where the server binds and how a same-machine client reaches it.
+
+    ``{"bind": "host:port", "client": "host:port", "net": bool}`` — ``bind``
+    is the listening address, ``client`` what local tools connect to (loopback
+    for a wildcard bind), ``net`` True when ``ALLE_API_LISTEN`` names a
+    non-loopback host. Env unset = the minted loopback contract,
+    byte-for-byte; an invalid value logs and keeps loopback — a typo must
+    narrow, never widen.
+    """
+    contract = {"bind": api["address"], "client": api["address"], "net": False}
+    raw = (os.environ.get("ALLE_API_LISTEN") or "").strip()
+    if not raw:
+        return contract
+    parsed = _parse_listen(raw)
+    if parsed is None:
+        applog.log(
+            f"api: invalid ALLE_API_LISTEN {raw!r} — keeping the loopback "
+            f"contract {api['address']}"
+        )
+        return contract
+    host, port = parsed
+    if port is None:
+        port = int(api["address"].rsplit(":", 1)[1])
+    loopback = host in ("localhost", "::1") or host.startswith("127.")
+    client_host = "127.0.0.1" if host == "0.0.0.0" else host
+    return {
+        "bind": f"{host}:{port}",
+        "client": f"{client_host}:{port}",
+        "net": not loopback,
+    }
+
+
+def _api_secret(api: dict) -> str:
+    """The effective Bearer/signing secret: injected via ``ALLE_API_SECRET``
+    or ``ALLE_API_SECRET_FILE`` (exactly one), else the minted per-install one.
+
+    Injection failures raise :class:`ApiConfigError` — a conflicting or weak
+    secret must refuse to serve, never fall back silently (the operator
+    believes the injected value is in force).
+    """
+    env = os.environ.get("ALLE_API_SECRET")
+    path = os.environ.get("ALLE_API_SECRET_FILE")
+    if env is not None and path is not None:
+        raise ApiConfigError(
+            "both ALLE_API_SECRET and ALLE_API_SECRET_FILE are set — set exactly one"
+        )
+    if path is not None:
+        try:
+            value = Path(path).read_text().strip()
+        except OSError as e:
+            raise ApiConfigError(
+                f"ALLE_API_SECRET_FILE {path!r} is unreadable: {e}"
+            ) from e
+    elif env is not None:
+        value = env.strip()
+    else:
+        return api["secret"]
+    if len(value) < 16:
+        raise ApiConfigError(
+            "the injected API secret is too short — use at least 16 characters "
+            "(e.g. openssl rand -hex 32)"
+        )
+    return value
+
+
+def effective_api() -> dict:
+    """The client-facing endpoint after env overrides: ``{"address", "secret",
+    "host", "net"}`` — what same-machine tools (``alle ui``, the tray) use.
+
+    May generate the loopback contract file; read-only callers (the
+    companion) compose :func:`_listen_config`/:func:`_api_secret` over their
+    own read instead.
+    """
+    api = control_api()
+    lc = _listen_config(api)
+    return {
+        "address": lc["client"],
+        "secret": _api_secret(api),
+        "host": api["host"],
+        "net": lc["net"],
+    }
+
+
 def _canonical_host(api: dict | None = None) -> str:
     """``<per-install-hostname>:<port>`` — the only host the browser UI uses."""
     api = api or control_api()
-    port = api["address"].rsplit(":", 1)[1]
+    port = _listen_config(api)["client"].rsplit(":", 1)[1]
     return f"{api['host']}:{port}"
 
 
@@ -262,7 +386,10 @@ def wait_until_serving(timeout: float = 6.0) -> bool:
     """
     import time
 
-    api = control_api()
+    try:
+        api = effective_api()
+    except ApiConfigError:
+        return False  # the server refuses to start on this config
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if _health_ok(api):
@@ -292,7 +419,7 @@ def mint_login_url() -> str:
     Uses the canonical per-install hostname so the resulting session cookie is
     scoped to a host no other local service can ever be."""
     api = control_api()
-    token = auth.mint_login_token(api["secret"])
+    token = auth.mint_login_token(_api_secret(api))
     return f"http://{_canonical_host(api)}/?token={token}"  # noqa:S5332
 
 
@@ -472,10 +599,11 @@ def _asset(name: str) -> bytes | None:
 
 
 class _Handler(BaseHTTPRequestHandler):
-    server_version = "alle-webui"
+    server_version = "alle-api"
     secret = ""
     address = ""
     canonical = ""  # "<per-install-hostname>:<port>" — the browser-facing host
+    net = False  # True when the operator opted into a non-loopback bind
     logins: auth.LoginTokenStore  # persisted one-time login-token consumption
     # Socket deadline for reading the request line, headers, and body — a
     # client that connects and stalls cannot pin a worker thread forever.
@@ -507,6 +635,39 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _host_ok(self) -> bool:
         return self._loopback_host(self.headers.get("Host", ""))
+
+    def _bearer_ok(self) -> bool:
+        return auth.check_bearer(self.secret, self.headers.get("Authorization"))
+
+    def _host_gate(self, path: str) -> bool:
+        """The Host check, with the network-bind carve-outs.
+
+        A loopback (or canonical) Host always passes — the browser regime.
+        On an operator-configured network bind (``self.net``) two extra cases
+        pass a foreign Host: a valid Bearer (no browser attaches one
+        cross-origin, so DNS rebinding gains nothing here) and ``/health``
+        (unauthenticated readiness challenge — reveals nothing, mutates
+        nothing). Everything else — login page, assets, the cookie path —
+        stays loopback-only even when bound to the network.
+        """
+        if self._host_ok():
+            return True
+        if not self.net:
+            return False
+        return path == "/health" or self._bearer_ok()
+
+    def _dry_run(self) -> bool:
+        """The ``?dry_run=`` query flag on destructive endpoints — strict: an
+        unrecognized value is a 400, never "false" (a typo must not turn a
+        preview into the real removal)."""
+        raw = (parse_qs(urlparse(self.path).query).get("dry_run") or [None])[0]
+        if raw is None:
+            return False
+        if raw in ("1", "true"):
+            return True
+        if raw in ("0", "false"):
+            return False
+        raise _BadRequest(400, "dry_run must be one of: 1, true, 0, false")
 
     def _on_canonical_host(self) -> bool:
         return self.headers.get("Host", "") == self.canonical
@@ -600,10 +761,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(e.status, {"error": e.message})
 
     def _get(self):
-        if not self._host_ok():
-            return self._json(403, {"error": "bad host"})
         parsed = urlparse(self.path)
         path = parsed.path
+        if not self._host_gate(path):
+            return self._json(403, {"error": "bad host"})
 
         if path == "/":
             return self._root(parse_qs(parsed.query))
@@ -641,10 +802,10 @@ class _Handler(BaseHTTPRequestHandler):
         # ``?token=`` spend a login token. The UI does not rely on HEAD; this
         # only lets a liveness probe ask "is the server there" safely.
         try:
-            if not self._host_ok():
+            path = urlparse(self.path).path
+            if not self._host_gate(path):
                 code = 403
             else:
-                path = urlparse(self.path).path
                 code = 200 if path in ("/", "/health") else 404
             self.send_response(code)
             self.send_header("Content-Length", "0")
@@ -669,17 +830,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(e.status, {"error": e.message})
 
     def _mutate_checked(self, method: str):
-        if not self._host_ok():
+        path = urlparse(self.path).path
+        if not self._host_gate(path):
             return self._json(403, {"error": "bad host"})
         # CSRF applies to the cookie path only: a browser cannot attach an
         # Authorization header cross-origin, so a Bearer-authenticated request
         # (curl, scripts) needs no Origin; everything else must be same-origin.
-        if (
-            not auth.check_bearer(self.secret, self.headers.get("Authorization"))
-            and not self._origin_ok()
-        ):
+        if not self._bearer_ok() and not self._origin_ok():
             return self._json(403, {"error": "bad origin"})
-        path = urlparse(self.path).path
         if method == "POST" and path == "/api/v1/login":
             return self._login_post()  # login authenticates itself
         if not path.startswith("/api/v1/"):
@@ -940,6 +1098,7 @@ class _Handler(BaseHTTPRequestHandler):
             ("channels",): service.channel_list,
             ("routes",): service.routes_list,
             ("locations",): lambda: _locations(self.path),
+            ("metrics",): lambda: service.metrics_totals(_channel_query(self.path)),
             ("logs",): lambda: {"text": service.logs_tail(_log_lines(self.path))},
         }
         fn = routes_.get(tuple(seg))
@@ -1040,8 +1199,20 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._call(
                     service.provider_update_token, seg[1], _dict_field(body, "creds")
                 )
+        if method == "POST" and seg == ["providers", "remove"]:
+            # Batch remove, mirroring the CLI's multi-name form; dry_run
+            # returns the removal plan without touching state.
+            _fields(body, "names", "dry_run")
+            return self._call(
+                service.provider_remove_many,
+                _str_list_field(body, "names", required=True),
+                dry_run=_bool_field(body, "dry_run"),
+            )
         if method == "DELETE" and len(seg) == 2 and seg[0] == "providers":
-            return self._call(lambda: service.provider_remove_many([seg[1]]))
+            dry = self._dry_run()
+            return self._call(
+                lambda: service.provider_remove_many([seg[1]], dry_run=dry)
+            )
         if method == "POST" and seg == ["channels"]:
             _fields(
                 body, "provider", "country", "city", "label", "conf_text", "conf_name"
@@ -1077,9 +1248,33 @@ class _Handler(BaseHTTPRequestHandler):
                     provider=seg[1],
                 )
             )
-        if method == "DELETE" and len(seg) == 3 and seg[0] == "channels":
+        if method == "POST" and seg == ["channels", "enabled"]:
+            # Batch enable/disable, the CLI's full grammar: refs (ids,
+            # provider/channel refs, globs), a provider scope, or all+provider.
+            _fields(body, "refs", "enabled", "provider", "all", "dry_run")
             return self._call(
-                lambda: service.channel_remove_many([seg[2]], provider=seg[1])
+                service.channel_set_enabled_many,
+                _str_list_field(body, "refs"),
+                _bool_field(body, "enabled", required=True),
+                provider=_opt_str_field(body, "provider"),
+                dry_run=_bool_field(body, "dry_run"),
+                all_=_bool_field(body, "all"),
+            )
+        if method == "POST" and seg == ["channels", "remove"]:
+            _fields(body, "refs", "provider", "all", "dry_run")
+            return self._call(
+                service.channel_remove_many,
+                _str_list_field(body, "refs"),
+                provider=_opt_str_field(body, "provider"),
+                dry_run=_bool_field(body, "dry_run"),
+                all_=_bool_field(body, "all"),
+            )
+        if method == "DELETE" and len(seg) == 3 and seg[0] == "channels":
+            dry = self._dry_run()
+            return self._call(
+                lambda: service.channel_remove_many(
+                    [seg[2]], provider=seg[1], dry_run=dry
+                )
             )
         if method == "POST" and seg == ["routes", "rulesets"]:
             _fields(body, "name", "target", "matchers")
@@ -1127,7 +1322,9 @@ class _Handler(BaseHTTPRequestHandler):
                 _matchers_field(body),
             )
         if method == "DELETE" and len(seg) == 3 and seg[:2] == ["routes", "rulesets"]:
-            return self._call(service.routes_ruleset_remove, seg[2])
+            return self._call(
+                service.routes_ruleset_remove, seg[2], dry_run=self._dry_run()
+            )
         if method == "POST" and seg == ["routes", "reorder"]:
             _fields(body, "ids", "flat")
             return self._call(
@@ -1157,7 +1354,7 @@ class _Handler(BaseHTTPRequestHandler):
                 service.tun_mode, _bool_field(body, "enabled", required=True)
             )
         if method == "DELETE" and len(seg) == 2 and seg[0] == "routes":
-            return self._call(service.routes_remove, [seg[1]])
+            return self._call(service.routes_remove, [seg[1]], dry_run=self._dry_run())
         if method == "POST" and seg == ["test"]:
             # A speed test streams one row per channel as each finishes
             # (application/x-ndjson), so the UI isn't blind until the whole batch
@@ -1221,6 +1418,11 @@ def _add_channel(body: dict) -> dict:
     )
 
 
+def _channel_query(path: str) -> str | None:
+    """The optional ``?channel=`` filter (same ref grammar as ``alle test``)."""
+    return (parse_qs(urlparse(path).query).get("channel") or [None])[0]
+
+
 def _log_lines(path: str) -> int:
     raw = (parse_qs(urlparse(path).query).get("lines") or ["200"])[0]
     try:
@@ -1265,33 +1467,52 @@ class _BoundedServer(ThreadingHTTPServer):
 
 
 def build_server() -> ThreadingHTTPServer:
-    """Create the control server bound to the contract port (not yet serving).
+    """Create the control server bound to its configured address (not yet
+    serving).
 
-    Wires the handler's credentials from ``control_api.json`` and its persisted
-    login-token store (``web_consumed.json`` — consumption survives restarts).
-    Raises ``OSError`` if the port cannot be bound.
+    The address and secret come from the loopback contract
+    (``control_api.json``) plus the operator's env overrides
+    (``ALLE_API_LISTEN``, ``ALLE_API_SECRET[_FILE]``). Wires the handler's
+    persisted login-token store (``web_consumed.json`` — consumption survives
+    restarts). Raises ``OSError`` if the address cannot be bound and
+    :class:`ApiConfigError` on an unusable secret configuration.
     """
     api = control_api()
-    host, port = api["address"].split(":")
-    _Handler.secret = api["secret"]
-    _Handler.address = api["address"]
+    lc = _listen_config(api)
+    _Handler.secret = _api_secret(api)  # ApiConfigError propagates: fail loud
+    _Handler.address = lc["client"]
+    _Handler.net = lc["net"]
     _Handler.canonical = _canonical_host(api)
     _Handler.logins = auth.LoginTokenStore(paths.state_dir() / "web_consumed.json")
+    host, port = lc["bind"].rsplit(":", 1)
     return _BoundedServer((host, int(port)), _Handler)
 
 
 def start_in_thread() -> str | None:
     """Start the control server in a daemon thread.
 
-    Returns the plain URL, or None if the port could not be bound (logged, never
-    fatal to the daemon).
+    Returns the plain URL, or None if the server could not start — bad bind or
+    an unusable secret injection (logged, never fatal to the daemon; the
+    secret case deliberately serves *nothing* rather than fall back to a
+    secret the operator did not intend).
     """
+    api = control_api()
+    lc = _listen_config(api)
     try:
         httpd = build_server()
-    except OSError as e:
-        applog.log(f"web ui: could not bind {control_api()['address']}: {e}")
+    except ApiConfigError as e:
+        applog.log(f"api: refusing to start — {e}")
         return None
-    Thread(target=httpd.serve_forever, name="alle-webui", daemon=True).start()
+    except OSError as e:
+        applog.log(f"api: could not bind {lc['bind']}: {e}")
+        return None
+    Thread(target=httpd.serve_forever, name="alle-api", daemon=True).start()
     url = ui_url()
-    applog.log(f"web ui: serving {url}")
+    if lc["net"]:
+        applog.log(
+            f"api: serving on {lc['bind']} (network bind — Bearer required); "
+            f"web ui {url}"
+        )
+    else:
+        applog.log(f"api: serving {url}")
     return url

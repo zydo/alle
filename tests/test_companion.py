@@ -1,5 +1,5 @@
 """The desktop companion's thin API client — exercised against a real control
-server on an ephemeral loopback port (same harness as test_webui_server), so
+server on an ephemeral loopback port (same harness as test_api_server), so
 the health challenge, Bearer auth, and version-skew degradation are all real."""
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import pytest
 
 from alle import companion
 from alle.state import Store
-from alle.webui import server
+from alle.api import server
 
 
 @pytest.fixture

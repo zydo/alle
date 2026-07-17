@@ -315,13 +315,13 @@ def run_applier() -> None:
         applog.log(f"router port allocation failed: {e}")
 
     try:
-        # The Web UI control server runs as a thread in this process, so the UI
-        # ships and runs with the daemon (nothing extra to deploy).
-        from alle.webui import server as webui_server
+        # The control API server (REST API + Web UI) runs as a thread in this
+        # process, so it ships and runs with the daemon (nothing extra to deploy).
+        from alle.api import server as api_server
 
-        webui_server.start_in_thread()
-    except Exception as e:  # noqa: BLE001 — the UI is optional; never kill the daemon
-        applog.log(f"web ui failed to start: {e}")
+        api_server.start_in_thread()
+    except Exception as e:  # noqa: BLE001 — the API is optional; never kill the daemon
+        applog.log(f"api failed to start: {e}")
 
     accumulator = metrics.Accumulator()
     stop_flag = {"stop": False}

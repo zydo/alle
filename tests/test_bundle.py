@@ -17,7 +17,7 @@ import yaml
 from alle import bundle, cli, credentials, service
 from alle.providers import ProviderError
 from alle.state import Store
-from alle.webui import server
+from alle.api import server
 
 KEY_A = base64.b64encode(bytes([1] * 32)).decode()
 KEY_B = base64.b64encode(bytes([2] * 32)).decode()

@@ -1,4 +1,4 @@
-"""Auth primitives for the Web UI control API.
+"""Auth primitives for the control API (REST API + Web UI).
 
 Three credentials, all keyed off one generated per-installation secret
 (``control_api.json``, 0600 — the same pattern as the Clash API secret):

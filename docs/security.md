@@ -38,8 +38,12 @@ the container network in the role of the machine. Consequences:
   your provider account). Keep alle on networks whose members you trust, and
   treat a `-p`-published proxy port as publishing an open proxy to whatever
   can reach it — only ever publish onto trusted networks.
-- **The Web UI does not widen.** It stays `127.0.0.1`-only inside the
-  container; its auth model was built for one loopback caller. Manage via
+- **The control API/Web UI does not widen by itself.** It stays
+  `127.0.0.1`-only inside the container unless the operator additionally sets
+  `ALLE_API_LISTEN` — a second, separate opt-in that exposes the
+  Bearer-authenticated REST API (never the browser cookie path) to the
+  container network; see [Exposing the API](#exposing-the-api-to-a-network-opt-in)
+  below and [api.md](api.md). Without it, manage via
   `docker exec <name> alle …`.
 - **Nothing changes on hosts.** `ALLE_LISTEN` (and the other container knobs)
   default off; container *detection* only ever refuses host-only footguns and
@@ -124,9 +128,11 @@ of the v1 model. See the tun runbook for the recovery path.
 | Setup bundles (`alle export`) | wherever you save them                          | `0600` on export; **the file is a secret**                                                                                                                                                                                     |
 | Setup rollback journal        | `~/.alle/setup-journal.json`                    | `0600`, transient — holds the pre-change credentials while a compound setup change (token update, bundle apply, provider removal) is in flight, and is used to roll them back if the change fails or crashes before committing |
 
-## The Web UI
+## The control API and Web UI
 
-Served by the daemon on `127.0.0.1` only. Defenses, layer by layer:
+One server (`alle.api`) serves the Bearer-authenticated REST API
+(`/api/v1`, see [api.md](api.md)) and the browser Web UI. By default it
+binds `127.0.0.1` only. Defenses, layer by layer:
 
 - **Host allow-list** — every request's `Host` must be loopback (or the
   canonical name below); a DNS-rebound `evil.com` pointing at 127.0.0.1 is
@@ -165,10 +171,41 @@ Served by the daemon on `127.0.0.1` only. Defenses, layer by layer:
   never coerced defaults), unknown-field rejection, socket deadlines, and a
   bounded worker pool.
 
-**Remote access:** never expose or reverse-proxy the port. Tunnel the same
-port over SSH (`ssh -L <port>:127.0.0.1:<port> user@host`) and open the
-`alle ui` link locally — the `*.localhost` name resolves to your end of the
-tunnel.
+**Remote browser access:** never expose or reverse-proxy the port for
+*browser* use. Tunnel the same port over SSH
+(`ssh -L <port>:127.0.0.1:<port> user@host`) and open the `alle ui` link
+locally — the `*.localhost` name resolves to your end of the tunnel.
+Programmatic access from other machines has a sanctioned path instead:
+
+### Exposing the API to a network (opt-in)
+
+`ALLE_API_LISTEN=<host>[:<port>]` (e.g. `0.0.0.0:8080`) binds the server
+beyond loopback — built for compose stacks where sibling containers manage
+alle over REST. The posture changes it makes, and only these:
+
+- **Bearer requests and `/health` accept a non-loopback `Host`.** A browser
+  cannot be tricked into attaching an `Authorization` header cross-origin,
+  so the Host pin adds nothing on that path; `/health` reveals nothing and
+  mutates nothing. Everything else — the login page, assets, cookie
+  sessions — keeps the full loopback regime: the browser UI never rides
+  along onto the network.
+- **Auth is never optional.** There is no unauthenticated mode, container or
+  not: the API can export `credentials.yaml` (WireGuard private keys,
+  provider tokens) and disable the kill switch, so an open port is account
+  theft plus silent traffic leaks. Provision the secret to siblings with
+  `ALLE_API_SECRET` (or `ALLE_API_SECRET_FILE` for compose/k8s secrets);
+  a conflicting or weak injection makes the server refuse to start rather
+  than guess. Never share alle's state volume as the provisioning channel —
+  it holds `credentials.yaml`.
+- **The trust boundary is the network you bind onto.** Bearer over plain
+  HTTP inside a private compose network is the same trust model as a
+  database password there. Publishing the API port (`-p`) publishes control
+  of your VPN egress and credentials to whatever can reach it; crossing
+  hosts or untrusted networks needs a TLS-terminating reverse proxy — alle
+  does not do TLS.
+- **A config typo narrows, never widens.** An invalid `ALLE_API_LISTEN`
+  logs and keeps the loopback contract; the default (unset) is exactly the
+  loopback-only behavior above, on hosts and in the image alike.
 
 ## Fail-closed routing
 

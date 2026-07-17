@@ -57,18 +57,10 @@ one local proxy inbound routed through one WireGuard VPN peer. Channels can come
 from different providers, so a NordVPN exit and a Proton VPN `.conf` import can
 run at the same time.
 
-**System-wide VPN (TUN mode).** The above is per-app by design — you point each
-app at the proxy it needs. For a whole-machine VPN that captures *all* traffic
-(raw sockets, UDP, every app) through the same routing rules, enable TUN mode
-with `alle tun on`. It needs a **one-time** privilege grant and then no sudo
-for daily use: `sudo alle helper install` on macOS (a root LaunchDaemon owns
-sing-box while tun is on), or `sudo setcap cap_net_admin,cap_net_raw+ep
-"$(alle version --singbox-path)"` on Linux. See
-[TUN mode](docs/cli-reference.md#alle-tun-onoff) and the
-[runbook](docs/tun-runbook.md); the rest of `alle` stays no-sudo. Note: while
-TUN mode is on, **IPv6 is blocked, not leaked** — the supported providers'
-WireGuard configs are IPv4-only (their restriction), so rather than let IPv6
-bypass the VPN and expose your home address, alle captures and rejects it.
+For a whole-machine VPN that captures *all* traffic through the same routing
+rules, there is an optional **TUN mode** (`alle tun on`, one-time privilege
+grant) — see the [CLI reference](docs/cli-reference.md#alle-tun-onoff) and
+the [runbook](docs/tun-runbook.md).
 
 ## Current status
 
@@ -83,459 +75,110 @@ bypass the VPN and expose your home address, alle captures and rejects it.
 
 **Platforms**
 
-| Platform | Support                                 |
-| -------- | --------------------------------------- |
-| macOS    | Supported                               |
-| Linux    | Supported                               |
-| Docker   | Supported — `ziyudo/alle` on Docker Hub |
-| Windows  | Planned                                 |
+| Platform | Support                                                           |
+| -------- | ----------------------------------------------------------------- |
+| macOS    | Supported                                                         |
+| Windows  | Planned                                                           |
+| Linux    | Supported                                                         |
+| Docker   | Supported — [`ziyudo/alle`](https://hub.docker.com/r/ziyudo/alle) |
 
 **Features**
 
-| Phase             | Status                                                                                                           |
+| Area              | Status                                                                                                           |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------- |
 | Core CLI          | Providers, channels, per-channel proxies, status, tests (probe + speed + traffic), logs                          |
 | Routing           | Ruleset-based router entrypoint with domain/CIDR/all matchers, kill-switch, CLI shadow lint, built-in LAN bypass |
-| Web UI            | Dashboard (channels, probe/speed, routes, kill-switch) + Logs page                                               |
+| Web UI            | Dashboard (channels, probe/speed, routes, kill-switch) + Bundle + Logs pages                                     |
+| REST API          | Everything the CLI does over `/api/v1` (Bearer auth) — for scripts and compose siblings                          |
 | Docker            | Container profile: proxy hub for compose networks, VPN gateway container (tun), declarative boot config          |
 | Desktop companion | Planned                                                                                                          |
 | Distribution      | PyPI CLI package and Docker Hub image; native installers planned                                                 |
 
 ## Install
 
-`alle` is a Python CLI (Python 3.10+) installed as a user-level tool — no sudo.
-Two recommended, fully explicit paths; each step is an ordinary command you can
-inspect, and the tool that installed `alle` is also the one that upgrades and
-uninstalls it.
-
-**With [`uv`](https://docs.astral.sh/uv/getting-started/installation/):**
+`alle` is a Python CLI (Python 3.10+) installed as a user-level tool — no sudo:
 
 ```bash
-# 1. install uv (see its docs for other methods)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-# 2. install the alle CLI
-uv tool install alle-proxy
-# 3. (optional) run the background daemon at login, so channels survive a reboot
-alle daemon install
+uv tool install alle-proxy      # or: pipx install alle-proxy
+alle daemon install             # optional: start at login, survive reboots
 ```
 
-**With [`pipx`](https://pipx.pypa.io/stable/):**
-
-```bash
-# 1. install pipx (e.g. `brew install pipx` or your distro's package)
-# 2. install the alle CLI
-pipx install alle-proxy
-# 3. (optional) run the background daemon at login
-alle daemon install
-```
-
-Step 3 is optional: without it the runtime auto-starts on first use (`alle start`
-or the first channel you add) and runs for the session. `alle daemon install`
-registers it as a user-level login service (macOS LaunchAgent / `systemd --user`)
-so it starts at login and is supervised — see the
-[CLI reference](docs/cli-reference.md#alle-daemon).
-
-Also works: `python -m pip install alle-proxy` into an environment you manage,
-or one-off runs with `uvx --from alle-proxy alle --help`.
-
-**In Docker** — for servers and compose stacks, alle also runs as a container
-from Docker Hub:
-
-```bash
-docker pull ziyudo/alle:latest
-docker run -d --name alle --restart unless-stopped \
-  -v alle-state:/var/lib/alle \
-  -v ./bundle.yaml:/etc/alle/bundle.yaml:ro \
-  ziyudo/alle:latest
-docker exec alle alle status        # manage with the same CLI, via exec
-```
-
-The container is configured declaratively: mount a
-[setup bundle](docs/declarative-config.md) and every start converges on it
-(tokens can stay out of the file via `token_env`/`token_file`). Other
-containers on the same Docker network reach the channel and router proxy
-ports directly — or join the container's network to ride a full VPN tunnel
-(gateway mode). See the [Docker section](#docker) below,
-**[docs/docker.md](docs/docker.md)** (image design), and
-**[docs/docker-compose.md](docs/docker-compose.md)** (compose walkthrough).
-None of this changes host installs: outside a
-container, proxy ports stay loopback-only with OS-assigned numbers, exactly
-as described everywhere else in this README.
-
-After installation:
-
-```bash
-alle version
-alle --help
-```
-
-**Uninstall** with the same tool that installed it — `uv tool uninstall
-alle-proxy` or `pipx uninstall alle-proxy` (run `alle stop` first). `~/.alle`
-is left behind since it holds your provider credentials and WireGuard keys; a
-reinstall picks up where you left off. Remove it with `rm -rf ~/.alle` if you
-want everything gone.
+For servers and compose stacks, the same core runs as a Docker container
+(`docker pull ziyudo/alle`). Install details, alternatives, and uninstall:
+[Getting started](docs/getting-started.md); the container:
+[docs/docker.md](docs/docker.md).
 
 ## Quick start
-
-Add a provider, create a channel, start the runtime, then use the channel's local
-proxy port.
 
 ```bash
 alle providers add nordvpn
 alle channels add nordvpn --country "United States"
 alle start
-alle channels ls
+alle channels ls                # prints each channel's local proxy port
 ```
 
-`alle channels ls` prints the local proxy port for each channel:
-
-```text
-LABEL            ID                       PORT    COUNTRY        CITY
----------------  -----------------------  ------  -------------  ----------
-united_states_1  nordvpn/united_states_1  :53124  United States  (Any City)
-```
-
-Use that port from any tool or app that supports an HTTP or SOCKS proxy:
+Point anything proxy-aware at a channel's port:
 
 ```bash
 curl -x http://127.0.0.1:53124 https://api.ipify.org
 ```
 
-Check health and traffic (`status` is the system summary; `test` is the
-per-channel table — fresh IP/latency plus cumulative sent/received):
+The full walkthrough — provider setup styles (token vs `.conf` import),
+labels, everyday commands, holding more channels than your plan's connection
+cap — is in **[Getting started](docs/getting-started.md)**.
 
-```bash
-alle status
-alle test
-```
+## Documentation
 
-**Provider setup**
+**Using alle**
 
-`alle` supports two provider setup styles today:
+- **[Getting started](docs/getting-started.md)** — install, quick start,
+  provider setup, everyday commands, channel enable/disable.
+- **[Rule-based routing](docs/routing.md)** — the router entrypoint: rulesets,
+  first-match priority, kill-switch, built-in LAN bypass.
+- **[Web UI](docs/web-ui.md)** — the browser dashboard (`alle ui`): pages,
+  sign-in, remote access over SSH.
+- **[CLI reference](docs/cli-reference.md)** — every command, flag, and
+  environment variable.
 
-**NordVPN** uses an access token:
+**Automating alle**
 
-```bash
-alle providers add nordvpn
-alle locations nordvpn
-alle locations nordvpn --country "United States"
-alle channels add nordvpn --country "United States" --city "Seattle"
-```
+- **[REST API](docs/api.md)** — the `/api/v1` contract: everything the CLI can
+  do, over HTTP with Bearer auth. Loopback by default; opt-in network exposure
+  for compose siblings.
+- **[Declarative setup](docs/declarative-config.md)** and the
+  **[bundle format](docs/bundle.md)** — the whole setup (providers, channels,
+  rules) as one YAML file: backup/restore, startup config, secret indirection.
 
-To rotate a bad or expired token later, run `alle providers add nordvpn` again
-(or use the gear on the provider in the Web UI): it confirms, validates the new
-token, and re-resolves the provider's channels — no need to remove and re-add.
-The stored token is never displayed back, only a masked preview. This is distinct
-from a bundle import (which changes your whole setup from a file); a token update
-changes one live credential. See
-[`alle providers add`](docs/cli-reference.md#alle-providers-add-provider).
+**Deploying alle**
 
-**Proton VPN** uses WireGuard config files downloaded from Proton:
+- **[Docker](docs/docker.md)** — image design, proxy hub, VPN gateway
+  container (tun), trust boundaries.
+- **[Docker Compose walkthrough](docs/docker-compose.md)** — bundle authoring,
+  secrets, managing alle from a sibling container, day-2 operations,
+  troubleshooting.
+- **[TUN runbook](docs/tun-runbook.md)** — whole-machine capture: privilege
+  models per platform, verification, rollback.
 
-```bash
-alle providers add protonvpn
-alle channels add protonvpn --config ~/Downloads/wg-US-CA-842.conf
-```
+**Understanding alle**
 
-Re-importing the same `.conf` file updates that channel in place, keeping the
-same channel id and local port; re-importing a byte-identical file changes
-nothing and tells you the channel already exists.
-
-**Friendly names**
-
-Channels are identified by a globally-unique, provider-qualified id
-(`nordvpn/united_states_1`) — the handle every command takes, shown in the `ID`
-column. You can also give one a display label for readability (the `LABEL`
-column in `channels ls` and `test`). The id never changes,
-so relabelling is always safe:
-
-```bash
-alle channels add nordvpn --country "United States" --label "Streaming - US"
-alle channels setlabel united_states_1 "Streaming - US"   # or set it later
-alle channels setlabel united_states_1                    # omit text to clear
-```
-
-**Common commands**
-
-Useful commands after setup:
-
-```bash
-alle providers ls
-alle channels ls
-alle channels ls --refs
-alle status
-alle test
-alle logs
-alle stop
-```
-
-Most read commands support `--json` for scripts:
-
-```bash
-alle status --json
-alle channels ls --json
-alle test --json
-```
-
-Channel and provider removals accept multiple targets:
-
-```bash
-alle channels rm japan_1 united_states_seattle_1
-alle channels rm protonvpn/wg_us_ca_842
-alle channels rm 'united_states_*' --dry-run
-alle providers rm nordvpn protonvpn -y
-```
-
-**Hold more channels than your plan's connection cap.** Some subscriptions
-limit simultaneous connections (NordVPN and Proton VPN allow ~10). A
-**disabled** channel stays in your config but is not materialised at all — no
-WireGuard handshake or keepalive toward the provider, so it uses **no
-connection slot**. Keep a stable of servers on hand and flip which ones are
-live:
-
-```bash
-alle channels disable japan_1            # free the slot; config + rules stay
-alle channels enable japan_1             # dial it again
-alle channels disable 'united_states_*'  # same ref grammar as rm
-```
-
-Disabled channels stay visible everywhere (`channels ls` grows a STATUS
-column; `test` shows a skipped `Disabled` row) and can't be targeted by
-routing rules while disabled. This is local intent only — it doesn't
-deregister the device from your provider account.
-
-For the complete command reference, see the
-[CLI Reference](docs/cli-reference.md).
-
-## Rule-based routing
-
-Besides the per-channel ports, `alle` runs one **router entrypoint** — a single
-local HTTP+SOCKS proxy that dispatches each connection by rule to a channel, to
-`direct` (no VPN), or to `block`. The entrypoint is always on: with no rules it
-is a transparent pass-through, and traffic only uses a VPN exit once you wire a
-rule to one. Its port is assigned once and stays stable (`alle status` shows it),
-so apps and future OS-level profiles can point at it permanently.
-
-```bash
-alle routes ruleset create Streaming --via nordvpn/united_states_1 --domain netflix.com --domain hulu.com
-alle routes ruleset create LocalDirect --via direct --cidr 192.168.0.0/16
-alle routes ruleset create BlockTrackers --via block --domain tracker.example.com
-alle routes ruleset create DefaultVPN --via nordvpn/japan_1 --all
-alle routes ls
-```
-
-- **Rulesets** are the authoring model: a named, ordered block of matchers that
-  all share one exit (`<provider>/<channel>`, `direct`, or `block`). Block order
-  is priority: **first matching ruleset wins**. Reorder blocks with
-  `alle routes reorder rs3 rs1 rs2`.
-- **Matchers** inside a ruleset are unordered because same-target matchers
-  commute. Use `--domain` for a destination domain — it matches the domain
-  *and all of its subdomains* (dot-boundary) — `--cidr` for destination
-  IP/CIDR, and `--all` for a catch-all. A matcher that can never win because
-  an earlier ruleset covers it is flagged as *shadowed* in `routes ls`.
-- **Unmatched traffic goes direct** — without a VPN — like other modern VPN
-  clients. To block unmatched traffic instead (a kill-switch for the router
-  entrypoint), turn it on explicitly: `alle routes killswitch on`. Per-channel
-  ports are never affected by the kill-switch.
-- **LAN/local traffic stays direct by default.** Built-in rules for private,
-  link-local, and multicast ranges are compiled ahead of every user rule, so a
-  catch-all VPN rule never cuts off printers, NAS boxes, router admin pages, or
-  LAN discovery — the same protection mainstream VPN clients ship. Inspect or
-  disable with `alle routes lan [on|off]` (leaving it on is recommended).
-- **Channels referenced by rules cannot be removed.** `alle channels rm` (and
-  `alle providers rm`, for any of its channels) refuses while a rule targets the
-  channel, listing every referencing rule and the exact `alle routes rm …` to
-  run first. Remove the rules, then the channel — routing config never changes
-  as a side effect of something else.
-- Per-channel ports keep working exactly as before, with or without rules — the
-  router is an addition, never a replacement.
-
-## Backup and declarative setup
-
-The whole setup — providers (with credentials), channels, rulesets, and router
-toggles — round-trips through one declarative YAML **bundle** file. `import`
-applies it two ways: a **merge** by default, or `--replace` to overwrite the
-whole setup (it confirms first).
-
-```bash
-alle export                                               # write the bundle (0600)
-alle import  alle-backup-20260709-143022.yaml             # merge into the current setup
-alle import  alle-backup-20260709-143022.yaml --replace   # REPLACE the whole setup (confirms)
-```
-
-The bundle is a **secret** (it carries WireGuard private keys and provider
-tokens), so treat it like a password file. The same export and import
-(merge / replace) are on the Web UI's **Bundle** page.
-
-Because `import` merges idempotently, a bundle doubles as **startup config**:
-the Docker image applies a mounted bundle on every boot, and the same file
-works on hosts. Two features keep such a file shareable: credential
-indirection (`token_env:` / `token_file:` instead of an inline token) and
-declared ports (`port:` per channel, `router: {port: …}`) for setups where
-apps or compose files must know ports ahead of time.
-
-The full format, apply semantics, how to hand-write one provider by provider,
-and all caveats (auto-assigned ports don't travel, token-provider channels may
-re-resolve a fresh server, cloning a setup to two machines) live in the
-dedicated guides:
-**[docs/declarative-config.md](docs/declarative-config.md)** (how to author
-one) and **[docs/bundle.md](docs/bundle.md)** (format reference + caveats),
-plus [`alle validate`](docs/cli-reference.md#alle-validate-file) to check a
-file before applying it.
-
-## Web UI
-
-`alle` serves a local dashboard from the background daemon — nothing extra to
-install. Open it with:
-
-```bash
-alle ui
-```
-
-This opens your browser to a **Dashboard**, a **Bundle** page, and a **Logs**
-page:
-
-- **Router entrypoint** — `http://127.0.0.1:<port>` at the top (click to copy).
-- **Channels table** — every channel with Location, Port, Latency, IP, and
-  Sent / Received / Down Speed / Up Speed columns. The measured columns stay
-  blank until you run a **Probe** (latency + IP + traffic totals) or **Speed
-  Test** (adds download/upload) from the row or the column header, with a
-  spinner while it runs. **Speed Test All** streams — each channel's row fills
-  in the moment its own test completes, instead of all at once at the end. While
-  a channel is being tested (or a batch run is in flight) that row's Probe and
-  Speed Test buttons are disabled, so a test can't be fired twice at once.
-  Rename a channel inline, remove one, and add channels through a provider-guided wizard.
-- **Add channel wizard** — pick a provider (an icon-only row of providers plus
-  an always-present "+" to add NordVPN or Proton VPN). For token providers like
-  NordVPN, choose a **country and city from a searchable list** (no typing); for
-  Proton VPN, upload a WireGuard `.conf` (with a link to the portal). Each added
-  token provider carries a **gear** to replace its stored token (write-only — the
-  token is never shown back); replacing it re-resolves that provider's channels.
-- **Router rules** — add/delete rules, **drag to reorder** (first match wins),
-  and toggle **Allow Non-VPN Traffic** (the Unmatched row: on lets unmatched
-  destinations reach the Internet, off blocks them). A fixed **Priority 0 / LAN**
-  row at the top keeps local traffic direct ahead of every rule, with a toggle
-  to turn that protection off.
-- **Bundle** — download the whole setup as a bundle file (it contains
-  credentials — the UI warns first), and upload one to **merge** it in or
-  **replace** the whole setup (with a confirmation dialog).
-- Start / stop / restart are host/CLI controls (`alle start|stop|restart`); the
-  masthead links to the project on GitHub.
-
-The server binds to `127.0.0.1` only and is never exposed to the network. The
-browser URL uses a per-installation `alle-<random>.localhost` hostname (which
-browsers resolve to loopback on their own) so the session cookie is scoped to
-alle alone, never shared with other local web apps. To reach the UI from
-another machine, forward the **same** port over SSH rather than exposing it:
-
-```bash
-alle status                              # on the remote host: note the Web UI port
-ssh -L <port>:127.0.0.1:<port> user@host
-# then open the `alle ui` sign-in link locally — it resolves to your tunnel
-```
-
-SSH provides the encryption and access control; the browser still reaches alle
-on loopback. Do not open or reverse-proxy the alle Web UI port directly to a
-network.
-
-`alle ui` signs you in automatically. To sign in by hand, paste the `secret`
-from `~/.alle/control_api.json` into the login page. Sessions idle out after
-30 minutes without an open tab (capped at 12 hours); the masthead's **Sign
-out** button revokes every session immediately.
-
-## Docker
-
-The same core runs as a container for servers and compose stacks — two
-patterns:
-
-- **Proxy hub** — sibling containers on the same Docker network point their
-  egress at `alle:<router-port>` or a channel port, exactly the explicit-proxy
-  model above, one network layer out. Declare stable ports in the bundle
-  (`port: 20010`) so compose files can publish them.
-
-  ```yaml
-  services:
-    alle:
-      image: ziyudo/alle:latest
-      restart: unless-stopped
-      volumes: [alle-state:/var/lib/alle, ./bundle.yaml:/etc/alle/bundle.yaml:ro]
-      environment: {NORDVPN_TOKEN: "${NORDVPN_TOKEN}"}
-    app:
-      image: some/app
-      environment: {ALL_PROXY: socks5h://alle:20000}
-  ```
-
-- **VPN gateway container** — with `cap_add: [NET_ADMIN]`,
-  `devices: [/dev/net/tun]`, and `ALLE_RUN_AS_ROOT=1`, `alle tun on` captures
-  the *container's own* network namespace (the host's routes are never
-  touched). Other containers join via `network_mode: service:alle` and get
-  full-tunnel VPN with the same routing rules — and with the kill-switch on,
-  a dropped tunnel means they go dark instead of leaking.
-
-Everything container-specific is opt-in via environment the image sets
-(`ALLE_LISTEN`, `ALLE_PORT_BASE`, `ALLE_CONTAINER`, …) — a host install never
-changes behavior. The image design and trust-boundary notes live in
-**[docs/docker.md](docs/docker.md)**; a step-by-step compose walkthrough
-(bundle authoring, secrets, verification, day-2 operations, troubleshooting)
-in **[docs/docker-compose.md](docs/docker-compose.md)**.
-
-## How it works
-
-- `alle` keeps its local state under `~/.alle/`, or under `$ALLE_HOME` when that
-  environment variable is set. This includes providers, channels, credentials,
-  metrics, generated config, logs, and runtime files.
-
-- `alle` manages one [`sing-box`](https://github.com/SagerNet/sing-box) process
-  instead of starting one VPN process per channel. The generated config contains
-  one local HTTP+SOCKS inbound per channel, plus the router entrypoint inbound
-  whose sing-box route rules are compiled from `alle routes`.
-
-- Each channel routes to one WireGuard peer. NordVPN channels are created from
-  the provider API; Proton VPN channels are created by importing a WireGuard
-  `.conf` file. After creation, both behave the same way.
-
-- WireGuard is connectionless, so `alle` does not model channels as connected or
-  disconnected. A channel exists in config; its health comes from the latest
-  probe.
-
-- Local proxy ports are assigned by the OS and stored in state. Use
-  `alle channels ls` to see the current ports. When something outside alle
-  must know a port ahead of time (a firewall rule, a compose file), declare
-  it instead — `alle channels add … --port 20010`, or `port:` in a bundle;
-  declared ports are honored as written and clash loudly rather than being
-  silently moved.
-
-- The background runtime applies state changes, keeps the `sing-box` process in
-  sync, probes channel health, and records per-channel traffic totals.
-
-- `alle` uses a pinned upstream `sing-box` release and verifies its checksum
-  before running it.
+- **[How it works](docs/how-it-works.md)** — the runtime model: one sing-box,
+  state, ports, probes.
+- **[Security model](docs/security.md)** — trust boundaries, credential
+  handling, Web UI/API hardening, fail-closed routing.
+- **[VPN provider research](docs/vpn-provider-research.md)** — which providers
+  can be supported next, and why some can't.
 
 ## Security and privacy
 
-- Provider credentials and WireGuard private keys are stored locally under
-  `~/.alle/` or `$ALLE_HOME`.
-- The state directory is kept owner-only (`0700`), and credential/state/config
-  files inside it are written with private permissions from the first byte.
-- `alle` never reads provider tokens from environment variables implicitly;
-  credentials are added explicitly with `alle providers add`, or — for
-  version-controlled setups and containers — by a bundle that *names* its
-  source explicitly (`token_env: NORDVPN_TOKEN` / `token_file:
-  /run/secrets/…`).
-- `alle` downloads a pinned upstream `sing-box` release and verifies its checksum
-  before running it.
-- Local proxy ports bind to loopback. Traffic only uses a VPN exit when an app is
-  pointed at one of those proxies. (The one exception is the Docker image,
-  which explicitly opts into binding the container's network — there the
-  container boundary is the trust boundary; see
-  [docs/docker.md](docs/docker.md). Host installs are never affected.)
-- The loopback proxies are unauthenticated: on a multi-user machine, any local
-  user or process can send traffic through your channels (and your provider
-  account). alle assumes a single-user machine; don't run it where that
-  assumption fails. The internal stats API *is* authenticated with a generated
-  per-installation secret, so connection metadata is not exposed locally.
-- The full threat model — trust boundaries, Web UI session design, fail-closed
-  routing — lives in [docs/security.md](docs/security.md).
+- Credentials and WireGuard keys stay local (`~/.alle`, owner-only
+  permissions); tokens are never read from the environment implicitly.
+- Proxy ports bind to loopback on hosts; the Docker image opts into the
+  container network as its trust boundary.
+- The loopback proxies are unauthenticated (alle assumes a single-user
+  machine); the control API — Web UI and REST — is always authenticated.
+- `sing-box` is a pinned upstream release, checksum-verified before every run.
+
+The full threat model lives in **[docs/security.md](docs/security.md)**.
 
 ## Roadmap and non-goals
 

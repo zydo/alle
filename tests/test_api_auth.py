@@ -4,7 +4,7 @@ bearer + secret checks — all keyed off the one control_api secret."""
 from __future__ import annotations
 
 from alle import paths
-from alle.webui import auth
+from alle.api import auth
 
 SECRET = "s3cr3t-abc"
 

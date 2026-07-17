@@ -26,6 +26,21 @@ Two ways to use it:
    containers go dark instead of leaking — and the host's routes are never
    touched.
 
+## Quickstart (plain `docker run`)
+
+```bash
+docker pull ziyudo/alle:latest
+docker run -d --name alle --restart unless-stopped \
+  -v alle-state:/var/lib/alle \
+  -v ./bundle.yaml:/etc/alle/bundle.yaml:ro \
+  ziyudo/alle:latest
+docker exec alle alle status        # manage with the same CLI, via exec
+```
+
+The container is configured declaratively: the mounted
+[setup bundle](declarative-config.md) is applied on every start (tokens can
+stay out of the file via `token_env`/`token_file` — see below).
+
 ## Image design
 
 - **PID 1 is `alle run`** — the daemon loop in the foreground, logging to
@@ -47,8 +62,10 @@ Two ways to use it:
   channel and router proxy ports reachable from the container's network —
   and *only* from it, unless you `-p`-publish a port. Publishing a proxy port
   publishes an unauthenticated proxy: only ever do it onto networks you
-  trust. The Web UI stays loopback-only inside the container; manage with
-  `docker exec <name> alle …`. (`docker exec` enters as root while the daemon
+  trust. The control API/Web UI stays loopback-only inside the container by
+  default; manage with `docker exec <name> alle …`, or opt into the
+  Bearer-authenticated REST API for siblings with `ALLE_API_LISTEN` +
+  `ALLE_API_SECRET` (see below). (`docker exec` enters as root while the daemon
   runs as the `alle` user — that's safe: a root-run CLI preserves the state
   files' unprivileged owner on every write, so an exec'd mutation can never
   lock the daemon out of its own state dir.)
@@ -139,6 +156,27 @@ docker exec alle alle status
 docker exec alle alle test
 docker exec alle alle logs -f
 ```
+
+### Programmatic control: the REST API
+
+When a *sibling service* (not you at a terminal) needs to manage alle —
+rotate channels, flip the kill switch, read metrics — expose the REST API to
+the compose network instead of scripting `docker exec`:
+
+```yaml
+  alle:
+    environment:
+      ALLE_API_LISTEN: "0.0.0.0:8080"      # explicit opt-in; default stays loopback
+      ALLE_API_SECRET: ${ALLE_API_SECRET}  # required — there is no unauthenticated mode
+```
+
+Siblings call `http://alle:8080/api/v1/…` with
+`Authorization: Bearer $ALLE_API_SECRET`; `/health` gates readiness without
+the secret. Full contract in [api.md](api.md), a worked sibling-container
+example in [docker-compose.md](docker-compose.md), and the trust analysis in
+[security.md](security.md) — in short: the API can export your VPN
+credentials, so the secret is mandatory, the port stays unpublished, and the
+state volume is never shared as a way to read it.
 
 ## Gateway container (tun mode)
 

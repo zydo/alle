@@ -1625,9 +1625,9 @@ def status_snapshot() -> dict:
 
 def web_ui_url() -> str:
     """The plain, token-free Web UI URL (the daemon serves it when running)."""
-    from alle.webui import server as webui_server
+    from alle.api import server as api_server
 
-    return webui_server.ui_url()
+    return api_server.ui_url()
 
 
 def ensure_web_ui(timeout: float = 6.0) -> bool:
@@ -1637,17 +1637,17 @@ def ensure_web_ui(timeout: float = 6.0) -> bool:
     connections (it starts asynchronously) so the browser never opens on a dead
     port.
     """
-    from alle.webui import server as webui_server
+    from alle.api import server as api_server
 
     daemon.ensure_running()
-    return webui_server.wait_until_serving(timeout)
+    return api_server.wait_until_serving(timeout)
 
 
 def web_ui_login_url() -> str:
     """A one-time login URL for opening the Web UI (used by ``alle ui``)."""
-    from alle.webui import server as webui_server
+    from alle.api import server as api_server
 
-    return webui_server.mint_login_url()
+    return api_server.mint_login_url()
 
 
 def _daemon_info() -> dict:
@@ -1970,6 +1970,37 @@ def health() -> dict:
         "channels": len(Store.load().channels()),
         "runtime": (info or {}).get("runtime"),
     }
+
+
+def metrics_totals(channel: str | None = None) -> dict:
+    """Cumulative per-channel traffic totals — a cheap read; probes nothing.
+
+    ``channel`` accepts the same ref grammar as ``test`` (bare id, qualified
+    ``provider/channel``, glob). Counters persist across restarts (see
+    ``alle.metrics``); channels with no recorded traffic report zeros.
+    """
+    store = Store.load()
+    channels = store.channels()
+    if channel is not None:
+        wanted = _resolve_channel_filter(store, channel)
+        channels = [c for c in channels if (c.provider, c.id) in wanted]
+    traffic = metrics.totals()
+    rows = []
+    for ch in channels:
+        t = traffic.get((ch.provider, ch.id), {})
+        rows.append(
+            {
+                "provider": ch.provider,
+                "display_provider": display_name(ch.provider),
+                "name": ch.id,
+                "label": ch.label,
+                "enabled": ch.enabled,
+                "sent": int(t.get("sent", 0)),
+                "received": int(t.get("received", 0)),
+                "updated_at": int(t.get("updated_at", 0)),
+            }
+        )
+    return {"channels": rows, "channel_count": len(rows), "filter": channel}
 
 
 def logs_tail(lines: int = 200) -> str:

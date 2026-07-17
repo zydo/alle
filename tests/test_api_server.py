@@ -13,7 +13,7 @@ import pytest
 
 from alle import service
 from alle.state import Store
-from alle.webui import auth, server
+from alle.api import auth, server
 from conftest import wg_config
 
 WG = wg_config("1.2.3.4")
@@ -862,14 +862,26 @@ def test_locations_endpoint_requires_a_provider(live):
 # ---- /api/v1 metrics, test, logs (Phase 4.4) ----
 
 
-def test_metrics_endpoint_is_gone_and_test_rows_carry_traffic(live):
-    # /api/v1/metrics was retired: test rows carry sent/received directly,
-    # so the UI (and any API client) reads traffic off the one channel table.
+def test_metrics_endpoint_reads_totals_and_test_rows_carry_traffic(live):
+    # GET /metrics is the cheap programmatic read (no probing — POST /test
+    # actively probes every channel); test rows still carry sent/received so
+    # the UI reads traffic off the one channel table.
     base, secret = live
     Store.load().add_channel("nordvpn", "US", "", dict(WG))
 
-    st, _, _ = _req(base + "/api/v1/metrics", headers=_bearer(secret))
-    assert st == 404
+    st, body, _ = _req(base + "/api/v1/metrics", headers=_bearer(secret))
+    assert st == 200
+    data = json.loads(body)
+    assert data["channel_count"] == 1 and data["filter"] is None
+    mrow = data["channels"][0]
+    assert mrow["name"] == "us_1" and mrow["provider"] == "nordvpn"
+    assert mrow["sent"] == 0 and mrow["received"] == 0 and mrow["enabled"]
+
+    # the ?channel= filter uses the test/CLI ref grammar; an unknown ref is a 400
+    st, body, _ = _req(base + "/api/v1/metrics?channel=us_1", headers=_bearer(secret))
+    assert st == 200 and json.loads(body)["filter"] == "us_1"
+    st, _, _ = _req(base + "/api/v1/metrics?channel=nope", headers=_bearer(secret))
+    assert st == 400
 
     st, body, _ = _req(
         base + "/api/v1/test",
@@ -1349,7 +1361,7 @@ def test_every_response_carries_security_headers(live):
 def test_server_banner_does_not_leak_the_python_version(live):
     base, _ = live
     _, _, headers = _req(base + "/", headers={"Host": _canon()})
-    assert headers["Server"] == "alle-webui"
+    assert headers["Server"] == "alle-api"
     assert "Python" not in headers["Server"]
 
 
@@ -1401,3 +1413,100 @@ def test_logs_endpoint_returns_tail_and_clamps_lines(live, monkeypatch):
     assert st == 200
     assert json.loads(body)["text"] == "line one\nline two"
     assert seen == [1000]
+
+
+# ---- batch operations + dry_run (the CLI's full grammar over the API) --------
+
+
+def test_batch_channel_enabled_with_dry_run(live):
+    base, secret = live
+    Store.load().add_channel("nordvpn", "US", "", dict(WG))
+
+    # dry_run plans without touching state
+    st, body, _ = _req(
+        base + "/api/v1/channels/enabled",
+        method="POST",
+        headers=_bearer(secret),
+        data={"refs": ["us_1"], "enabled": False, "dry_run": True},
+    )
+    assert st == 200
+    out = json.loads(body)
+    assert out["dry_run"] is True and out["channels"][0]["changed"] is True
+    assert Store.load().get_channel("nordvpn", "us_1").enabled is True
+
+    # the real toggle, scoped by provider + glob (the CLI grammar)
+    st, body, _ = _req(
+        base + "/api/v1/channels/enabled",
+        method="POST",
+        headers=_bearer(secret),
+        data={"refs": ["us_*"], "enabled": False, "provider": "nordvpn"},
+    )
+    assert st == 200
+    assert json.loads(body)["changed"] == ["nordvpn/us_1"]
+    assert Store.load().get_channel("nordvpn", "us_1").enabled is False
+
+
+def test_batch_channel_enabled_all_requires_provider(live):
+    base, secret = live
+    st, body, _ = _req(
+        base + "/api/v1/channels/enabled",
+        method="POST",
+        headers=_bearer(secret),
+        data={"enabled": False, "all": True},
+    )
+    assert st == 400 and b"provider" in body
+
+
+def test_batch_channel_remove_and_delete_dry_run_param(live):
+    base, secret = live
+    Store.load().add_channel("nordvpn", "US", "", dict(WG))
+
+    # ?dry_run=1 on the single-channel DELETE: plans, does not remove
+    st, body, _ = _req(
+        base + "/api/v1/channels/nordvpn/us_1?dry_run=1",
+        method="DELETE",
+        headers=_bearer(secret),
+    )
+    assert st == 200 and json.loads(body)["dry_run"] is True
+    assert Store.load().get_channel("nordvpn", "us_1") is not None
+
+    # a garbage dry_run value must 400, never coerce to "actually remove"
+    st, _, _ = _req(
+        base + "/api/v1/channels/nordvpn/us_1?dry_run=yes",
+        method="DELETE",
+        headers=_bearer(secret),
+    )
+    assert st == 400
+    assert Store.load().get_channel("nordvpn", "us_1") is not None
+
+    # the batch remove endpoint does the real removal
+    st, body, _ = _req(
+        base + "/api/v1/channels/remove",
+        method="POST",
+        headers=_bearer(secret),
+        data={"refs": ["us_1"]},
+    )
+    assert st == 200 and json.loads(body)["dry_run"] is False
+    assert Store.load().get_channel("nordvpn", "us_1") is None
+
+
+def test_batch_provider_remove_dry_run(live):
+    base, secret = live
+    st, body, _ = _req(
+        base + "/api/v1/providers/remove",
+        method="POST",
+        headers=_bearer(secret),
+        data={"names": ["nordvpn"], "dry_run": True},
+    )
+    assert st == 200 and json.loads(body)["dry_run"] is True
+    st, _, _ = _req(base + "/api/v1/providers", headers=_bearer(secret))
+    assert st == 200  # provider still there
+
+    # names is required
+    st, _, _ = _req(
+        base + "/api/v1/providers/remove",
+        method="POST",
+        headers=_bearer(secret),
+        data={},
+    )
+    assert st == 400

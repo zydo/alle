@@ -28,7 +28,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-from alle.webui import auth, server
+from alle.api import auth, server
 
 
 class CompanionError(RuntimeError):
@@ -74,7 +74,10 @@ class CompanionClient:
 
         Reads ``control_api.json`` fresh each time, **read-only**: a client
         never mints the daemon's secret. A missing/invalid file means the
-        daemon has never generated its endpoint (never started)."""
+        daemon has never generated its endpoint (never started). The same env
+        overrides the daemon honors (``ALLE_API_LISTEN``,
+        ``ALLE_API_SECRET[_FILE]``) are applied on top, so a companion in the
+        same environment reaches the same server with the same credential."""
         try:
             cfg = server._valid_control_api(
                 json.loads(server._config_path().read_text())
@@ -86,7 +89,14 @@ class CompanionClient:
                 "alle daemon is not configured yet (no control endpoint). "
                 "Start it: alle start"
             )
-        return cfg
+        try:
+            return {
+                "address": server._listen_config(cfg)["client"],
+                "secret": server._api_secret(cfg),
+                "host": cfg["host"],
+            }
+        except server.ApiConfigError as e:
+            raise DaemonUnavailable(f"API configuration error: {e}") from e
 
     def health_ok(self) -> bool:
         """True only if *our* daemon is behind the contract port (HMAC proof).
