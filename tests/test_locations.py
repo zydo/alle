@@ -94,3 +94,31 @@ def test_load_reads_cached_countries(tmp_path):
     p.write_text(json.dumps({"countries": {"US": ["Seattle"]}}))
 
     assert locations.load(tmp_path, "demo") == {"US": ["Seattle"]}
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        [],
+        {"_meta": [], "countries": {}},
+        {
+            "_meta": {
+                "provider": "demo",
+                "source": locations.SOURCE,
+                "updated_epoch": "recent",
+            },
+            "countries": {},
+        },
+        {"countries": []},
+        {"countries": {"US": "Seattle"}},
+        {"countries": {"US": [3]}},
+    ],
+)
+def test_wrong_location_cache_shapes_refresh_without_raw_type_errors(tmp_path, data):
+    p = locations.path_for(tmp_path, "demo")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data))
+
+    assert locations.needs_refresh(tmp_path, "demo") is True
+    with pytest.raises(locations.LocationCacheError):
+        locations.load(tmp_path, "demo")

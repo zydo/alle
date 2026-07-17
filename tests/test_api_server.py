@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from threading import Thread
 
@@ -1340,6 +1341,46 @@ def test_control_api_rejects_a_shape_wrong_file():
     assert isinstance(api["host"], str)
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("address", "0.0.0.0:8080"),
+        ("address", "127.0.0.1:0"),
+        ("address", "127.0.0.1:08080"),
+        ("secret", "x" * 64),
+        ("secret", "a" * 16),
+        ("host", "localhost"),
+        ("host", "alle-bad host.localhost"),
+        ("host", "alle-123.localhost"),
+    ],
+)
+def test_control_api_regenerates_semantically_unsafe_fields(field, value):
+    from alle import paths
+
+    original = {
+        "address": "127.0.0.1:8080",
+        "secret": "a" * 64,
+        "host": "alle-deadbeef.localhost",
+    }
+    original[field] = value
+    (paths.state_dir() / "control_api.json").write_text(json.dumps(original))
+
+    api = server.control_api()
+
+    assert api != original
+    assert server._valid_control_api(api) == api
+
+
+def test_login_url_is_minted_only_for_the_live_verified_endpoint(live):
+    _base, secret = live
+    url = server.mint_login_url()
+    parsed = urllib.parse.urlparse(url)
+    token = urllib.parse.parse_qs(parsed.query)["token"][0]
+
+    assert parsed.hostname.startswith("alle-")
+    assert auth.verify_login_token(secret, token) is True
+
+
 def test_every_response_carries_security_headers(live):
     base, secret = live
     # an API response, an error, and a static asset all carry the same set
@@ -1353,6 +1394,8 @@ def test_every_response_carries_security_headers(live):
         assert headers["Permissions-Policy"]
         assert headers["X-Content-Type-Options"] == "nosniff"
         assert headers["Referrer-Policy"] == "no-referrer"
+        if path.startswith("/api/"):
+            assert headers["Cache-Control"] == "no-store"
     # and HEAD too
     st, _, headers = _req(base + "/health", method="HEAD", headers={"Host": _canon()})
     assert "Content-Security-Policy" in headers

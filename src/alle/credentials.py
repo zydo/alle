@@ -14,7 +14,7 @@ from contextlib import contextmanager
 import yaml
 
 from alle import fsio, paths
-from alle.state import StoreReadError, _quarantine
+from alle.state import StoreReadError, _quarantine, _read_store_text
 
 
 def _path():
@@ -25,27 +25,50 @@ def _lock_path():
     return paths.state_dir() / "credentials.lock"
 
 
-def _load_all() -> dict[str, dict]:
+def _parse(text: str) -> dict[str, dict]:
+    data = yaml.safe_load(text)
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise yaml.YAMLError("root is not a mapping")
+    providers = data.get("providers", {})
+    if not isinstance(providers, dict):
+        raise yaml.YAMLError("providers is not a mapping")
+    for provider, entry in providers.items():
+        if not isinstance(provider, str):
+            raise yaml.YAMLError("provider key is not a string")
+        if not isinstance(entry, dict):
+            raise yaml.YAMLError(f"provider {provider!r} credentials is not a mapping")
+    return providers
+
+
+def _load_all(*, lock_held: bool = False) -> dict[str, dict]:
     p = _path()
-    try:
-        text = p.read_text()
-    except FileNotFoundError:
-        return {}  # genuinely absent — no provider configured yet
-    except OSError as e:
-        # Unreadable is not empty: a save from a blank view would wipe every
-        # provider's credential. Abort the caller instead (see StoreReadError).
-        raise StoreReadError(f"cannot read {p.name}: {e}") from e
-    try:
-        data = yaml.safe_load(text) or {}
-        if not isinstance(data, dict):
-            raise yaml.YAMLError("root is not a mapping")
-    except yaml.YAMLError as e:
-        # Preserve the bytes and fail loudly: a save after a silent empty read
-        # would otherwise wipe every provider's credential (see state._quarantine).
-        _quarantine(p, e)
-        return {}
-    providers = data.get("providers") or {}
-    return providers if isinstance(providers, dict) else {}
+    while True:
+        try:
+            text, identity = _read_store_text(p)
+        except FileNotFoundError:
+            return {}  # genuinely absent — no provider configured yet
+        except OSError as e:
+            # Unreadable is not empty: a save from a blank view would wipe every
+            # provider's credential. Abort the caller instead (see StoreReadError).
+            raise StoreReadError(f"cannot read {p.name}: {e}") from e
+        try:
+            return _parse(text)
+        except yaml.YAMLError as e:
+            moved = _quarantine(
+                p,
+                e,
+                failed_text=text,
+                failed_identity=identity,
+                lock_path=_lock_path(),
+                validate=_parse,
+                lock_held=lock_held,
+            )
+            if moved:
+                return {}
+            # Another writer replaced the failed generation while quarantine
+            # waited for the lock; validate that newer snapshot instead.
 
 
 def _save_all(providers: dict[str, dict]) -> None:
@@ -74,7 +97,7 @@ def transaction():
     as :func:`alle.state.transaction`, on its own lock file.
     """
     with fsio.locked(_lock_path()):
-        data = _load_all()
+        data = _load_all(lock_held=True)
         yield data
         _save_all(data)
 

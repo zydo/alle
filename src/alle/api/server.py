@@ -43,6 +43,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import re
 import secrets
 import socket
 import threading
@@ -209,22 +210,33 @@ def _mint_host() -> str:
 
 
 def _valid_control_api(cfg) -> dict | None:
-    """The validated endpoint dict, or None if ``cfg`` is missing/malformed."""
+    """The exact generated endpoint contract, or ``None`` when unsafe/broken."""
     if not isinstance(cfg, dict):
         return None
     address = cfg.get("address")
     secret = cfg.get("secret")
     host = cfg.get("host")
-    if (
-        isinstance(address, str)
-        and address
-        and isinstance(secret, str)
-        and secret
-        and isinstance(host, str)
-        and host
-    ):
-        return {"address": address, "secret": secret, "host": host}
-    return None
+    if not all(isinstance(v, str) for v in (address, secret, host)):
+        return None
+    bind_host, sep, port_text = address.rpartition(":")
+    if bind_host != "127.0.0.1" or sep != ":" or not port_text.isdigit():
+        return None
+    port = int(port_text)
+    if not 0 < port <= 65535 or str(port) != port_text:
+        return None
+    if re.fullmatch(r"[0-9a-f]{64}", secret) is None:
+        return None
+    if re.fullmatch(r"alle-[0-9a-f]{8}\.localhost", host) is None:
+        return None
+    return {"address": address, "secret": secret, "host": host}
+
+
+def _read_control_api() -> dict | None:
+    """Read the daemon-owned endpoint without generating or replacing it."""
+    try:
+        return _valid_control_api(json.loads(_config_path().read_text()))
+    except (OSError, ValueError):
+        return None
 
 
 def control_api() -> dict:
@@ -406,11 +418,21 @@ def _health_ok(api: dict) -> bool:
     try:
         req = urllib.request.Request(f"http://{api['address']}/health?nonce={nonce}")  # noqa: S5332
         with urllib.request.urlopen(req, timeout=1) as r:  # noqa: S310 (loopback)
-            data = json.loads(r.read(4096))
+            raw = r.read(4097)
+            if len(raw) > 4096:
+                return False
+            data = json.loads(raw)
     except (OSError, ValueError):
         return False
-    proof = str((data or {}).get("proof") or "")
+    if not isinstance(data, dict) or not isinstance(data.get("proof"), str):
+        return False
+    proof = data["proof"]
     return hmac.compare_digest(proof, auth.health_proof(api["secret"], nonce))
+
+
+def _login_url_for(api: dict) -> str:
+    token = auth.mint_login_token(api["secret"])
+    return f"http://{_canonical_host(api)}/?token={token}"  # noqa:S5332
 
 
 def mint_login_url() -> str:
@@ -418,9 +440,22 @@ def mint_login_url() -> str:
 
     Uses the canonical per-install hostname so the resulting session cookie is
     scoped to a host no other local service can ever be."""
-    api = control_api()
-    token = auth.mint_login_token(_api_secret(api))
-    return f"http://{_canonical_host(api)}/?token={token}"  # noqa:S5332
+    cfg = _read_control_api()
+    if cfg is None:
+        raise ApiConfigError("the daemon control endpoint is not configured")
+    try:
+        api = {
+            "address": _listen_config(cfg)["client"],
+            "secret": _api_secret(cfg),
+            "host": cfg["host"],
+        }
+    except ApiConfigError:
+        raise
+    if not _health_ok(api):
+        raise ApiConfigError(
+            f"no alle daemon owns the control endpoint at {api['address']}"
+        )
+    return _login_url_for(api)
 
 
 # ---- session revocation (logout) --------------------------------------------
@@ -729,7 +764,8 @@ class _Handler(BaseHTTPRequestHandler):
         body = json.dumps(
             obj, default=lambda o: getattr(o, "__dict__", None) or str(o)
         ).encode()
-        self._send(code, body, "application/json", extra)
+        headers = {"Cache-Control": "no-store", **(extra or {})}
+        self._send(code, body, "application/json", headers)
 
     def _cookie_header_value(self, cookie: str) -> str:
         return (

@@ -7,7 +7,8 @@ import json
 
 import pytest
 
-from alle import credentials, paths, txn
+from alle import credentials, paths, state, txn
+from alle.state import Store
 
 
 def _journal():
@@ -64,6 +65,52 @@ def test_recover_rolls_back_a_crashed_transaction():
     assert credentials.get("nordvpn") == {"token": "old"}
     assert not _journal().exists()
     assert txn.recover() is False  # nothing left to heal
+
+
+def test_recover_keeps_credentials_when_state_has_the_journal_commit_id():
+    credentials.set_("nordvpn", {"token": "new"})
+    transaction_id = "committed-setup"
+    with state.transaction() as data:
+        data[state.SETUP_COMMIT_KEY] = transaction_id
+        data["providers"]["nordvpn"] = {"channels": {}}
+    _journal().write_text(
+        json.dumps(
+            {
+                "id": transaction_id,
+                "op": "crashed after state commit",
+                "credentials": {"nordvpn": {"token": "old"}},
+            }
+        )
+    )
+
+    assert txn.recover() is False  # cleanup only; no rollback was performed
+    assert credentials.get("nordvpn") == {"token": "new"}
+    assert Store.load().has_provider("nordvpn")
+    assert not _journal().exists()
+
+
+def test_exception_after_state_commit_keeps_post_operation_credentials():
+    credentials.set_("nordvpn", {"token": "old"})
+
+    with pytest.raises(RuntimeError, match="crashed before journal cleanup"):
+        with txn.setup_transaction("provider add"):
+            credentials.set_("nordvpn", {"token": "new"})
+            Store.load().add_provider("nordvpn")  # atomically stamps setup id
+            raise RuntimeError("crashed before journal cleanup")
+
+    assert credentials.get("nordvpn") == {"token": "new"}
+    assert Store.load().has_provider("nordvpn")
+    assert not _journal().exists()
+
+
+def test_clean_exit_without_state_commit_restores_staged_credentials():
+    credentials.set_("nordvpn", {"token": "old"})
+
+    with txn.setup_transaction("forgot commit"):
+        credentials.set_("nordvpn", {"token": "staged"})
+
+    assert credentials.get("nordvpn") == {"token": "old"}
+    assert not _journal().exists()
 
 
 def test_next_transaction_heals_a_crashed_predecessor():

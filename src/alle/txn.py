@@ -17,12 +17,11 @@ them in two steps. This module makes those compounds all-or-nothing:
   exactly as it was. After commit, the journal is gone and later steps
   (metrics cleanup, daemon pokes) are best-effort post-commit work.
 
-The residual window is a crash *between* the state commit and the journal
-removal: recovery then restores the pre-op credentials against the already-
-committed state. For every compound op the state side is authoritative
-(tokens re-validate on the next provider op; removed providers just leave no
-credential to restore into use), so the mismatch is at worst a stale-or-
-orphaned credential — never a half-applied setup.
+Each journal has a random transaction id. While the setup context is active,
+the state transaction writes that id as ``_setup_commit`` in the same atomic
+replacement as the real state mutation. Recovery therefore knows whether to
+restore the pre-operation credentials or merely remove a journal whose cleanup
+was interrupted after state committed.
 
 The journal holds credentials, so it is written 0600 and lives beside
 ``credentials.yaml`` under the 0700 state dir.
@@ -31,11 +30,22 @@ The journal holds credentials, so it is written 0600 and lives beside
 from __future__ import annotations
 
 import json
+import secrets
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from alle import applog, credentials, fsio, paths
+
+_ACTIVE_SETUP_ID: ContextVar[str | None] = ContextVar(
+    "alle_active_setup_id", default=None
+)
+
+
+def active_setup_id() -> str | None:
+    """Transaction id stamped by state writes in the active setup context."""
+    return _ACTIVE_SETUP_ID.get()
 
 
 def _lock_path() -> Path:
@@ -51,10 +61,19 @@ class SetupTxn:
     rollback — call it immediately after the state transaction that makes the
     operation real."""
 
-    def __init__(self) -> None:
+    def __init__(self, transaction_id: str) -> None:
+        self.id = transaction_id
         self.committed = False
 
     def commit(self) -> None:
+        if not _state_committed(self.id):
+            # A credential-only compound still needs a durable commit point.
+            # Real provider/bundle operations already stamped their state write,
+            # so this fallback does not add a second write to those paths.
+            from alle import state
+
+            with state.transaction() as data:
+                data[state.SETUP_COMMIT_KEY] = self.id
         self.committed = True
         _clear_journal()
 
@@ -70,6 +89,16 @@ def _restore_credentials(snapshot: dict) -> None:
     with credentials.transaction() as data:
         data.clear()
         data.update(snapshot)
+
+
+def _state_committed(transaction_id: str) -> bool:
+    from alle import state
+
+    try:
+        data = state._read_raw()
+    except state.StoreReadError:
+        raise
+    return data.get(state.SETUP_COMMIT_KEY) == transaction_id
 
 
 def _recover_locked() -> bool:
@@ -88,6 +117,9 @@ def _recover_locked() -> bool:
         snapshot = entry["credentials"]
         if not isinstance(snapshot, dict):
             raise ValueError("credentials is not an object")
+        transaction_id = entry.get("id")
+        if transaction_id is not None and not isinstance(transaction_id, str):
+            raise ValueError("id is not a string")
     except (ValueError, KeyError, TypeError) as e:
         # No usable pre-op copy — move the journal aside (never lose bytes
         # that might still help manual recovery) and stop blocking setup ops.
@@ -99,6 +131,14 @@ def _recover_locked() -> bool:
         applog.log(f"setup journal corrupt ({e}); moved to {backup.name}")
         return False
     op = str(entry.get("op", "unknown"))
+    transaction_id = entry.get("id")
+    if transaction_id and _state_committed(transaction_id):
+        _clear_journal()
+        applog.log(
+            f"completed cleanup of committed setup change ({op}); "
+            "credentials and state were already published"
+        )
+        return False
     _restore_credentials(snapshot)
     _clear_journal()
     applog.log(
@@ -136,19 +176,33 @@ def setup_transaction(op: str):
     with fsio.locked(_lock_path()):
         _recover_locked()  # a crashed predecessor must not leak into this op
         snapshot = credentials.snapshot()
+        transaction_id = secrets.token_hex(16)
         fsio.write_durably(
             _journal_path(),
-            lambda f: json.dump({"op": op, "credentials": snapshot}, f),
+            lambda f: json.dump(
+                {"id": transaction_id, "op": op, "credentials": snapshot}, f
+            ),
             prefix=".setup-journal-",
             suffix=".json",
             mode=0o600,  # carries credentials
         )
-        txn = SetupTxn()
+        txn = SetupTxn(transaction_id)
+        active_token = _ACTIVE_SETUP_ID.set(transaction_id)
         try:
             yield txn
         except BaseException:
-            if not txn.committed:
+            committed = txn.committed or _state_committed(transaction_id)
+            if not committed:
                 _restore_credentials(snapshot)
             _clear_journal()
             raise
-        _clear_journal()  # clean exit without commit() == nothing to roll back
+        finally:
+            _ACTIVE_SETUP_ID.reset(active_token)
+        if txn.committed or _state_committed(transaction_id):
+            _clear_journal()
+        else:
+            # A caller that exits without a state commit made no authoritative
+            # setup change; restore any staged credentials rather than leaking
+            # them while silently deleting their rollback journal.
+            _restore_credentials(snapshot)
+            _clear_journal()

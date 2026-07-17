@@ -145,24 +145,30 @@ def channels_list(data: dict) -> str:
 
 
 def locations(data: dict) -> str:
+    def with_warning(text: str) -> str:
+        warning = data.get("warning")
+        return f"Warning: {warning}\n{text}" if warning else text
+
     if not data.get("available"):
-        return "\n".join(
-            [
-                f"{data['display_name']}: locations are not listed here.",
-                f"  {data['help']}",
-            ]
+        return with_warning(
+            "\n".join(
+                [
+                    f"{data['display_name']}: locations are not listed here.",
+                    f"  {data['help']}",
+                ]
+            )
         )
 
     provider = data["provider"]
     if "country" in data:
         if not data.get("matched", True):
-            return (
+            return with_warning(
                 f"{data['country']!r} is not a {data['display_name']} country. "
                 f"See the full list: alle locations {provider}"
             )
         lines = [f"{provider} cities in {data['country']} ({len(data['cities'])}):"]
         lines.extend(f"  {city}" for city in data["cities"])
-        return "\n".join(lines)
+        return with_warning("\n".join(lines))
 
     lines = [
         f"{provider}: {data['country_count']} countries, {data['city_count']} cities"
@@ -171,7 +177,7 @@ def locations(data: dict) -> str:
         cities = item["cities"]
         lines.append(f"  {item['country']}" + (f"  ({len(cities)})" if cities else ""))
         lines.extend(f"      {city}" for city in cities)
-    return "\n".join(lines)
+    return with_warning("\n".join(lines))
 
 
 def _router_where(router: dict) -> str:

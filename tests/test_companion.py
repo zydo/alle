@@ -40,6 +40,40 @@ def test_health_ok_false_when_no_endpoint(monkeypatch, tmp_path):
     assert client.health_ok() is False
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"[]",
+        b"null",
+        b'"proof"',
+        b'{"proof": 3}',
+        b'{"proof":"x"}' + b" " * 4097,
+    ],
+)
+def test_health_challenge_rejects_hostile_json_shapes_and_oversize(
+    monkeypatch, payload
+):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self, size):
+            return payload[:size]
+
+    monkeypatch.setattr(companion.urllib.request, "urlopen", lambda *a, **k: Response())
+    api = {
+        "address": "127.0.0.1:1",
+        "secret": "a" * 64,
+        "host": "alle-deadbeef.localhost",
+    }
+
+    assert companion.CompanionClient._challenge_ok(api) is False
+    assert server._health_ok(api) is False
+
+
 def test_status_and_tray_state_projection(live):
     st = live.tray_state()
     assert st.running is False  # sing-box not started in the test
@@ -117,8 +151,8 @@ def test_unreachable_daemon_raises_daemon_unavailable(monkeypatch, tmp_path):
         json.dumps(
             {
                 "address": "127.0.0.1:1",  # nothing listens on port 1
-                "secret": "x" * 64,
-                "host": "alle-dead.localhost",
+                "secret": "a" * 64,
+                "host": "alle-deadbeef.localhost",
             }
         )
     )
@@ -155,8 +189,8 @@ def test_secret_never_sent_to_a_squatted_port(monkeypatch, tmp_path):
             json.dumps(
                 {
                     "address": f"127.0.0.1:{httpd.server_port}",
-                    "secret": "x" * 64,
-                    "host": "alle-squat.localhost",
+                    "secret": "a" * 64,
+                    "host": "alle-deadbeef.localhost",
                 }
             )
         )
@@ -165,10 +199,24 @@ def test_secret_never_sent_to_a_squatted_port(monkeypatch, tmp_path):
         assert client.health_ok() is False
         with pytest.raises(companion.DaemonUnavailable, match="health challenge"):
             client.status()
+        with pytest.raises(companion.DaemonUnavailable, match="health challenge"):
+            client.web_ui_login_url()
     finally:
         httpd.shutdown()
     assert any(path.startswith("/health") for path, _ in hits)  # challenge ran
     assert not any(had_auth for _, had_auth in hits)  # the secret never left
+
+
+def test_login_url_discovery_is_read_only_when_endpoint_is_missing(
+    monkeypatch, tmp_path
+):
+    cfg = tmp_path / "control_api.json"
+    monkeypatch.setattr(server, "_config_path", lambda: cfg)
+
+    with pytest.raises(companion.DaemonUnavailable, match="not configured"):
+        companion.CompanionClient().web_ui_login_url()
+
+    assert not cfg.exists()  # a companion never mints daemon-owned endpoint state
 
 
 def test_client_sends_bearer_and_host(live, monkeypatch):

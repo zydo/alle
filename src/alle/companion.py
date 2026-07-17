@@ -79,10 +79,8 @@ class CompanionClient:
         ``ALLE_API_SECRET[_FILE]``) are applied on top, so a companion in the
         same environment reaches the same server with the same credential."""
         try:
-            cfg = server._valid_control_api(
-                json.loads(server._config_path().read_text())
-            )
-        except (OSError, ValueError):
+            cfg = server._read_control_api()
+        except OSError:
             cfg = None
         if cfg is None:
             raise DaemonUnavailable(
@@ -121,10 +119,15 @@ class CompanionClient:
         )
         try:
             with urllib.request.urlopen(req, timeout=1) as r:  # noqa: S310
-                data = json.loads(r.read(4096))
+                raw = r.read(4097)
+                if len(raw) > 4096:
+                    return False
+                data = json.loads(raw)
         except (OSError, ValueError):
             return False
-        proof = str((data or {}).get("proof") or "")
+        if not isinstance(data, dict) or not isinstance(data.get("proof"), str):
+            return False
+        proof = data["proof"]
         return hmac.compare_digest(proof, auth.health_proof(api["secret"], nonce))
 
     # -- transport -----------------------------------------------------------
@@ -198,9 +201,13 @@ class CompanionClient:
         )
 
     def web_ui_login_url(self) -> str:
-        """A one-time login URL to open the Web UI from the tray. Minted
-        locally (same machine, same secret) — not an API round trip."""
-        return server.mint_login_url()
+        """A one-time login URL, minted only after daemon ownership proof."""
+        api = self._endpoint()
+        if not self._challenge_ok(api):
+            raise DaemonUnavailable(
+                f"no alle daemon is answering the health challenge at {api['address']}"
+            )
+        return server._login_url_for(api)
 
     # -- lifecycle + toggles (the whole tray scope; nothing richer) ----------
     def start(self) -> dict:

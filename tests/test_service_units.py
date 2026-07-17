@@ -184,6 +184,37 @@ def test_locations_list_refresh_country_and_full_list(monkeypatch):
     assert calls == [["nordvpn"], ["nordvpn"]]
 
 
+def test_locations_list_uses_valid_stale_cache_when_background_refresh_fails(
+    monkeypatch,
+):
+    monkeypatch.setattr(service.locations, "needs_refresh", lambda state, p: True)
+    monkeypatch.setattr(
+        service.locations,
+        "update",
+        lambda state, providers: (_ for _ in ()).throw(ProviderError("offline")),
+    )
+    monkeypatch.setattr(
+        service.locations, "load", lambda state, provider: {"Japan": ["Tokyo"]}
+    )
+
+    result = service.locations_list("nordvpn")
+
+    assert result["stale"] is True
+    assert "using stale cache" in result["warning"]
+    assert result["countries"] == [{"country": "Japan", "cities": ["Tokyo"]}]
+
+
+def test_locations_forced_refresh_reports_failure_and_preserves_cache(monkeypatch):
+    monkeypatch.setattr(
+        service.locations,
+        "update",
+        lambda state, providers: (_ for _ in ()).throw(ProviderError("offline")),
+    )
+
+    with pytest.raises(ProviderError, match="offline"):
+        service.locations_list("nordvpn", refresh=True)
+
+
 def test_status_snapshot_covers_probe_and_reconnect_states(monkeypatch):
     class Runner:
         def is_running(self):

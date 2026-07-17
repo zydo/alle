@@ -858,14 +858,28 @@ def locations_list(
         }
 
     state = paths.state_dir()
-    if refresh or locations.needs_refresh(state, provider):
-        locations.update(state, [provider])
-    locs = locations.load(state, provider)
+    stale_warning = None
+    needs_refresh = refresh or locations.needs_refresh(state, provider)
+    if needs_refresh:
+        try:
+            locations.update(state, [provider])
+        except (ProviderError, OSError, ValueError, KeyError, TypeError) as e:
+            if refresh:
+                raise  # forced refresh reports failure; the old file is untouched
+            try:
+                locs = locations.load(state, provider)
+            except (OSError, ValueError):
+                raise e  # malformed/missing cache cannot mask refresh failure
+            stale_warning = f"location refresh failed; using stale cache: {e}"
+        else:
+            locs = locations.load(state, provider)
+    else:
+        locs = locations.load(state, provider)
 
     if country:
         hit = next((c for c in locs if c.lower() == country.lower()), None)
         cities = locs.get(hit, []) if hit else []
-        return {
+        result = {
             "provider": provider,
             "display_name": display_name(provider),
             "available": True,
@@ -873,11 +887,14 @@ def locations_list(
             "matched": hit is not None,
             "cities": cities,
         }
+        if stale_warning:
+            result.update({"stale": True, "warning": stale_warning})
+        return result
 
     countries = [
         {"country": name, "cities": cities} for name, cities in sorted(locs.items())
     ]
-    return {
+    result = {
         "provider": provider,
         "display_name": display_name(provider),
         "available": True,
@@ -885,6 +902,9 @@ def locations_list(
         "country_count": len(locs),
         "city_count": sum(len(v) for v in locs.values()),
     }
+    if stale_warning:
+        result.update({"stale": True, "warning": stale_warning})
+    return result
 
 
 # ---- routing ----------------------------------------------------------------

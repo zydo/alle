@@ -3,6 +3,8 @@ bearer + secret checks — all keyed off the one control_api secret."""
 
 from __future__ import annotations
 
+import threading
+
 from alle import paths
 from alle.api import auth
 
@@ -69,6 +71,39 @@ def test_consumed_token_survives_a_daemon_restart():
     # remembers the token was spent — no replay within its TTL
     reopened = _store()
     assert reopened.verify_and_consume(SECRET, tok) is False
+
+
+def test_two_preinstantiated_stores_cannot_both_consume_one_token():
+    first = _store()
+    second = _store()
+    tok = auth.mint_login_token(SECRET)
+    barrier = threading.Barrier(2)
+    results = []
+
+    def consume(store):
+        barrier.wait()
+        results.append(store.verify_and_consume(SECRET, tok))
+
+    threads = [
+        threading.Thread(target=consume, args=(first,)),
+        threading.Thread(target=consume, args=(second,)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(results) == [False, True]
+
+
+def test_malformed_consumed_store_fails_closed_without_overwrite():
+    path = paths.state_dir() / "web_consumed.json"
+    path.write_text('["recoverable", "evidence"]')
+    tok = auth.mint_login_token(SECRET)
+
+    assert _store().verify_and_consume(SECRET, tok) is False
+    assert path.read_text() == '["recoverable", "evidence"]'
 
 
 def test_consumed_token_is_pruned_after_ttl():

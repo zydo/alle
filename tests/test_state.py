@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import json
 import stat
+import threading
 
 import pytest
 
-from alle import paths
+from alle import fsio, paths, state
 from alle.state import ReferencedError, Store, StoreReadError, config_signature
 from conftest import wg_config
 
@@ -45,6 +46,50 @@ def test_channel_round_trips_through_disk():
     assert got.port == ch.port
     assert got.wg["private_key"] == "PRIV="
     assert got.wg["peer"]["endpoint_host"] == "se1.example.com"
+
+
+@pytest.mark.parametrize("upsert", [False, True])
+def test_channel_write_returns_the_committed_object_if_removed_before_refresh(
+    monkeypatch, upsert
+):
+    store = Store.load()
+    store.add_provider("nordvpn")
+    entered = threading.Event()
+    removed = threading.Event()
+    pause = {"enabled": True}
+    original = state._read_raw
+
+    def paused_read(*, lock_held=False):
+        if not lock_held and pause["enabled"]:
+            entered.set()
+            assert removed.wait(2)
+        return original(lock_held=lock_held)
+
+    monkeypatch.setattr(state, "_read_raw", paused_read)
+    result = {}
+
+    def write():
+        if upsert:
+            result["value"] = store.upsert_channel(
+                "nordvpn", "fixed", "US", "", dict(WG)
+            )
+        else:
+            result["value"] = store.add_channel("nordvpn", "US", "", dict(WG))
+
+    writer = threading.Thread(target=write)
+    writer.start()
+    assert entered.wait(2)
+    cid = "fixed" if upsert else "us_1"
+    with state.transaction() as data:
+        del data["providers"]["nordvpn"]["channels"][cid]
+    pause["enabled"] = False
+    removed.set()
+    writer.join(2)
+
+    assert not writer.is_alive()
+    committed = result["value"][0] if upsert else result["value"]
+    assert committed.id == cid
+    assert Store.load().get_channel("nordvpn", cid) is None
 
 
 def test_auto_naming_numbers_within_provider():
@@ -235,6 +280,114 @@ def test_malformed_container_schema_is_quarantined():
     _state_file().write_text(json.dumps({"version": 1, "providers": ["nordvpn"]}))
     assert Store.load().provider_names() == []
     assert len(list(paths.state_dir().glob("state.json.corrupt-*"))) == 1
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"version": 1, "providers": None},
+        {"version": 1, "providers": {"nordvpn": {"channels": None}}},
+        {
+            "version": 1,
+            "providers": {"nordvpn": {"channels": {"us_1": {"wg": []}}}},
+        },
+        {"version": 1, "providers": {}, "router": None},
+        {"version": 1, "providers": {}, "router": {"rules": None}},
+    ],
+)
+def test_present_falsy_or_wrong_nested_state_shape_is_quarantined(bad):
+    _state_file().parent.mkdir(parents=True, exist_ok=True)
+    _state_file().write_text(json.dumps(bad))
+
+    assert Store.load().provider_names() == []
+    backups = list(paths.state_dir().glob("state.json.corrupt-*"))
+    assert len(backups) == 1
+    assert json.loads(backups[0].read_text()) == bad
+
+
+def test_stale_corrupt_reader_never_quarantines_a_new_valid_generation(monkeypatch):
+    _state_file().parent.mkdir(parents=True, exist_ok=True)
+    _state_file().write_text('{"providers":')
+    entered = threading.Event()
+    published = threading.Event()
+    original = state._quarantine
+
+    def pause(*args, **kwargs):
+        entered.set()
+        assert published.wait(2)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(state, "_quarantine", pause)
+    result = {}
+
+    def read():
+        result["store"] = Store.load()
+
+    reader = threading.Thread(target=read)
+    reader.start()
+    assert entered.wait(2)
+    with fsio.locked(state._lock_path()):
+        state._write_raw(
+            {
+                "version": 1,
+                "providers": {"nordvpn": {"channels": {}}},
+                "router": state._router_blank(),
+            }
+        )
+    published.set()
+    reader.join(2)
+
+    assert not reader.is_alive()
+    assert result["store"].provider_names() == ["nordvpn"]
+    assert list(paths.state_dir().glob("state.json.corrupt-*")) == []
+
+
+def test_quarantine_failure_aborts_without_exposing_a_blank_view(monkeypatch):
+    _state_file().parent.mkdir(parents=True, exist_ok=True)
+    bad = '{"providers":'
+    _state_file().write_text(bad)
+    monkeypatch.setattr(
+        state.os,
+        "link",
+        lambda *a, **k: (_ for _ in ()).throw(PermissionError("denied")),
+    )
+
+    with pytest.raises(StoreReadError, match="cannot preserve corrupt state.json"):
+        Store.load()
+    with pytest.raises(StoreReadError):
+        Store().add_provider("nordvpn")
+    assert _state_file().read_text() == bad
+    assert list(paths.state_dir().glob("state.json.corrupt-*")) == []
+
+
+def test_quarantine_fsync_failure_aborts_but_keeps_exact_evidence(monkeypatch):
+    _state_file().parent.mkdir(parents=True, exist_ok=True)
+    bad = '{"providers":'
+    _state_file().write_text(bad)
+    monkeypatch.setattr(
+        state,
+        "_fsync_dir_strict",
+        lambda path: (_ for _ in ()).throw(OSError("fsync failed")),
+    )
+
+    with pytest.raises(StoreReadError, match="cannot preserve corrupt state.json"):
+        Store.load()
+
+    assert not _state_file().exists()
+    backups = list(paths.state_dir().glob("state.json.corrupt-*"))
+    assert len(backups) == 1
+    assert backups[0].read_text() == bad
+
+
+def test_quarantine_names_never_overwrite_earlier_evidence():
+    _state_file().parent.mkdir(parents=True, exist_ok=True)
+    for bad in ('{"first":', '{"second":'):
+        _state_file().write_text(bad)
+        assert Store.load().provider_names() == []
+
+    backups = list(paths.state_dir().glob("state.json.corrupt-*"))
+    assert len(backups) == 2
+    assert {backup.read_text() for backup in backups} == {'{"first":', '{"second":'}
 
 
 def test_newer_state_version_aborts_instead_of_quarantining():

@@ -27,14 +27,16 @@ import re
 import socket
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from alle import applog, fsio, paths
 from alle.constants import INBOUND_PREFIX, OUTBOUND_PREFIX
 
 STATE_VERSION = 1
+SETUP_COMMIT_KEY = "_setup_commit"
 
 
 def _slug(text: str) -> str:
@@ -205,6 +207,22 @@ def tag_to_ref(tag: str) -> tuple[str, str] | None:
     if len(parts) == 3 and parts[0] in ("in", "out"):
         return parts[1], parts[2]
     return None
+
+
+def _channel_view(provider: str, cid: str, ch: dict) -> Channel:
+    """Build the public view from one raw record already captured by a caller."""
+    return Channel(
+        provider=provider,
+        id=cid,
+        port=int(ch.get("port", 0)),
+        country=ch.get("country", ""),
+        city=ch.get("city", ""),
+        label=ch.get("label", ""),
+        wg=ch.get("wg") or {},
+        probe=ch.get("probe", {}),
+        reconnect=ch.get("reconnect", {}),
+        enabled=bool(ch.get("enabled", True)),
+    )
 
 
 # ---- the store -------------------------------------------------------------
@@ -404,24 +422,6 @@ def _rules_referencing(data: dict, refs: set[tuple[str, str]]) -> dict[str, list
     return out
 
 
-def _quarantine(p: Path, err: Exception) -> None:
-    """Move an unparseable state/credentials file aside instead of losing it.
-
-    Every mutation is a read-modify-write, so silently treating a corrupt file
-    as empty would make the *next* write persist that emptiness — destroying
-    every channel and its WireGuard keys with no trace. Renaming preserves the
-    bytes for manual recovery and makes the failure loud.
-    """
-    backup = p.with_name(f"{p.name}.corrupt-{int(time.time())}")
-    try:
-        os.replace(p, backup)
-    except OSError:
-        return  # can't move it; the caller still proceeds from a blank view
-    msg = f"{p.name} is corrupt ({err}); moved to {backup.name}, starting empty"
-    applog.log(msg)
-    print(f"alle: {msg}", file=sys.stderr)
-
-
 class StoreReadError(RuntimeError):
     """A store file exists but could not be read (permissions, transient I/O).
 
@@ -442,6 +442,89 @@ class StateVersionError(StoreReadError):
     """
 
 
+FileIdentity = tuple[int, int, int, int]
+
+
+def _read_store_text(p: Path) -> tuple[str, FileIdentity]:
+    """Read one complete file generation and return its stable identity.
+
+    Opening first and calling ``fstat`` on that descriptor makes the bytes and
+    identity describe the same inode even if an atomic replacement happens
+    immediately after the read.
+    """
+    with p.open() as f:
+        text = f.read()
+        st = os.fstat(f.fileno())
+    return text, (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def _fsync_dir_strict(path: Path) -> None:
+    """Fsync ``path`` and propagate failure for evidence-preserving moves."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _quarantine(
+    p: Path,
+    err: Exception,
+    *,
+    failed_text: str,
+    failed_identity: FileIdentity,
+    lock_path: Path,
+    validate: Callable[[str], object],
+    lock_held: bool = False,
+) -> bool:
+    """Preserve one corrupt generation under the store's writer lock.
+
+    Returns ``True`` only when the exact generation the caller failed to parse
+    was moved aside. A concurrent replacement makes this return ``False`` so
+    the caller retries the newer generation. Preservation uses an exclusive
+    hard link followed by unlink: unlike ``rename``/``replace``, an existing
+    backup can never be overwritten. Any inability to preserve and fsync the
+    evidence aborts the read instead of exposing a blank mutable view.
+    """
+    held = nullcontext() if lock_held else fsio.locked(lock_path)
+    with held:
+        try:
+            current_text, current_identity = _read_store_text(p)
+        except FileNotFoundError:
+            return False
+        except OSError as e:
+            raise StoreReadError(f"cannot re-read {p.name} for quarantine: {e}") from e
+
+        if current_identity != failed_identity or current_text != failed_text:
+            return False
+        try:
+            validate(current_text)
+        except Exception:  # the store parser defines the accepted exception type
+            pass
+        else:
+            return False
+
+        backup = p.with_name(f"{p.name}.corrupt-{time.time_ns()}-{os.getpid()}")
+        try:
+            os.link(p, backup, follow_symlinks=False)
+            p.unlink()
+            _fsync_dir_strict(p.parent)
+        except OSError as e:
+            raise StoreReadError(
+                f"cannot preserve corrupt {p.name} as {backup.name}: {e}"
+            ) from e
+        # Parser messages can quote source lines; credentials must never reach
+        # stderr or logs. The exception class is enough context alongside the
+        # preserved backup path.
+        msg = (
+            f"{p.name} is corrupt ({type(err).__name__}); "
+            f"moved to {backup.name}, starting empty"
+        )
+        applog.log(msg)
+        print(f"alle: {msg}", file=sys.stderr)
+        return True
+
+
 def _check_schema(data: dict) -> None:
     """Reject a parsed state whose container shapes are unusable.
 
@@ -449,28 +532,40 @@ def _check_schema(data: dict) -> None:
     a file that *parses* but cannot be safely read-modify-written (providers
     as a list, a channel as a string, …) is quarantined loudly instead of
     crashing mid-mutation or, worse, being partially rewritten around.
-    Deliberately shallow: only the container types every mutator relies on,
-    not per-field value checks.
+    Container defaults apply only when a key is absent. A present ``null``,
+    false, scalar, or list is malformed rather than an alias for an empty
+    object/list.
     """
     version = data.get("version", STATE_VERSION)
     if not isinstance(version, int) or isinstance(version, bool):
         raise ValueError("version is not an integer")
-    providers = data.get("providers") or {}
+    if SETUP_COMMIT_KEY in data and not isinstance(data[SETUP_COMMIT_KEY], str):
+        raise ValueError(f"{SETUP_COMMIT_KEY} is not a string")
+    providers = data.get("providers", {})
     if not isinstance(providers, dict):
         raise ValueError("providers is not an object")
     for provider, prov in providers.items():
+        if not isinstance(provider, str):
+            raise ValueError("provider key is not a string")
         if not isinstance(prov, dict):
             raise ValueError(f"provider {provider!r} is not an object")
-        chans = prov.get("channels") or {}
+        chans = prov.get("channels", {})
         if not isinstance(chans, dict):
             raise ValueError(f"provider {provider!r} channels is not an object")
         for cid, ch in chans.items():
+            if not isinstance(cid, str):
+                raise ValueError(f"provider {provider!r} channel key is not a string")
             if not isinstance(ch, dict):
                 raise ValueError(f"channel {provider!r}/{cid!r} is not an object")
-    router = data.get("router") or {}
+            for key in ("wg", "probe", "reconnect"):
+                if key in ch and not isinstance(ch[key], dict):
+                    raise ValueError(
+                        f"channel {provider!r}/{cid!r} {key} is not an object"
+                    )
+    router = data.get("router", {})
     if not isinstance(router, dict):
         raise ValueError("router is not an object")
-    rules = router.get("rules") or []
+    rules = router.get("rules", [])
     if not isinstance(rules, list):
         raise ValueError("router.rules is not a list")
     for rule in rules:
@@ -478,22 +573,39 @@ def _check_schema(data: dict) -> None:
             raise ValueError("router.rules entry is not an object")
 
 
-def _read_raw() -> dict:
+def _parse_state_text(text: str) -> dict:
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("root is not a JSON object")
+    _check_schema(data)
+    return data
+
+
+def _read_raw(*, lock_held: bool = False) -> dict:
     p = _state_path()
-    try:
-        text = p.read_text()
-    except FileNotFoundError:
-        return _blank()  # genuinely absent — a fresh install starts blank
-    except OSError as e:
-        raise StoreReadError(f"cannot read {p.name}: {e}") from e
-    try:
-        data = json.loads(text)
-        if not isinstance(data, dict):
-            raise ValueError("root is not a JSON object")
-        _check_schema(data)
-    except ValueError as e:
-        _quarantine(p, e)
-        return _blank()
+    while True:
+        try:
+            text, identity = _read_store_text(p)
+        except FileNotFoundError:
+            return _blank()  # genuinely absent — a fresh install starts blank
+        except OSError as e:
+            raise StoreReadError(f"cannot read {p.name}: {e}") from e
+        try:
+            data = _parse_state_text(text)
+        except ValueError as e:
+            moved = _quarantine(
+                p,
+                e,
+                failed_text=text,
+                failed_identity=identity,
+                lock_path=_lock_path(),
+                validate=_parse_state_text,
+                lock_held=lock_held,
+            )
+            if moved:
+                return _blank()
+            continue  # a concurrent writer published another generation
+        break
     version = data.setdefault("version", STATE_VERSION)
     if version > STATE_VERSION:
         raise StateVersionError(
@@ -531,8 +643,16 @@ def transaction():
     writes so neither clobbers the other.
     """
     with fsio.locked(_lock_path()):
-        data = _read_raw()
+        data = _read_raw(lock_held=True)
         yield data
+        # A compound setup operation publishes its transaction identity in the
+        # same atomic state replacement as the actual mutation. Recovery can
+        # therefore distinguish a crash before this write from one after it.
+        txn_module = sys.modules.get("alle.txn")
+        if txn_module is not None:
+            setup_id = txn_module.active_setup_id()
+            if setup_id is not None:
+                data[SETUP_COMMIT_KEY] = setup_id
         _write_raw(data)
 
 
@@ -591,20 +711,7 @@ class Store:
         out: list[Channel] = []
         for provider, pdata in sorted(self.providers.items()):
             for cid, ch in sorted((pdata.get("channels") or {}).items()):
-                out.append(
-                    Channel(
-                        provider=provider,
-                        id=cid,
-                        port=int(ch.get("port", 0)),
-                        country=ch.get("country", ""),
-                        city=ch.get("city", ""),
-                        label=ch.get("label", ""),
-                        wg=ch.get("wg") or {},
-                        probe=ch.get("probe", {}),
-                        reconnect=ch.get("reconnect", {}),
-                        enabled=bool(ch.get("enabled", True)),
-                    )
-                )
+                out.append(_channel_view(provider, cid, ch))
         return out
 
     def provider_channels(self, provider: str) -> list[Channel]:
@@ -643,8 +750,9 @@ class Store:
             }
             if label:
                 chans[cid]["label"] = label
+            committed = _channel_view(provider, cid, chans[cid])
         self.data = _read_raw()
-        return self.get_channel(provider, cid)  # type: ignore[return-value]
+        return committed
 
     def upsert_channel(
         self,
@@ -704,8 +812,9 @@ class Store:
                 # A re-import is human intervention: forget any reconnect give-up
                 # state so the daemon tries the fresh config from scratch.
                 ch.pop("reconnect", None)
+            committed = _channel_view(provider, cid, chans[cid])
         self.data = _read_raw()
-        return self.get_channel(provider, cid), created  # type: ignore[return-value]
+        return committed, created
 
     def remove_channels(self, refs: list[tuple[str, str]]) -> list[tuple[str, str]]:
         """Remove several channels in ONE transaction; returns those removed.

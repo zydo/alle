@@ -24,8 +24,52 @@ MAX_AGE_SECONDS = 24 * 3600  # 1 day; force a refresh sooner with `--refresh`
 SOURCE = "provider-api-v1"
 
 
+class LocationCacheError(ValueError):
+    """A parsed location cache has an unusable root or nested shape."""
+
+
 def path_for(root: Path, provider: str) -> Path:
     return root / "providers" / f"{provider}.json"
+
+
+def _validate_countries(value) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        raise LocationCacheError("countries is not an object")
+    for country, cities in value.items():
+        if not isinstance(country, str) or not country:
+            raise LocationCacheError("country name is not a non-empty string")
+        if not isinstance(cities, list):
+            raise LocationCacheError(f"cities for {country!r} is not a list")
+        if any(not isinstance(city, str) or not city for city in cities):
+            raise LocationCacheError(f"cities for {country!r} contains a bad name")
+    return value
+
+
+def _parse_cache(text: str, provider: str, *, require_meta: bool) -> dict:
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError) as e:
+        raise LocationCacheError(f"invalid JSON: {e}") from e
+    if not isinstance(data, dict):
+        raise LocationCacheError("root is not an object")
+    countries = _validate_countries(data.get("countries", {}))
+    if require_meta or "_meta" in data:
+        meta = data.get("_meta")
+        if not isinstance(meta, dict):
+            raise LocationCacheError("_meta is not an object")
+        if meta.get("provider", provider) != provider:
+            raise LocationCacheError("_meta.provider does not match the cache")
+        if not isinstance(meta.get("source"), str):
+            raise LocationCacheError("_meta.source is not a string")
+        epoch = meta.get("updated_epoch")
+        if not isinstance(epoch, (int, float)) or isinstance(epoch, bool):
+            raise LocationCacheError("_meta.updated_epoch is not a number")
+        for key in ("country_count", "city_count"):
+            if key in meta and (
+                not isinstance(meta[key], int) or isinstance(meta[key], bool)
+            ):
+                raise LocationCacheError(f"_meta.{key} is not an integer")
+    return {"_meta": data.get("_meta"), "countries": countries}
 
 
 def write(root: Path, provider: str) -> dict:
@@ -33,7 +77,7 @@ def write(root: Path, provider: str) -> dict:
         raise ValueError(
             f"unknown provider '{provider}' (known: {', '.join(sorted(PROVIDERS))})"
         )
-    countries = PROVIDERS[provider]["locations"]()
+    countries = _validate_countries(PROVIDERS[provider]["locations"]())
     out = {
         "_meta": {
             "provider": provider,
@@ -86,16 +130,15 @@ def needs_refresh(root: Path, provider: str) -> bool:
     if not p.exists():
         return True
     try:
-        meta = json.loads(p.read_text()).get("_meta", {})
-    except (ValueError, OSError):
+        parsed = _parse_cache(p.read_text(), provider, require_meta=True)
+        meta = parsed["_meta"]
+    except (LocationCacheError, OSError):
         return True
     if meta.get("source") != SOURCE:
         return True
-    return int(time.time()) - int(meta.get("updated_epoch", 0)) > MAX_AGE_SECONDS
+    return int(time.time()) - int(meta["updated_epoch"]) > MAX_AGE_SECONDS
 
 
 def load(root: Path, provider: str) -> dict[str, list[str]]:
     p = path_for(root, provider)
-    if not p.exists():
-        raise FileNotFoundError(p)
-    return json.loads(p.read_text())["countries"]
+    return _parse_cache(p.read_text(), provider, require_meta=False)["countries"]

@@ -30,6 +30,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import time
 from hashlib import sha256
 from pathlib import Path
@@ -120,31 +121,39 @@ class LoginTokenStore:
     def __init__(self, path: Path):
         self._path = path
         self._lock = path.with_name(path.name + ".lock")
-        self._consumed: dict[str, int] = self._load()
+        self._consumed: dict[str, int] = {}
 
     def _load(self) -> dict[str, int]:
         try:
             data = json.loads(self._path.read_text())
-        except (ValueError, OSError):
+        except FileNotFoundError:
             return {}
+        except (ValueError, OSError) as e:
+            raise ValueError(f"cannot read consumed-login store: {e}") from e
         if not isinstance(data, dict):
-            return {}
-        return {
-            k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, int)
-        }
+            raise ValueError("consumed-login store root is not an object")
+        if any(
+            not isinstance(k, str)
+            or re.fullmatch(r"[0-9a-f]{64}", k) is None
+            or not isinstance(v, int)
+            or isinstance(v, bool)
+            for k, v in data.items()
+        ):
+            raise ValueError("consumed-login store contains an invalid entry")
+        return data
 
-    def _persist(self) -> None:
+    def _persist(self, consumed: dict[str, int]) -> None:
         fsio.write_durably(
             self._path,
-            lambda f: json.dump(self._consumed, f),
+            lambda f: json.dump(consumed, f),
             prefix=".web_consumed-",
             suffix=".json",
             mode=0o600,
         )
 
-    def _prune(self, now: int) -> None:
-        for digest in [d for d, exp in self._consumed.items() if exp <= now]:
-            del self._consumed[digest]
+    @staticmethod
+    def _pruned(consumed: dict[str, int], now: int) -> dict[str, int]:
+        return {digest: exp for digest, exp in consumed.items() if exp > now}
 
     def verify_and_consume(
         self, secret: str, token: str, *, now: int | None = None
@@ -161,11 +170,18 @@ class LoginTokenStore:
         digest = hashlib.sha256(canonical.encode()).hexdigest()
         expiry = issued + LOGIN_TTL + 1
         with fsio.locked(self._lock):
-            self._prune(now)
-            if digest in self._consumed:
+            try:
+                consumed = self._pruned(self._load(), now)
+            except ValueError:
+                return False  # preserve malformed/unreadable evidence; fail closed
+            if digest in consumed:
                 return False
-            self._consumed[digest] = expiry
-            self._persist()
+            candidate = {**consumed, digest: expiry}
+            try:
+                self._persist(candidate)
+            except OSError:
+                return False
+            self._consumed = candidate
             return True
 
 

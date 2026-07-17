@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import stat
+import threading
 
 import pytest
 
-from alle import credentials, paths
+from alle import credentials, fsio, paths
 from alle.state import StoreReadError
 
 
@@ -62,11 +63,66 @@ def test_corrupt_credentials_are_quarantined_not_silently_wiped(capsys):
     assert "corrupt" in capsys.readouterr().err
 
 
+def test_credential_parser_diagnostic_never_echoes_secret_source(capsys):
+    path = paths.state_dir() / "credentials.yaml"
+    path.write_text("providers:\n  nordvpn: [SUPER-SECRET-TOKEN\n")
+
+    assert credentials.configured() == []
+
+    captured = capsys.readouterr().err
+    assert "corrupt" in captured
+    assert "SUPER-SECRET-TOKEN" not in captured
+
+
 def test_non_mapping_credentials_are_quarantined():
     path = paths.state_dir() / "credentials.yaml"
     path.write_text("- just\n- a\n- list\n")  # valid YAML, wrong shape
     assert credentials.configured() == []
     assert len(list(paths.state_dir().glob("credentials.yaml.corrupt-*"))) == 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["false\n", "providers: null\n", "providers:\n  nordvpn: token\n"],
+)
+def test_falsy_and_nested_wrong_credentials_are_quarantined(text):
+    path = paths.state_dir() / "credentials.yaml"
+    path.write_text(text)
+    assert credentials.configured() == []
+    backups = list(paths.state_dir().glob("credentials.yaml.corrupt-*"))
+    assert len(backups) == 1
+    assert backups[0].read_text() == text
+
+
+def test_stale_credential_reader_never_moves_a_new_valid_generation(monkeypatch):
+    path = paths.state_dir() / "credentials.yaml"
+    path.write_text("providers: [broken")
+    entered = threading.Event()
+    published = threading.Event()
+    original = credentials._quarantine
+
+    def pause(*args, **kwargs):
+        entered.set()
+        assert published.wait(2)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(credentials, "_quarantine", pause)
+    result = {}
+
+    def read():
+        result["providers"] = credentials.configured()
+
+    reader = threading.Thread(target=read)
+    reader.start()
+    assert entered.wait(2)
+    with fsio.locked(credentials._lock_path()):
+        credentials._save_all({"nordvpn": {"token": "valid"}})
+    published.set()
+    reader.join(2)
+
+    assert not reader.is_alive()
+    assert result["providers"] == ["nordvpn"]
+    assert list(paths.state_dir().glob("credentials.yaml.corrupt-*")) == []
 
 
 def test_writers_hold_the_credentials_lock():
