@@ -6,10 +6,10 @@ on:
       - "v*"
 
 # Release is gated on the full test/lint/format/package suite run on the exact
-# tag checkout. Registry-specific work lives in reusable workflows with only
-# the credentials each registry needs; the GitHub release is created only after
-# both publishers succeed. Every third-party Action is pinned to an immutable
-# commit SHA; the trailing comment records the tag it was resolved from.
+# tag checkout. PyPI and Docker Hub publishing remain in this top-level workflow
+# so Trusted Publishing binds to this exact filename; the GitHub release is
+# created only after both publishers succeed. Every third-party Action is pinned
+# to an immutable commit SHA; the trailing comment records its resolved tag.
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -85,17 +85,136 @@ jobs:
 
   publish-pypi:
     needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/p/alle-proxy
     permissions:
       id-token: write
-    uses: ./.github/workflows/publish-pypi.yml
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Check whether the release is already on PyPI
+        id: pypi
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          url="https://pypi.org/pypi/alle-proxy/$version/json"
+          status=$(curl --silent --show-error --output /dev/null \
+            --write-out '%{http_code}' --retry 3 "$url")
+          case "$status" in
+            200) echo "exists=true" >> "$GITHUB_OUTPUT" ;;
+            404) echo "exists=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::PyPI version check returned HTTP $status"; exit 1 ;;
+          esac
+
+      - name: Publish to PyPI
+        if: steps.pypi.outputs.exists != 'true'
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
 
   publish-docker:
     needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
-    uses: ./.github/workflows/publish-docker.yml
-    secrets:
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download the gated release wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Record wheel identity and stable-tag policy
+        id: artifact
+        run: |
+          echo "sha=$(sha256sum dist/*.whl | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          if echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "stable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ vars.DOCKERHUB_USERNAME }}/alle
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ steps.artifact.outputs.stable == 'true' }}
+
+      - name: Boot-test amd64 release shape
+        run: |
+          docker buildx build --platform linux/amd64 --load \
+            --build-arg ALLE_WHEEL_SHA256=${{ steps.artifact.outputs.sha }} \
+            --cache-from type=gha,scope=release-amd64 \
+            --cache-to type=gha,mode=max,scope=release-amd64 \
+            -t alle:release-amd64 .
+          scripts/container-release-smoke.sh alle:release-amd64 linux/amd64
+
+      - name: Boot-test arm64 release shape through QEMU
+        run: |
+          docker buildx build --platform linux/arm64 --load \
+            --build-arg ALLE_WHEEL_SHA256=${{ steps.artifact.outputs.sha }} \
+            --cache-from type=gha,scope=release-arm64 \
+            --cache-to type=gha,mode=max,scope=release-arm64 \
+            -t alle:release-arm64 .
+          scripts/container-release-smoke.sh alle:release-arm64 linux/arm64
+
+      - name: Build and push image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: ALLE_WHEEL_SHA256=${{ steps.artifact.outputs.sha }}
+          cache-from: type=gha,scope=release-multiarch
+          cache-to: type=gha,mode=max,scope=release-multiarch
+
+      - name: Assert the published manifest architectures
+        run: |
+          image=${{ vars.DOCKERHUB_USERNAME }}/alle:${GITHUB_REF_NAME#v}
+          docker buildx imagetools inspect "$image" --format '{{json .Manifest}}' > /tmp/manifest.json
+          python3 - <<'PY'
+          import json
+          data = json.load(open('/tmp/manifest.json'))
+          arches = {m.get('platform', {}).get('architecture') for m in data['manifests']}
+          assert {'amd64', 'arm64'} <= arches, arches
+          PY
+
+      - name: Publish README to Docker Hub
+        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ vars.DOCKERHUB_USERNAME }}/alle
+          short-description: A universal VPN client that manages multiple VPN connections with rule-based routing.
+          readme-filepath: ./README.md
+          enable-url-completion: true
 
   github-release:
     needs: [publish-pypi, publish-docker]

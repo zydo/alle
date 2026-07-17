@@ -23,8 +23,6 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 
 WORKFLOW_NAMES = [
     "ci.yml",
-    "publish-docker.yml",
-    "publish-pypi.yml",
     "publish.yml",
     "supply-chain.yml",
 ]
@@ -119,20 +117,16 @@ def test_ci_gates_match_the_publish_gate():
 
 def test_publish_reuses_the_one_built_artifact():
     wf = _load("publish.yml")
-    publishers = {
-        "publish-pypi": "./.github/workflows/publish-pypi.yml",
-        "publish-docker": "./.github/workflows/publish-docker.yml",
-    }
-    for name, reusable in publishers.items():
-        job = wf["jobs"][name]
-        assert "build" in job["needs"]
-        assert job["uses"] == reusable
+    pypi = wf["jobs"]["publish-pypi"]
+    assert "build" in pypi["needs"]
+    docker = wf["jobs"]["publish-docker"]
+    assert "build" in docker["needs"]
     assert set(wf["jobs"]["github-release"]["needs"]) == {
         "publish-pypi",
         "publish-docker",
     }
     consumers = (
-        (_load("publish-pypi.yml"), "publish"),
+        (wf, "publish-pypi"),
         (wf, "github-release"),
     )
     for workflow, name in consumers:
@@ -143,8 +137,8 @@ def test_publish_reuses_the_one_built_artifact():
 
 
 def test_dockerhub_overview_publishes_the_readme():
-    wf = _load("publish-docker.yml")
-    steps = list(_steps(wf))
+    wf = _load("publish.yml")
+    steps = [item for item in _steps(wf) if item[0] == "publish-docker"]
     step = next(
         s
         for _job, s in steps
@@ -155,17 +149,9 @@ def test_dockerhub_overview_publishes_the_readme():
         for _job, s in steps
         if s.get("uses", "").startswith("docker/build-push-action")
     )
-    assert steps.index(("publish", image_push)) < steps.index(("publish", step))
-    image_actions = (
-        "docker/setup-qemu-action",
-        "docker/setup-buildx-action",
-        "docker/login-action",
-        "docker/metadata-action",
-        "docker/build-push-action",
+    assert steps.index(("publish-docker", image_push)) < steps.index(
+        ("publish-docker", step)
     )
-    for _job, candidate in steps:
-        if candidate.get("uses", "").startswith(image_actions):
-            assert candidate["if"] == "github.event_name != 'workflow_dispatch'"
     inputs = step["with"]
     assert inputs["repository"] == "${{ vars.DOCKERHUB_USERNAME }}/alle"
     assert inputs["readme-filepath"] == "./README.md"
@@ -196,25 +182,59 @@ def test_every_environment_checks_and_uses_the_lock():
             assert "uv sync --locked" in runs, name
 
 
+def test_pypi_trusted_publisher_job_is_in_tag_entrypoint():
+    """PyPI does not support Trusted Publishing from reusable workflows."""
+    publish = _load("publish.yml")
+    assert publish[True]["push"]["tags"] == ["v*"]
+    pypi = publish["jobs"]["publish-pypi"]
+    assert "uses" not in pypi
+    assert any(
+        step.get("uses", "").startswith("pypa/gh-action-pypi-publish")
+        for step in pypi["steps"]
+    )
+
+
+def test_pypi_publish_skips_an_existing_release():
+    pypi = _load("publish.yml")["jobs"]["publish-pypi"]
+    check = next(step for step in pypi["steps"] if step.get("id") == "pypi")
+    assert "pypi.org/pypi/alle-proxy/$version/json" in check["run"]
+    publish = next(
+        step
+        for step in pypi["steps"]
+        if step.get("uses", "").startswith("pypa/gh-action-pypi-publish")
+    )
+    assert publish["if"] == "steps.pypi.outputs.exists != 'true'"
+
+
 def test_release_image_consumes_gated_wheel_and_gates_latest():
-    wf = _load("publish-docker.yml")
-    runs = " ".join(step.get("run", "") for _job, step in _steps(wf))
+    wf = _load("publish.yml")
+    steps = [step for job, step in _steps(wf) if job == "publish-docker"]
+    runs = " ".join(step.get("run", "") for step in steps)
     assert "sha256sum dist/*.whl" in runs
     assert "linux/amd64" in runs and "linux/arm64" in runs
     assert "imagetools inspect" in runs
     meta = next(
         step
-        for _job, step in _steps(wf)
+        for step in steps
         if step.get("uses", "").startswith("docker/metadata-action")
     )
     assert "value=latest,enable=" in meta["with"]["tags"]
     build = next(
         step
-        for _job, step in _steps(wf)
+        for step in steps
         if step.get("uses", "").startswith("docker/build-push-action")
     )
     assert "ALLE_WHEEL_SHA256" in build["with"]["build-args"]
     assert "type=gha" in build["with"]["cache-from"]
+
+
+def test_container_release_smoke_fixture_is_readable_and_fails_fast():
+    script = (ROOT / "scripts" / "container-release-smoke.sh").read_text()
+    assert 'chmod 0644 "$bundle"' in script
+    assert "{{.State.Running}}" in script
+    assert 'docker logs "$name"' in script
+    assert "api_ready" in script
+    assert "alle health" not in script
 
 
 def test_ci_cancels_superseded_work_and_jobs_are_bounded():
