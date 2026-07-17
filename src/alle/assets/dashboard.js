@@ -169,6 +169,16 @@ async function copy(text) {
 }
 
 function chanKey(c) { return `${c.provider}/${c.name}`; }
+export function enabledChannelKeys(channels = []) {
+  return channels.filter((channel) => channel.enabled !== false).map(chanKey);
+}
+export function visibleTraffic(channel, measurement = {}) {
+  if (channel.enabled === false) return { sent: "", received: "" };
+  return {
+    sent: isSet(measurement.sent) ? bytes(measurement.sent) : "",
+    received: isSet(measurement.received) ? bytes(measurement.received) : "",
+  };
+}
 function loc(c) { return c.city && !["(Unknown)", "(Any City)"].includes(c.city) ? `${c.city}, ${c.country}` : c.country; }
 function spin(key, kind, icon) { return busy.has(key) || busy.has(`${key}:${kind}`) ? '<span class="spinner small"></span>' : icon; }
 // A channel's action buttons are locked while it's being tested (either kind) or
@@ -185,10 +195,11 @@ function syncHeaderBusy() {
   el.probeAll = el.channels?.querySelector("#probe-all");
   el.speedAll = el.channels?.querySelector("#speed-all");
   if (!el.probeAll) return;
+  const noEnabledChannels = enabledChannelKeys(status?.channels).length === 0;
   el.probeAll.innerHTML = busy.has("all:probe") ? '<span class="spinner small"></span>' : "◉";
   el.speedAll.innerHTML = busy.has("all:speed") ? '<span class="spinner small"></span>' : GAUGE;
-  el.probeAll.disabled = busy.has("all:probe") || busy.has("all:speed");
-  el.speedAll.disabled = busy.has("all:probe") || busy.has("all:speed");
+  el.probeAll.disabled = noEnabledChannels || busy.has("all:probe") || busy.has("all:speed");
+  el.speedAll.disabled = noEnabledChannels || busy.has("all:probe") || busy.has("all:speed");
 }
 
 function compactState(st) {
@@ -239,13 +250,16 @@ function chanRow(c) {
   const testable = !off && !chanBusy(key);
   const portCopy = `http://127.0.0.1:${esc(c.port_number)}`;
   const latText = !off && isSet(m.latency_ms) ? `${esc(m.latency_ms)} ms` : "";
-  const sentText = isSet(m.sent) ? bytes(m.sent) : "";
-  const recvText = isSet(m.received) ? bytes(m.received) : "";
+  const traffic = visibleTraffic(c, m);
+  const sentText = traffic.sent;
+  const recvText = traffic.received;
   const downText = !off && speed.download_bps ? mbps(speed.download_bps) : "";
   const upText = !off && speed.upload_bps ? mbps(speed.upload_bps) : "";
   const probeAttr = testable ? "" : " disabled";
   const speedAttr = testable ? "" : " disabled";
-  const toggleDisabled = chanBusy(key) ? " disabled" : "";
+  // A disabled channel is outside an all-enabled test run, so its Enable
+  // control stays available. Enabled rows remain locked against mid-test flips.
+  const toggleDisabled = !off && chanBusy(key) ? " disabled" : "";
   const toggleTitle = off ? "Enable" : "Disable";
   const toggleLabel = off ? "▶" : "⏸";
 
@@ -280,7 +294,10 @@ function renderChannels() {
   if (chans.length) wanted.push(grid.querySelector(".dashchan.head") || htmlNode(head));
   for (const channel of chans) {
     const key = chanKey(channel);
-    const signature = JSON.stringify([channel, measured.get(key), [...busy].filter((item) => item.startsWith(key))]);
+    const rowBusy = [...busy].filter(
+      (item) => item.startsWith(key) || (channel.enabled !== false && item.startsWith("all:")),
+    );
+    const signature = JSON.stringify([channel, measured.get(key), rowBusy]);
     const current = grid.querySelector(`.dashchan.body[data-provider="${CSS.escape(channel.provider)}"][data-id="${CSS.escape(channel.name)}"]`);
     if (current?.dataset.render === signature) wanted.push(current);
     else { const row = htmlNode(chanRow(channel)); row.dataset.render = signature; wanted.push(row); }
@@ -296,39 +313,62 @@ function renderChannels() {
 // all-channels run. Cleared per row as it lands and again in runTest's finally.
 function speedBusyKeys(channel) {
   if (channel) return [`${chanKey(channel)}:speed`];
-  return (status?.channels || []).map((c) => `${chanKey(c)}:speed`);
+  return enabledChannelKeys(status?.channels).map((key) => `${key}:speed`);
 }
 
-async function runTest(channel, speed) {
+function beginTest(channel, speed) {
   const key = channel ? chanKey(channel) : "all";
   const testKind = speed ? "speed" : "probe";
   const busyKey = channel ? `${key}:${testKind}` : `all:${testKind}`;
-  busy.add(key); busy.add(busyKey);
   const speedKeys = speed ? speedBusyKeys(channel) : [];
-  speedKeys.forEach((k) => busy.add(k));
+  [key, busyKey, ...speedKeys].forEach((item) => busy.add(item));
   syncHeaderBusy();
   renderChannels();
+  return { key, busyKey, speedKeys };
+}
+
+function finishTest({ key, busyKey, speedKeys }) {
+  [key, busyKey, ...speedKeys].forEach((item) => busy.delete(item));
+  syncHeaderBusy();
+  renderChannels();
+}
+
+function applyMeasurement(row) {
+  const key = `${row.provider}/${row.name}`;
+  if (row.enabled === false) measured.delete(key);
+  else measured.set(key, row);
+  return key;
+}
+
+async function runProbe(channel) {
+  const res = await api.post("/api/v1/test", {
+    speed: false,
+    channel: channel ? chanKey(channel) : null,
+  });
+  if (!res.ok) { toast(res.error, "err"); return; }
+  // Test rows carry fresh probes and cumulative traffic totals; disabled rows
+  // deliberately clear any prior measurement instead of reviving stale cells.
+  (res.data.channels || []).forEach(applyMeasurement);
+  renderChannels();
+  toast("Probe complete.");
+  refreshStatus();
+}
+
+async function runTest(channel, speed) {
+  if (!channel && enabledChannelKeys(status?.channels).length === 0) {
+    toast("No enabled channels to test.", "warn");
+    return;
+  }
+  const testState = beginTest(channel, speed);
   try {
     if (speed) {
       toast("Speed Test In Progress.");
       await runSpeedStream(channel);
     } else {
-      const res = await api.post("/api/v1/test", { speed: false, channel: channel ? chanKey(channel) : null });
-      if (!res.ok) { toast(res.error, "err"); return; }
-      // Test rows carry everything the table shows — fresh probe results and
-      // the cumulative sent/received totals; there is no separate metrics call.
-      for (const row of res.data.channels || []) {
-        measured.set(`${row.provider}/${row.name}`, row);
-      }
-      renderChannels();
-      toast("Probe complete.");
-      refreshStatus();
+      await runProbe(channel);
     }
   } finally {
-    busy.delete(key); busy.delete(busyKey);
-    speedKeys.forEach((k) => busy.delete(k));
-    syncHeaderBusy();
-    renderChannels();
+    finishTest(testState);
   }
 }
 
@@ -426,8 +466,8 @@ export async function parseSpeedStream(body, onRow = () => { }) {
 }
 
 function applySpeedRow(r) {
-  measured.set(`${r.provider}/${r.name}`, r);
-  busy.delete(`${r.provider}/${r.name}:speed`);
+  const key = applyMeasurement(r);
+  busy.delete(`${key}:speed`);
   renderChannels();
 }
 

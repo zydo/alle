@@ -313,10 +313,11 @@ def provider_catalog() -> dict:
 
 def provider_list() -> dict:
     store = Store.load()
+    stored_credentials = credentials.snapshot()
     providers = []
     for provider in store.provider_names():
         detail = ""
-        creds = credentials.get(provider) or {}
+        creds = stored_credentials.get(provider) or {}
         for field in auth_fields(provider):
             if field.secret:
                 value = str(creds.get(field.key, ""))
@@ -370,8 +371,9 @@ def provider_remove_many(providers: list[str], dry_run: bool = False) -> dict:
     # transaction, the commit point. The setup lock also means a concurrent
     # `providers add` cannot interleave and resurrect a half-removed provider.
     with txn.setup_transaction(f"remove provider(s) {', '.join(names)}") as t:
-        for provider in names:
-            credentials.remove(provider)
+        with credentials.transaction() as current:
+            for provider in names:
+                current.pop(provider, None)
         try:
             Store.load().remove_providers(names)
         except ReferencedError as e:  # rule added between plan and removal

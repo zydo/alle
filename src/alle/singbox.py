@@ -461,14 +461,15 @@ class Runner:
         old = self.config_path.read_text() if self.config_path.exists() else None
         if new == old and self.is_running() and self._verify_healthy():
             return ApplyResult(ApplyOutcome.UNCHANGED)
+        binary = ensure_binary()
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self._write_protected(new)
-        if not self.check():
+        if not self.check(binary=binary):
             if old is not None:
                 self._write_protected(old)
                 if not self.is_running():
                     try:
-                        self.restart()  # keep the previous generation alive
+                        self.restart(binary=binary)  # keep previous generation alive
                     except SingBoxError:
                         pass  # reported as rejected; supervision keeps retrying
             return ApplyResult(ApplyOutcome.REJECTED, self._check_error)
@@ -494,7 +495,7 @@ class Runner:
             # SIGHUP undeliverable, or the process/control API did not come
             # back after the reload — fall back to a full restart
         try:
-            self.restart()
+            self.restart(binary=binary)
         except SingBoxRuntimeError as e:
             return ApplyResult(ApplyOutcome.RUNTIME_FAILED, str(e))
         if not self._verify_healthy():
@@ -600,10 +601,11 @@ class Runner:
             mode=0o400,
         )
 
-    def start(self) -> None:
+    def start(self, binary: Path | None = None) -> None:
         if self.is_running():
             return
-        binary = ensure_binary()
+        if binary is None:
+            binary = ensure_binary()
         applog.rotate_if_needed(self.log_path, applog.MAX_LOG_BYTES)
         with open(self.log_path, "ab") as lf:
             child = subprocess.Popen(
@@ -673,18 +675,19 @@ class Runner:
         _pid_path().unlink(missing_ok=True)
         _started_path().unlink(missing_ok=True)
 
-    def restart(self) -> None:
+    def restart(self, binary: Path | None = None) -> None:
         self.stop()
-        self.start()
+        self.start(binary=binary)
 
-    def check(self) -> bool:
+    def check(self, binary: Path | None = None) -> bool:
         """Validate the on-disk config with ``sing-box check``. True if it passes.
 
         Raises :class:`SingBoxError` when the binary itself cannot be obtained —
         that is an environmental (retryable) failure, not a config problem, and
         must not be mistaken for "config rejected" (which triggers a rollback).
         """
-        binary = ensure_binary()
+        if binary is None:
+            binary = ensure_binary()
         with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
             try:
                 child = subprocess.Popen(
@@ -735,10 +738,9 @@ class Runner:
             return False
 
     def logs(self, tail: int = 80) -> str:
-        if not self.log_path.exists():
-            return "(no logs)"
-        lines = self.log_path.read_text(errors="replace").splitlines()
-        return "\n".join(lines[-tail:]).strip() or "(no logs)"
+        from alle.applog import reverse_tail
+
+        return "\n".join(reverse_tail(self.log_path, tail)).strip() or "(no logs)"
 
     # ---- traffic stats via the Clash API -----------------------------------
     def connections(self) -> list[dict] | None:

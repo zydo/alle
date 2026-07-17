@@ -34,6 +34,22 @@ def test_add_provider_is_idempotent():
     assert Store.load().provider_names() == ["nordvpn"]
 
 
+def test_transaction_skips_proven_noop_but_writes_real_change(monkeypatch):
+    writes = []
+    original = state._write_raw
+    monkeypatch.setattr(
+        state, "_write_raw", lambda data: (writes.append(1), original(data))[1]
+    )
+
+    with state.transaction() as data:
+        data["providers"].pop("missing", None)
+    assert writes == []
+
+    with state.transaction() as data:
+        data["providers"]["nordvpn"] = {"channels": {}}
+    assert writes == [1]
+
+
 def test_channel_round_trips_through_disk():
     store = Store.load()
     store.add_provider("nordvpn")
@@ -46,6 +62,35 @@ def test_channel_round_trips_through_disk():
     assert got.port == ch.port
     assert got.wg["private_key"] == "PRIV="
     assert got.wg["peer"]["endpoint_host"] == "se1.example.com"
+
+
+def test_direct_channel_lookups_construct_only_requested_scope(monkeypatch):
+    store = Store.load()
+    for provider in ("nordvpn", "protonvpn"):
+        store.add_provider(provider)
+        store.add_channel(provider, "US", "", dict(WG))
+        store.add_channel(provider, "CA", "", dict(WG))
+    store = Store.load()
+    original = state._channel_view
+    constructed = []
+
+    def counted(provider, cid, channel):
+        constructed.append((provider, cid))
+        return original(provider, cid, channel)
+
+    monkeypatch.setattr(state, "_channel_view", counted)
+    assert [channel.id for channel in store.provider_channels("nordvpn")] == [
+        "ca_1",
+        "us_1",
+    ]
+    assert constructed == [("nordvpn", "ca_1"), ("nordvpn", "us_1")]
+    constructed.clear()
+    ch = store.get_channel("nordvpn", "us_1")
+    assert ch is not None and ch.provider == "nordvpn"
+    assert constructed == [("nordvpn", "us_1")]
+    constructed.clear()
+    assert store.get_channel("missing", "us_1") is None
+    assert constructed == []
 
 
 @pytest.mark.parametrize("upsert", [False, True])
@@ -472,8 +517,10 @@ def test_token_channel_refresh_clears_reconnect_for_unresolved_siblings():
         store.set_reconnect("nordvpn", ch.id, {"failed": True, "error": "old token"})
     store.update_channels_wg("nordvpn", {refreshed.id: dict(WG)})
     latest = Store.load()
-    assert latest.get_channel("nordvpn", refreshed.id).reconnect == {}
-    assert latest.get_channel("nordvpn", unresolved.id).reconnect == {}
+    refreshed_ch = latest.get_channel("nordvpn", refreshed.id)
+    unresolved_ch = latest.get_channel("nordvpn", unresolved.id)
+    assert refreshed_ch is not None and refreshed_ch.reconnect == {}
+    assert unresolved_ch is not None and unresolved_ch.reconnect == {}
 
 
 def test_merge_setup_upserts_and_appends_in_one_pass():

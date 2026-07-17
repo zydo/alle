@@ -38,6 +38,57 @@ def test_tail_missing_empty_and_limited_lines():
     assert applog.tail(2) == "two\nthree"
 
 
+def test_reverse_tail_handles_partial_long_and_invalid_lines():
+    path = applog._log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"one\n" + b"x" * 40 + b"\nbad-\xff\npartial")
+
+    assert applog.reverse_tail(path, 3, block_size=8) == [
+        "x" * 40,
+        "bad-\ufffd",
+        "partial",
+    ]
+    assert applog.reverse_tail(path, 0, block_size=8) == []
+
+
+def test_reverse_tail_reads_only_trailing_blocks(monkeypatch):
+    path = applog._log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes((b"old padding\n" * 1000) + b"one\ntwo\nthree\n")
+    real_open = open
+    bytes_read = 0
+
+    class CountingFile:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.stream.close()
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+        def read(self, size=-1):
+            nonlocal bytes_read
+            data = self.stream.read(size)
+            bytes_read += len(data)
+            return data
+
+    monkeypatch.setattr(
+        builtins,
+        "open",
+        lambda target, mode="r", *args, **kwargs: CountingFile(
+            real_open(target, mode, *args, **kwargs)
+        ),
+    )
+
+    assert applog.reverse_tail(path, 2, block_size=32) == ["two", "three"]
+    assert bytes_read == 32
+
+
 def test_log_rotates_past_max_size(monkeypatch):
     monkeypatch.setattr(applog, "MAX_LOG_BYTES", 128)
     for i in range(20):

@@ -43,12 +43,13 @@ from __future__ import annotations
 import secrets
 import time
 
-from alle import applog
+from alle import applog, credentials
 from alle.providers import (
     ProviderAuthError,
     ProviderError,
     is_functional,
     kind,
+    provider_resolver,
     provider_wg,
 )
 from alle.state import Store, channel_fingerprint
@@ -203,13 +204,31 @@ def run_pass(
             applog.log(messages[ref])
 
     restart_refs: list[str] = []
+    resolver_cache = {}
+    stored_credentials = credentials.snapshot() if resolve is provider_wg else {}
+
+    def resolve_channel(ch):
+        if resolve is not provider_wg:
+            return resolve(ch.provider, ch.country, ch.city or "")
+        if ch.provider not in resolver_cache:
+            try:
+                resolver_cache[ch.provider] = provider_resolver(
+                    ch.provider, stored_credentials.get(ch.provider) or {}
+                )
+            except ProviderError as error:
+                resolver_cache[ch.provider] = error
+        provider_resolve = resolver_cache[ch.provider]
+        if isinstance(provider_resolve, ProviderError):
+            raise provider_resolve
+        return provider_resolve(ch.country, ch.city or "")
+
     for ref, action in actions.items():
         if ref not in committed:
             continue
         ch, rc, fingerprint, nonce, attempts = action
         if is_functional(ch.provider) and kind(ch.provider) == "token":
             try:
-                wg = resolve(ch.provider, ch.country, ch.city or "")
+                wg = resolve_channel(ch)
                 if not store.finish_reconnect_attempt(
                     ch.provider, ch.id, fingerprint, nonce, rc, wg=wg
                 ):

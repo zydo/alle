@@ -6,10 +6,12 @@ let view = null;
 let timer = null;
 let lines = 200;
 let lifetime = null;
+let lastText = null;
 
 export function mount(v, ctx) {
   view = v;
   lifetime = ctx?.lifetime || null;
+  lastText = null;
   view.innerHTML = `
     <section>
       <div class="section-head"><span class="eyebrow">Logs</span>
@@ -30,6 +32,7 @@ export function unmount() {
   if (timer) clearTimeout(timer);
   timer = null;
   lifetime = null;
+  lastText = null;
   view = null;
 }
 
@@ -49,6 +52,9 @@ async function refresh() {
   );
   if (!view || view !== owned || lifetime && !lifetime.active()) return;
   if (!res.ok) { toast(res.error, "err"); return; }
-  pre.textContent = res.data.text || "No log lines yet.";
+  const text = res.data.text || "No log lines yet.";
+  if (text === lastText) return;
+  lastText = text;
+  pre.textContent = text;
   if (pinned) pre.scrollTop = pre.scrollHeight;
 }

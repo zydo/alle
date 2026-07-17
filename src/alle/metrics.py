@@ -44,32 +44,41 @@ def _db_path() -> Path:
     return paths.state_dir() / "metrics.db"
 
 
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    """Initialize a fresh metrics database; established files skip DDL."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version >= 1:
+        return
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS channel_traffic (
+            provider   TEXT    NOT NULL,
+            channel    TEXT    NOT NULL,
+            sent       INTEGER NOT NULL DEFAULT 0,
+            received   INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (provider, channel)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS deleted_channels (
+            provider   TEXT    NOT NULL,
+            channel    TEXT    NOT NULL,  -- '*' covers the whole provider
+            deleted_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (provider, channel)
+        )
+        """
+    )
+    conn.execute("PRAGMA user_version = 1")
+
+
 @contextmanager
 def _db():
     conn = sqlite3.connect(str(_db_path()))
     try:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS channel_traffic (
-                provider   TEXT    NOT NULL,
-                channel    TEXT    NOT NULL,
-                sent       INTEGER NOT NULL DEFAULT 0,
-                received   INTEGER NOT NULL DEFAULT 0,
-                updated_at INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (provider, channel)
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS deleted_channels (
-                provider   TEXT    NOT NULL,
-                channel    TEXT    NOT NULL,  -- '*' covers the whole provider
-                deleted_at INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (provider, channel)
-            )
-            """
-        )
+        _ensure_schema(conn)
         yield conn
         conn.commit()
     finally:
@@ -189,6 +198,53 @@ def revive_provider(provider: str) -> None:
             "DELETE FROM deleted_channels WHERE provider = ? AND channel = '*'",
             (provider,),
         )
+
+
+def reconcile_tombstones(
+    *,
+    removed_providers: tuple[str, ...] | list[str] = (),
+    removed_channels: tuple[tuple[str, str], ...] | list[tuple[str, str]] = (),
+    revived_providers: tuple[str, ...] | list[str] = (),
+    revived_channels: tuple[tuple[str, str], ...] | list[tuple[str, str]] = (),
+) -> None:
+    """Apply one bundle operation's tombstone changes in one transaction."""
+    if not any(
+        (removed_providers, removed_channels, revived_providers, revived_channels)
+    ):
+        return
+    now = int(time.time())
+    removed_provider_set = set(removed_providers)
+    with _db() as conn:
+        for provider in removed_providers:
+            conn.execute("DELETE FROM channel_traffic WHERE provider = ?", (provider,))
+            conn.execute("DELETE FROM deleted_channels WHERE provider = ?", (provider,))
+            conn.execute(
+                "INSERT INTO deleted_channels (provider, channel, deleted_at)"
+                " VALUES (?, '*', ?)",
+                (provider, now),
+            )
+        for provider, channel in removed_channels:
+            if provider in removed_provider_set:
+                continue
+            conn.execute(
+                "DELETE FROM channel_traffic WHERE provider = ? AND channel = ?",
+                (provider, channel),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO deleted_channels"
+                " (provider, channel, deleted_at) VALUES (?, ?, ?)",
+                (provider, channel, now),
+            )
+        for provider in revived_providers:
+            conn.execute(
+                "DELETE FROM deleted_channels WHERE provider = ? AND channel = '*'",
+                (provider,),
+            )
+        for provider, channel in revived_channels:
+            conn.execute(
+                "DELETE FROM deleted_channels WHERE provider = ? AND channel = ?",
+                (provider, channel),
+            )
 
 
 class Accumulator:

@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import copy
 import os
+from collections.abc import Iterable
 from pathlib import Path
 
 import yaml
@@ -201,10 +202,11 @@ def _duplicate_key_errors(text: str) -> list[tuple[str, str, int]]:
 def export_bundle() -> dict:
     """The live setup as a bundle dict (see :func:`dumps` for the file form)."""
     store = Store.load()
+    stored_credentials = credentials.snapshot()
     providers_out: dict[str, dict] = {}
     for provider in store.provider_names():
         entry: dict = {}
-        creds = credentials.get(provider)
+        creds = stored_credentials.get(provider)
         if creds:
             entry["credential"] = dict(creds)
         entry["channels"] = {
@@ -286,6 +288,7 @@ def validate(
     strict: bool = False,
     location_lookup=None,
     check_locations: str = "all",
+    credential_snapshot: dict[str, dict] | None = None,
 ) -> dict:
     """Check the whole bundle; raise :class:`BundleError` with every problem.
 
@@ -310,6 +313,12 @@ def validate(
     The lookup is consulted lazily — a bundle with nothing to check fetches
     no location list.
     """
+    if credential_snapshot is not None:
+        stored_credentials = credential_snapshot
+    elif stored_credentials_ok:
+        stored_credentials = credentials.snapshot()
+    else:
+        stored_credentials = {}
     line_index = _line_index(text) if text else {}
     errors: list[tuple[str, str]] = []
     for dpath, reason, line in _duplicate_key_errors(text) if text else []:
@@ -331,6 +340,7 @@ def validate(
             entry,
             errors,
             stored_credentials_ok=stored_credentials_ok,
+            stored_credentials=stored_credentials,
             location_lookup=location_lookup,
             check_locations=check_locations,
         )
@@ -431,6 +441,7 @@ def _validate_provider(
     errors: list,
     *,
     stored_credentials_ok: bool,
+    stored_credentials: dict[str, dict],
     location_lookup=None,
     check_locations: str = "all",
 ) -> dict | None:
@@ -476,7 +487,7 @@ def _validate_provider(
     # Token providers must carry their credential — unless one is already
     # stored (a merge that keeps the existing token).
     if token_provider and credential is None:
-        stored = stored_credentials_ok and credentials.get(provider) is not None
+        stored = stored_credentials_ok and provider in stored_credentials
         if not stored:
             keys = ", ".join(f.key for f in auth_fields(provider)) or "token"
             errors.append(
@@ -838,8 +849,24 @@ def _validate_rulesets(
 # ---- apply ---------------------------------------------------------------------
 
 
+def _split_refs(refs: Iterable[str]) -> list[tuple[str, str]]:
+    """Split validated provider/channel references with an exact tuple type."""
+    out = []
+    for ref in refs:
+        provider, separator, channel = ref.partition("/")
+        if not separator:
+            raise ValueError(f"invalid channel reference {ref!r}")
+        out.append((provider, channel))
+    return out
+
+
 def _resolve_token_wg(
-    parsed: dict, store: Store, *, stored_credentials_ok: bool, merge: bool = True
+    parsed: dict,
+    store: Store,
+    *,
+    stored_credentials_ok: bool,
+    merge: bool = True,
+    stored_credentials: dict[str, dict] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Settle every token channel's ``wg`` (in place) before any mutation.
 
@@ -875,6 +902,11 @@ def _resolve_token_wg(
     resolved: list[str] = []
     fallback: list[str] = []
     resolvers: dict[str, WireGuardResolver | ProviderError] = {}
+    existing_by_ref = {
+        (channel.provider, channel.id): channel for channel in store.channels()
+    }
+    if stored_credentials is None:
+        stored_credentials = credentials.snapshot() if stored_credentials_ok else {}
 
     def resolver_for(
         provider: str, creds: dict | None
@@ -891,10 +923,10 @@ def _resolve_token_wg(
             continue
         creds = entry["credential"]
         if creds is None and stored_credentials_ok:
-            creds = credentials.get(provider)
+            creds = stored_credentials.get(provider)
         for cid, ch in entry["channels"].items():
             ref = f"{provider}/{cid}"
-            existing = store.get_channel(provider, cid)
+            existing = existing_by_ref.get((provider, cid))
             if (
                 existing is not None
                 and existing.wg
@@ -950,32 +982,46 @@ def apply_import(text: str, *, location_lookup=None) -> dict:
     """
     data = loads(text)
     store = Store.load()
+    stored_credentials = credentials.snapshot()
     existing_refs = {f"{c.provider}/{c.id}" for c in store.channels()}
     parsed = validate(
         data,
         text=text,
         extra_channel_refs=existing_refs,
         stored_credentials_ok=True,
+        credential_snapshot=stored_credentials,
         location_lookup=location_lookup,
         check_locations="disabled",
     )
     wg_resolved, wg_fallback = _resolve_token_wg(
-        parsed, store, stored_credentials_ok=True
+        parsed,
+        store,
+        stored_credentials_ok=True,
+        stored_credentials=stored_credentials,
     )
 
     creds_added: list[str] = []
     creds_replaced: list[str] = []
+    planned_creds: dict[str, dict] = {}
+    for provider, entry in parsed["providers"].items():
+        incoming = entry["credential"]
+        if incoming is None:
+            continue
+        old = stored_credentials.get(provider)
+        if old != incoming:
+            planned_creds[provider] = incoming
+            (creds_added if old is None else creds_replaced).append(provider)
     router = parsed["router"]
     try:
         with txn.setup_transaction("bundle import") as t:
-            for provider, entry in parsed["providers"].items():
-                if entry["credential"] is not None:
-                    old = credentials.get(provider)
-                    if old != entry["credential"]:
-                        (creds_added if old is None else creds_replaced).append(
-                            provider
-                        )
-                        credentials.set_(provider, entry["credential"])
+            if planned_creds:
+                with credentials.transaction() as current:
+                    current.update(
+                        {
+                            provider: credentials.clean(creds)
+                            for provider, creds in planned_creds.items()
+                        }
+                    )
             merged = store.merge_setup(
                 {p: e["channels"] for p, e in parsed["providers"].items()},
                 router["rulesets"] or [],
@@ -1005,11 +1051,10 @@ def apply_import(text: str, *, location_lookup=None) -> dict:
 
     # Post-commit: re-created identities lift their metrics tombstones so
     # their traffic counts again.
-    for provider in merged["providers_added"]:
-        metrics.revive_provider(provider)
-    for ref in merged["created"]:
-        provider, _, cid = ref.partition("/")
-        metrics.revive_channel(provider, cid)
+    metrics.reconcile_tombstones(
+        revived_providers=merged["providers_added"],
+        revived_channels=_split_refs(merged["created"]),
+    )
 
     return {
         "mode": "import",
@@ -1049,6 +1094,7 @@ def apply_sync(text: str, *, location_lookup=None) -> dict:
     """
     data = loads(text)
     store = Store.load()
+    stored_credentials = credentials.snapshot()
 
     # A managed channel the bundle no longer declares is about to be pruned —
     # it must not validate as a ruleset target. Bundle refs are read from the
@@ -1072,11 +1118,15 @@ def apply_sync(text: str, *, location_lookup=None) -> dict:
         text=text,
         extra_channel_refs=existing_refs,
         stored_credentials_ok=True,
+        credential_snapshot=stored_credentials,
         location_lookup=location_lookup,
         check_locations="disabled",
     )
     wg_resolved, wg_fallback = _resolve_token_wg(
-        parsed, store, stored_credentials_ok=True
+        parsed,
+        store,
+        stored_credentials_ok=True,
+        stored_credentials=stored_credentials,
     )
 
     creds_added: list[str] = []
@@ -1085,7 +1135,7 @@ def apply_sync(text: str, *, location_lookup=None) -> dict:
     for provider, entry in parsed["providers"].items():
         if entry["credential"] is None:
             continue
-        old = credentials.get(provider)
+        old = stored_credentials.get(provider)
         if old != entry["credential"]:
             planned_creds[provider] = entry["credential"]
             (creds_added if old is None else creds_replaced).append(provider)
@@ -1104,8 +1154,13 @@ def apply_sync(text: str, *, location_lookup=None) -> dict:
     try:
         if planned_creds:
             with txn.setup_transaction("bundle sync") as t:
-                for provider, creds in planned_creds.items():
-                    credentials.set_(provider, creds)
+                with credentials.transaction() as current:
+                    current.update(
+                        {
+                            provider: credentials.clean(creds)
+                            for provider, creds in planned_creds.items()
+                        }
+                    )
                 synced = commit_state()
                 t.commit()
         else:
@@ -1130,18 +1185,17 @@ def apply_sync(text: str, *, location_lookup=None) -> dict:
 
     # Post-commit best-effort work, mirroring import/restore: drop pruned
     # identities' credentials and metrics, lift tombstones on (re)created ones.
-    for provider in synced["providers_pruned"]:
-        credentials.remove(provider)
-        metrics.remove_provider(provider)
-    for ref in synced["pruned"]:
-        provider, _, cid = ref.partition("/")
-        if provider not in synced["providers_pruned"]:
-            metrics.remove_channel(provider, cid)
-    for provider in synced["providers_added"]:
-        metrics.revive_provider(provider)
-    for ref in synced["created"]:
-        provider, _, cid = ref.partition("/")
-        metrics.revive_channel(provider, cid)
+    pruned_providers = synced["providers_pruned"]
+    if pruned_providers:
+        with credentials.transaction() as current:
+            for provider in pruned_providers:
+                current.pop(provider, None)
+    metrics.reconcile_tombstones(
+        removed_providers=pruned_providers,
+        removed_channels=_split_refs(synced["pruned"]),
+        revived_providers=synced["providers_added"],
+        revived_channels=_split_refs(synced["created"]),
+    )
 
     return {
         "mode": "sync",
@@ -1273,17 +1327,12 @@ def apply_restore(text: str, *, location_lookup=None) -> dict:
     # everything the restore removed — including channels dropped from
     # *retained* providers, not just removed providers — and lift tombstones
     # for every identity the new setup contains.
-    for provider in removed_providers:
-        metrics.remove_provider(provider)
-    for ref in sorted(old_channels - new_channels):
-        provider, _, cid = ref.partition("/")
-        if provider in parsed["providers"]:  # retained provider, dropped channel
-            metrics.remove_channel(provider, cid)
-    for provider in parsed["providers"]:
-        metrics.revive_provider(provider)
-    for ref in new_channels:
-        provider, _, cid = ref.partition("/")
-        metrics.revive_channel(provider, cid)
+    metrics.reconcile_tombstones(
+        removed_providers=removed_providers,
+        removed_channels=_split_refs(sorted(old_channels - new_channels)),
+        revived_providers=list(parsed["providers"]),
+        revived_channels=_split_refs(sorted(new_channels)),
+    )
 
     return {
         "mode": "restore",

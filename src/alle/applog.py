@@ -21,6 +21,7 @@ from alle import fsio, paths
 
 
 MAX_LOG_BYTES = 5 * 1024 * 1024  # rotate a log file that grows past this
+TAIL_BLOCK_BYTES = 8192
 
 # Foreground mode (`alle run`, the container's PID 1): every log line is also
 # written to stderr so `docker logs` sees the same timeline as `alle logs`.
@@ -69,12 +70,35 @@ def log(message: str) -> None:
         pass
 
 
+def reverse_tail(path: Path, n: int, block_size: int = TAIL_BLOCK_BYTES) -> list[str]:
+    """Return the final ``n`` text lines without reading the complete file.
+
+    The path is opened once, so a concurrent rotation cannot mix generations.
+    Invalid UTF-8 is replaced just like the previous ``read_text`` behavior.
+    """
+    if n <= 0:
+        return []
+    chunks: list[bytes] = []
+    newlines = 0
+    try:
+        with open(path, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            position = stream.tell()
+            while position > 0 and newlines <= n:
+                size = min(block_size, position)
+                position -= size
+                stream.seek(position)
+                chunk = stream.read(size)
+                chunks.append(chunk)
+                newlines += chunk.count(b"\n")
+    except OSError:
+        return []
+    text = b"".join(reversed(chunks)).decode(errors="replace")
+    return text.splitlines()[-n:]
+
+
 def tail(n: int = 200) -> str:
-    p = _log_path()
-    if not p.exists():
-        return "(no logs yet)"
-    lines = p.read_text(errors="replace").splitlines()
-    return "\n".join(lines[-n:]) or "(no logs yet)"
+    return "\n".join(reverse_tail(_log_path(), n)) or "(no logs yet)"
 
 
 def follow(n: int = 50) -> None:
@@ -86,8 +110,7 @@ def follow(n: int = 50) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.touch(exist_ok=True)
     # seed with the tail
-    existing = p.read_text(errors="replace").splitlines()
-    for ln in existing[-n:]:
+    for ln in reverse_tail(p, n):
         print(ln, flush=True)
     f = open(p)
     try:

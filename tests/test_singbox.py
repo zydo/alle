@@ -43,10 +43,10 @@ def test_identical_config_with_dead_control_plane_recovers(monkeypatch):
     r.config_path.write_text(json.dumps({"inbounds": []}, indent=2))
     monkeypatch.setattr(r, "running_pid", lambda: 123)
     monkeypatch.setattr(r, "_verify_healthy", lambda: False)
-    monkeypatch.setattr(r, "check", lambda: True)
+    monkeypatch.setattr(r, "check", lambda binary=None: True)
     monkeypatch.setattr(r, "reload", lambda: False)
     restarted = []
-    monkeypatch.setattr(r, "restart", lambda: restarted.append(1))
+    monkeypatch.setattr(r, "restart", lambda binary=None: restarted.append(1))
     result = r.apply({"inbounds": []})
     assert result.outcome is singbox.ApplyOutcome.RUNTIME_FAILED
     assert restarted == [1]
@@ -56,10 +56,12 @@ def test_apply_bad_config_rolls_back_and_keeps_process_running(monkeypatch):
     r = _runner()
     r.config_path.write_text('{"good": true}')  # what the running process is on
     monkeypatch.setattr(r, "running_pid", lambda: 123)
-    monkeypatch.setattr(r, "check", lambda: False)  # sing-box rejects the new config
+    monkeypatch.setattr(
+        r, "check", lambda binary=None: False
+    )  # sing-box rejects the new config
     r._check_error = "unknown field frobnicate"
     restarted: list[int] = []
-    monkeypatch.setattr(r, "restart", lambda: restarted.append(1))
+    monkeypatch.setattr(r, "restart", lambda binary=None: restarted.append(1))
 
     result = r.apply({"bad": True})
     assert result.outcome is singbox.ApplyOutcome.REJECTED
@@ -76,9 +78,9 @@ def test_apply_rejected_config_restarts_last_known_good_when_stopped(monkeypatch
     r = _runner()
     r.config_path.write_text('{"good": true}')
     monkeypatch.setattr(r, "running_pid", lambda: None)
-    monkeypatch.setattr(r, "check", lambda: False)
+    monkeypatch.setattr(r, "check", lambda binary=None: False)
     restarted: list[int] = []
-    monkeypatch.setattr(r, "restart", lambda: restarted.append(1))
+    monkeypatch.setattr(r, "restart", lambda binary=None: restarted.append(1))
     assert _outcome(r.apply({"bad": True})) is singbox.ApplyOutcome.REJECTED
     assert restarted == [1]
     assert r.config_path.read_text() == '{"good": true}'
@@ -88,11 +90,11 @@ def test_apply_good_config_reloads_in_place(monkeypatch):
     r = _runner()
     r.config_path.write_text('{"old": true}')
     monkeypatch.setattr(r, "running_pid", lambda: 123)
-    monkeypatch.setattr(r, "check", lambda: True)
+    monkeypatch.setattr(r, "check", lambda binary=None: True)
     monkeypatch.setattr(r, "reload", lambda: True)
     monkeypatch.setattr(r, "_verify_healthy", lambda: True)
     restarted: list[int] = []
-    monkeypatch.setattr(r, "restart", lambda: restarted.append(1))
+    monkeypatch.setattr(r, "restart", lambda binary=None: restarted.append(1))
     assert _outcome(r.apply({"new": True})) is singbox.ApplyOutcome.APPLIED
     assert restarted == []  # reload, not a full restart
 
@@ -101,11 +103,11 @@ def test_apply_falls_back_to_restart_when_reload_not_deliverable(monkeypatch):
     r = _runner()
     r.config_path.write_text('{"old": true}')
     monkeypatch.setattr(r, "running_pid", lambda: 123)
-    monkeypatch.setattr(r, "check", lambda: True)
+    monkeypatch.setattr(r, "check", lambda binary=None: True)
     monkeypatch.setattr(r, "reload", lambda: False)  # SIGHUP could not be sent
     monkeypatch.setattr(r, "_verify_healthy", lambda: True)
     restarted: list[int] = []
-    monkeypatch.setattr(r, "restart", lambda: restarted.append(1))
+    monkeypatch.setattr(r, "restart", lambda binary=None: restarted.append(1))
     assert _outcome(r.apply({"new": True})) is singbox.ApplyOutcome.APPLIED
     assert restarted == [1]  # valid config, but a full restart was needed
 
@@ -116,12 +118,12 @@ def test_apply_restarts_when_reload_leaves_an_unhealthy_process(monkeypatch):
     r = _runner()
     r.config_path.write_text('{"old": true}')
     monkeypatch.setattr(r, "running_pid", lambda: 123)
-    monkeypatch.setattr(r, "check", lambda: True)
+    monkeypatch.setattr(r, "check", lambda binary=None: True)
     monkeypatch.setattr(r, "reload", lambda: True)
     healthy = iter([False, True])  # dead after reload, healthy after restart
     monkeypatch.setattr(r, "_verify_healthy", lambda: next(healthy))
     restarted: list[int] = []
-    monkeypatch.setattr(r, "restart", lambda: restarted.append(1))
+    monkeypatch.setattr(r, "restart", lambda binary=None: restarted.append(1))
     assert _outcome(r.apply({"new": True})) is singbox.ApplyOutcome.APPLIED
     assert restarted == [1]
 
@@ -129,9 +131,9 @@ def test_apply_restarts_when_reload_leaves_an_unhealthy_process(monkeypatch):
 def test_apply_reports_runtime_failure_with_the_process_error(monkeypatch):
     r = _runner()
     monkeypatch.setattr(r, "running_pid", lambda: None)
-    monkeypatch.setattr(r, "check", lambda: True)
+    monkeypatch.setattr(r, "check", lambda binary=None: True)
 
-    def boom():
+    def boom(binary=None):
         raise singbox.SingBoxRuntimeError("exited immediately: bind: in use")
 
     monkeypatch.setattr(r, "restart", boom)
@@ -143,9 +145,9 @@ def test_apply_reports_runtime_failure_with_the_process_error(monkeypatch):
 def test_apply_runtime_failure_when_control_api_never_answers(monkeypatch):
     r = _runner()
     monkeypatch.setattr(r, "running_pid", lambda: 123)
-    monkeypatch.setattr(r, "check", lambda: True)
+    monkeypatch.setattr(r, "check", lambda binary=None: True)
     monkeypatch.setattr(r, "reload", lambda: False)
-    monkeypatch.setattr(r, "restart", lambda: None)
+    monkeypatch.setattr(r, "restart", lambda binary=None: None)
     monkeypatch.setattr(r, "_verify_healthy", lambda: False)
     result = r.apply({"new": True})
     assert result.outcome is singbox.ApplyOutcome.RUNTIME_FAILED
@@ -213,7 +215,7 @@ def test_apply_tun_on_delegates_start_to_helper(monkeypatch):
     r.config_path.write_text('{"old": true}')
     fake = _FakeHelper(owning=False)
     _wire_helper(monkeypatch, fake)
-    monkeypatch.setattr(r, "check", lambda: True)
+    monkeypatch.setattr(r, "check", lambda binary=None: True)
     monkeypatch.setattr(r, "_verify_healthy", lambda: True)
     stopped: list[int] = []
     monkeypatch.setattr(r, "_stop_local", lambda: stopped.append(1))
@@ -229,7 +231,7 @@ def test_apply_tun_on_stops_a_local_sing_box_before_helper_start(monkeypatch):
     r.config_path.write_text('{"old": true}')
     fake = _FakeHelper(owning=False)
     _wire_helper(monkeypatch, fake)
-    monkeypatch.setattr(r, "check", lambda: True)
+    monkeypatch.setattr(r, "check", lambda binary=None: True)
     monkeypatch.setattr(r, "_verify_healthy", lambda: True)
     stopped: list[int] = []
     monkeypatch.setattr(r, "_stop_local", lambda: stopped.append(1))
@@ -244,7 +246,7 @@ def test_apply_tun_reload_via_helper_when_already_owned(monkeypatch):
     r.config_path.write_text('{"old": true}')
     fake = _FakeHelper(owning=True)  # helper already running sing-box
     _wire_helper(monkeypatch, fake)
-    monkeypatch.setattr(r, "check", lambda: True)
+    monkeypatch.setattr(r, "check", lambda binary=None: True)
     monkeypatch.setattr(r, "_verify_healthy", lambda: True)
     monkeypatch.setattr(r, "_control_alive", lambda: True)
     monkeypatch.setattr(singbox.proc, "read_pidfile", lambda *a, **k: None)
@@ -257,10 +259,10 @@ def test_apply_tun_off_stops_helper_then_restarts_locally(monkeypatch):
     r.config_path.write_text('{"old": true}')
     fake = _FakeHelper(owning=True)  # tun was on, helper owns root sing-box
     _wire_helper(monkeypatch, fake)
-    monkeypatch.setattr(r, "check", lambda: True)
+    monkeypatch.setattr(r, "check", lambda binary=None: True)
     monkeypatch.setattr(r, "_verify_healthy", lambda: True)
     restarted: list[int] = []
-    monkeypatch.setattr(r, "restart", lambda: restarted.append(1))
+    monkeypatch.setattr(r, "restart", lambda binary=None: restarted.append(1))
     # no local sing-box running after the helper stop
     monkeypatch.setattr(singbox.proc, "read_pidfile", lambda *a, **k: None)
     assert (
@@ -291,9 +293,11 @@ def test_running_pid_falls_to_pidfile_when_helper_idle(monkeypatch):
 def test_apply_bad_config_is_not_cold_started(monkeypatch):
     r = _runner()
     monkeypatch.setattr(r, "running_pid", lambda: None)  # nothing running
-    monkeypatch.setattr(r, "check", lambda: False)  # sing-box rejects the config
+    monkeypatch.setattr(
+        r, "check", lambda binary=None: False
+    )  # sing-box rejects the config
     restarted: list[int] = []
-    monkeypatch.setattr(r, "restart", lambda: restarted.append(1))
+    monkeypatch.setattr(r, "restart", lambda binary=None: restarted.append(1))
     assert _outcome(r.apply({"bad": True})) is singbox.ApplyOutcome.REJECTED
     assert restarted == []  # no last-known-good exists — nothing to start
 
@@ -302,12 +306,45 @@ def test_apply_cold_start_is_check_guarded(monkeypatch):
     r = _runner()
     monkeypatch.setattr(r, "running_pid", lambda: None)
     checked: list[int] = []
-    monkeypatch.setattr(r, "check", lambda: checked.append(1) or True)
+    monkeypatch.setattr(r, "check", lambda binary=None: checked.append(1) or True)
     restarted: list[int] = []
-    monkeypatch.setattr(r, "restart", lambda: restarted.append(1))
+    monkeypatch.setattr(r, "restart", lambda binary=None: restarted.append(1))
     monkeypatch.setattr(r, "_verify_healthy", lambda: True)
     assert _outcome(r.apply({"good": True})) is singbox.ApplyOutcome.APPLIED
     assert checked == [1] and restarted == [1]
+
+
+def test_changed_apply_reuses_one_verified_binary(monkeypatch):
+    r = _runner()
+    binary = Path("/verified/sing-box")
+    ensured = []
+    checked = []
+    restarted = []
+    monkeypatch.setattr(singbox, "ensure_binary", lambda: ensured.append(1) or binary)
+    monkeypatch.setattr(r, "running_pid", lambda: None)
+    monkeypatch.setattr(r, "check", lambda binary=None: checked.append(binary) or True)
+    monkeypatch.setattr(r, "restart", lambda binary=None: restarted.append(binary))
+    monkeypatch.setattr(r, "_verify_healthy", lambda: True)
+
+    assert _outcome(r.apply({"new": True})) is singbox.ApplyOutcome.APPLIED
+    assert ensured == [1]
+    assert checked == [binary]
+    assert restarted == [binary]
+
+
+def test_unchanged_healthy_apply_never_verifies_binary(monkeypatch):
+    r = _runner()
+    config = {"same": True}
+    r.config_path.write_text(json.dumps(config, indent=2))
+    monkeypatch.setattr(r, "running_pid", lambda: 123)
+    monkeypatch.setattr(r, "_verify_healthy", lambda: True)
+    monkeypatch.setattr(
+        singbox,
+        "ensure_binary",
+        lambda: pytest.fail("unchanged apply must not execute a binary"),
+    )
+
+    assert _outcome(r.apply(config)) is singbox.ApplyOutcome.UNCHANGED
 
 
 def test_verify_healthy_requires_a_live_process(monkeypatch):
@@ -336,6 +373,13 @@ def test_start_raises_when_the_process_dies_immediately(monkeypatch):
         r.start()
     assert r.running_pid() is None  # no dead PID left behind a fresh pidfile
     assert not (r.config_path.parent / "singbox.pid").exists()
+
+
+def test_logs_uses_bounded_tail_and_handles_missing_file():
+    r = _runner()
+    assert r.logs() == "(no logs)"
+    r.log_path.write_bytes(b"one\ntwo\nbad-\xff\npartial")
+    assert r.logs(2) == "bad-\ufffd\npartial"
 
 
 def test_config_is_created_private_then_locked_readonly():

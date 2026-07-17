@@ -199,3 +199,27 @@ def test_channel_tombstone_survives_a_provider_revive():
     metrics.revive_channel("nordvpn", "us_1")
     metrics.add_delta("nordvpn", "us_1", 5, 5)
     assert metrics.totals()[("nordvpn", "us_1")]["sent"] == 5
+
+
+def test_batch_tombstone_reconciliation_preserves_remove_and_revive_order():
+    metrics.add_deltas(
+        {
+            ("nordvpn", "old"): (10, 10),
+            ("protonvpn", "drop"): (20, 20),
+        }
+    )
+    metrics.reconcile_tombstones(
+        removed_providers=["nordvpn"],
+        removed_channels=[("protonvpn", "drop")],
+        revived_providers=["nordvpn"],
+        revived_channels=[("nordvpn", "new")],
+    )
+
+    assert metrics.totals() == {}
+    metrics.add_deltas(
+        {
+            ("nordvpn", "new"): (1, 2),
+            ("protonvpn", "drop"): (3, 4),
+        }
+    )
+    assert set(metrics.totals()) == {("nordvpn", "new")}

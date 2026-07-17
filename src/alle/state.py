@@ -662,15 +662,22 @@ def transaction():
     """
     with fsio.locked(_lock_path()):
         data = _read_raw(lock_held=True)
+        before = json.dumps(data, sort_keys=True, ensure_ascii=False)
         yield data
         # A compound setup operation publishes its transaction identity in the
         # same atomic state replacement as the actual mutation. Recovery can
         # therefore distinguish a crash before this write from one after it.
+        setup_id = None
         txn_module = sys.modules.get("alle.txn")
         if txn_module is not None:
             setup_id = txn_module.active_setup_id()
             if setup_id is not None:
                 data[SETUP_COMMIT_KEY] = setup_id
+        if (
+            setup_id is None
+            and json.dumps(data, sort_keys=True, ensure_ascii=False) == before
+        ):
+            return
         _write_raw(data)
 
 
@@ -733,12 +740,16 @@ class Store:
         return out
 
     def provider_channels(self, provider: str) -> list[Channel]:
-        return [c for c in self.channels() if c.provider == provider]
+        pdata = self.providers.get(provider) or {}
+        return [
+            _channel_view(provider, cid, channel)
+            for cid, channel in sorted((pdata.get("channels") or {}).items())
+        ]
 
     def get_channel(self, provider: str, cid: str) -> Channel | None:
-        return next(
-            (c for c in self.channels() if c.provider == provider and c.id == cid), None
-        )
+        pdata = self.providers.get(provider) or {}
+        channel = (pdata.get("channels") or {}).get(cid)
+        return _channel_view(provider, cid, channel) if channel is not None else None
 
     def add_channel(
         self,
