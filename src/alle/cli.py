@@ -862,6 +862,16 @@ def cmd_import(args):
     _print_bundle_summary(result)
 
 
+def cmd_gateway_init(args):
+    result = service.gateway_init()
+    print(
+        "Gateway data plane declared (fail-closed): TUN on, kill switch on.\n"
+        "Readiness turns healthy only once the interface, sing-box control, "
+        "and a viable channel all hold."
+    )
+    del result  # summary is in the printed contract; details ride the log
+
+
 def cmd_sync(args):
     result = service.setup_sync(_read_bundle_file(args.file))
     print(f"Synced {args.file} (managed desired state):")
@@ -1002,6 +1012,13 @@ def cmd_health(args):
         runtime_status = (result.get("runtime") or {}).get("singbox")
         if runtime_status and runtime_status != "ok":
             detail += f" ({runtime_status})"
+        gateway = result.get("gateway")
+        if gateway is not None:
+            detail += " gateway=" + (
+                "ready"
+                if gateway["ok"]
+                else "NOT-READY:" + ",".join(gateway["failing"])
+            )
         print(("healthy: " if result["ok"] else "unhealthy: ") + detail)
     if not result["ok"]:
         sys.exit(1)
@@ -1074,7 +1091,10 @@ def cmd_run(args):
     # a plain foreground run has no supervisor to respawn it, so it must not
     # arm the supervised self-exit-on-upgrade.
     os.environ.setdefault("ALLE_APPLIER", "1")
-    daemon.run_applier()
+    # Foreground = ownership: on SIGTERM/SIGINT this process tears down the
+    # sing-box child and TUN (a container's stop grace period covers it),
+    # unlike the supervised applier whose runtime hands over across respawns.
+    daemon.run_applier(own_children=True)
 
 
 # ---- privileged tun helper --------------------------------------------------
@@ -1504,6 +1524,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --replace: skip the confirmation prompt (required when not a TTY)",
     )
     im.set_defaults(func=cmd_import)
+    gw = sub.add_parser(
+        "gateway",
+        help="container gateway profile (ALLE_GATEWAY=1): declare the "
+        "fail-closed TUN + kill-switch data plane before readiness",
+    )
+    gw.set_defaults(func=_show_help(gw))
+    gw_sub = gw.add_subparsers(dest="gateway_command")
+    gwi = gw_sub.add_parser(
+        "init",
+        help="privilege-check and declare TUN + kill switch (the entrypoint "
+        "runs this on every gateway-container start; fails loud when root "
+        "mode, /dev/net/tun, or NET_ADMIN is missing)",
+    )
+    gwi.set_defaults(func=cmd_gateway_init)
     sy = sub.add_parser(
         "sync",
         help="converge on a bundle as the managed desired state: repeat syncs "

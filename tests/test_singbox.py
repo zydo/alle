@@ -6,6 +6,7 @@ so no real binary or subprocess is needed."""
 from __future__ import annotations
 
 import json
+import os
 import stat
 import sys
 from pathlib import Path
@@ -499,3 +500,37 @@ def test_generation_identifies_the_verified_instance(monkeypatch):
     # an unverifiable record (recycled PID / dead process) has no generation
     monkeypatch.setattr(singbox.proc, "verify", lambda r, markers: False)
     assert runner.generation() is None
+
+
+# ---- binary cache retention -----------------------------------------------------
+
+
+def test_prune_keeps_current_plus_one_rollback(tmp_path):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    current = bindir / "sing-box@1.12.0"
+    entries = ["sing-box@1.9.0", "sing-box@1.10.0", "sing-box@1.11.0"]
+    for i, name in enumerate(entries):
+        p = bindir / name
+        p.write_bytes(b"x")
+        os.utime(p, (1000 + i, 1000 + i))  # 1.11.0 is the newest previous
+        (bindir / (name + ".lock")).write_bytes(b"")
+    current.write_bytes(b"x")
+    (bindir / (current.name + ".lock")).write_bytes(b"")
+
+    singbox._prune_old_binaries(current)
+
+    kept = sorted(p.name for p in bindir.iterdir())
+    assert "sing-box@1.12.0" in kept and "sing-box@1.12.0.lock" in kept
+    assert "sing-box@1.11.0" in kept  # the intentional rollback copy
+    assert "sing-box@1.10.0" not in kept and "sing-box@1.9.0" not in kept
+    assert "sing-box@1.10.0.lock" not in kept and "sing-box@1.9.0.lock" not in kept
+
+
+def test_prune_is_a_noop_with_only_the_current_binary(tmp_path):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    current = bindir / "sing-box@1.12.0"
+    current.write_bytes(b"x")
+    singbox._prune_old_binaries(current)
+    assert [p.name for p in bindir.iterdir()] == ["sing-box@1.12.0"]

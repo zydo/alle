@@ -9,9 +9,16 @@
 #   fetched and checksum-verified on first start, into the state volume, so a
 #   container recreate never re-downloads.
 # * PID 1 is `alle run` (the daemon loop, foreground, logs on stderr);
-#   restart policies replace launchd/systemd. `docker stop` = clean SIGTERM.
-# * Runs as user `alle` (uid 1000) by default; set ALLE_RUN_AS_ROOT=1 for
-#   TUN/gateway mode (which also needs --cap-add NET_ADMIN --device /dev/net/tun).
+#   restart policies replace launchd/systemd. `docker stop` = clean SIGTERM,
+#   and foreground ownership stops/reaps sing-box + tears down TUN in the
+#   stop grace period.
+# * The image USER is 1000 (the `alle` user) — proxy mode is non-root in the
+#   image *metadata*, so `runAsNonRoot`-style admission checks can verify it.
+#   Gateway mode is the explicit root override: user: "0" + ALLE_RUN_AS_ROOT=1
+#   + ALLE_GATEWAY=1 (plus --cap-add NET_ADMIN --device /dev/net/tun).
+#   A named state volume inherits the image's alle-owned /var/lib/alle; for a
+#   bind-mounted state dir either chown it to uid 1000 or run the root
+#   override, where the entrypoint repairs only wrong-owned entries.
 
 # Base images pinned by immutable digest — same discipline as the SHA-pinned
 # CI Actions; the trailing comment records the tag each digest was resolved
@@ -50,6 +57,10 @@ ENV ALLE_CONTAINER=1 \
     ALLE_PORT_BASE=20000
 
 VOLUME /var/lib/alle
+
+# Numeric so runAsNonRoot admission checks can prove the non-root contract
+# (a named user would be rejected as unverifiable). uid 1000 = the alle user.
+USER 1000:1000
 
 # Generous start period: the first ever start downloads sing-box into the volume.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \

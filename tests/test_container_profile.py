@@ -237,6 +237,103 @@ def test_export_still_omits_ports():
     assert "port" not in out["router"]
 
 
+# ---- port provenance: only automatic ports may self-reallocate ------------------
+
+
+def test_declared_ports_are_marked_explicit_everywhere():
+    # bundle import
+    bundle.apply_import(bundle.dumps(_proton_bundle(port=23000)))
+    raw = Store.load().data["providers"]["protonvpn"]["channels"]["us_1"]
+    assert raw["port_explicit"] is True
+    # direct add / upsert with a declared port
+    store = Store.load()
+    store.add_provider("nordvpn")
+    ch = store.add_channel("nordvpn", "US", "", dict(WG), port=23500)
+    raw = Store.load().data["providers"]["nordvpn"]["channels"][ch.id]
+    assert raw["port_explicit"] is True
+    store.upsert_channel("nordvpn", "up_1", "US", "", dict(WG), port=23600)
+    raw = Store.load().data["providers"]["nordvpn"]["channels"]["up_1"]
+    assert raw["port_explicit"] is True
+    # automatic allocations carry no marker
+    auto = store.add_channel("nordvpn", "DE", "", dict(WG))
+    raw = Store.load().data["providers"]["nordvpn"]["channels"][auto.id]
+    assert "port_explicit" not in raw
+
+
+def test_stolen_explicit_port_is_held_not_moved():
+    bundle.apply_import(bundle.dumps(_proton_bundle(port=23000)))
+    store = Store.load()
+    store.add_provider("nordvpn")
+    auto = store.add_channel("nordvpn", "US", "", dict(WG))
+    moved, held = Store.load().reallocate_channel_ports({23000, auto.port})
+    # the automatic port recovers by moving; the declaration never moves
+    assert [(p, c) for p, c, _old, _new in moved] == [("nordvpn", auto.id)]
+    assert held == [("protonvpn", "us_1", 23000)]
+    after = Store.load()
+    assert after.get_channel("protonvpn", "us_1").port == 23000
+    assert after.get_channel("nordvpn", auto.id).port != auto.port
+
+
+def test_stolen_explicit_router_port_is_held():
+    data = _proton_bundle()
+    data["router"] = {"port": 24000}
+    bundle.apply_import(bundle.dumps(data))
+    moved, held = Store.load().reallocate_channel_ports({24000})
+    assert moved == [] and held == [("router", "entrypoint", 24000)]
+    assert Store.load().router["port"] == 24000
+
+
+def test_engine_degrades_held_explicit_port_and_keeps_the_rest_alive():
+    bundle.apply_import(bundle.dumps(_proton_bundle(port=23000)))
+    store = Store.load()
+    store.add_provider("nordvpn")
+    other = store.add_channel("nordvpn", "US", "", dict(WG))
+
+    eng = Engine(Store.load())
+    assert eng._recover_stolen_ports(
+        "start inbound/mixed[in-protonvpn-us_1]: listen tcp "
+        "127.0.0.1:23000: bind: address already in use"
+    )
+    config, errors = eng._build_config()
+    # the held channel is excluded (its port stays a contract, its traffic
+    # fails closed) with an actionable error; everything else still builds
+    assert "declared port 23000" in errors["protonvpn/us_1"]
+    tags = {i["tag"] for i in config["inbounds"]}
+    assert f"in-nordvpn-{other.id}" in tags
+    assert "in-protonvpn-us_1" not in tags
+
+
+def test_engine_degrades_held_router_port():
+    data = _proton_bundle()
+    data["router"] = {"port": 24000}
+    bundle.apply_import(bundle.dumps(data))
+    Store.load().ensure_router_port()
+
+    eng = Engine(Store.load())
+    assert eng._recover_stolen_ports(
+        "start inbound/mixed[in-router]: listen tcp "
+        "127.0.0.1:24000: bind: address already in use"
+    )
+    config, errors = eng._build_config()
+    assert "declared router port 24000" in errors["router/entrypoint"]
+    assert "in-router" not in {i["tag"] for i in config["inbounds"]}
+    assert Store.load().router["port"] == 24000  # the contract did not move
+
+
+def test_sync_converges_port_provenance():
+    # a bundle that drops its port: declaration demotes the port to automatic
+    # (sync converges provenance); the port number itself stays
+    bundle.apply_sync(bundle.dumps(_proton_bundle(port=23000)))
+    raw = Store.load().data["providers"]["protonvpn"]["channels"]["us_1"]
+    assert raw["port_explicit"] is True
+
+    summary = bundle.apply_sync(bundle.dumps(_proton_bundle()))
+    assert summary["channels"]["updated"] == ["protonvpn/us_1"]
+    raw = Store.load().data["providers"]["protonvpn"]["channels"]["us_1"]
+    assert "port_explicit" not in raw
+    assert raw["port"] == 23000  # the number is kept; only provenance changed
+
+
 # ---- bundle: credential indirection -------------------------------------------
 
 
@@ -406,10 +503,15 @@ def test_cmd_run_marks_the_process_and_echoes_logs(monkeypatch):
     monkeypatch.delenv("ALLE_APPLIER", raising=False)
     monkeypatch.setattr(applog, "echo_stderr", False)
     called = {}
-    monkeypatch.setattr(daemon, "run_applier", lambda: called.setdefault("ran", True))
+    monkeypatch.setattr(
+        daemon,
+        "run_applier",
+        # foreground runs own their children (SIGTERM tears down sing-box)
+        lambda own_children=False: called.setdefault("own", own_children),
+    )
     try:
         cli.main(["run"])
-        assert called["ran"]
+        assert called["own"] is True
         assert applog.echo_stderr is True
         assert os.environ.get("ALLE_APPLIER") == "1"
     finally:

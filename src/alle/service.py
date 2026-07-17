@@ -18,6 +18,7 @@ from alle import (
     credentials,
     daemon,
     daemonctl,
+    fsio,
     geo,
     locations,
     metrics,
@@ -1370,25 +1371,63 @@ def tun_mode(enable: bool | None = None) -> dict:
             "router": _router_info(Store.load()),
             "trial": _tun_trial_read(),
         }
-    # An explicit on/off is a human decision: it supersedes any pending trial
-    # (the watchdog finds no marker and does nothing).
-    _tun_trial_path().unlink(missing_ok=True)
-    return _set_tun(enable)
+    # An explicit on/off is a human decision: it supersedes any pending trial.
+    # Marker removal and the state flip happen under the trial lock, so a
+    # watchdog that already read the old marker cannot interleave its revert
+    # with (and thereby undo) this explicit decision.
+    with fsio.locked(_tun_trial_lock()):
+        _tun_trial_path().unlink(missing_ok=True)
+        return _set_tun(enable)
 
 
 def _tun_trial_path() -> Path:
     return paths.state_dir() / "tun.trial"
 
 
+def _tun_trial_lock() -> Path:
+    """One interprocess lock serialising every trial transition — arm,
+    confirm, expire, recovery, and the explicit on/off that supersedes a
+    trial. At the deadline exactly one transition wins: whichever takes the
+    lock first consumes the marker, and the loser finds nothing to act on —
+    a reported confirmation can never be reverted by a stale expiry."""
+    return paths.state_dir() / "tun-trial.lock"
+
+
 def _tun_trial_read() -> dict | None:
-    """The pending trial marker ``{nonce, deadline}``, or None."""
+    """The pending trial marker, or None. Validated: only a marker with a
+    non-empty string nonce and an integer deadline is a trial — anything
+    else reads as absent (recovery separately treats an unreadable marker
+    file as an unconfirmed trial and fails closed)."""
     import json
 
     try:
         data = json.loads(_tun_trial_path().read_text())
     except (OSError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+    if (
+        isinstance(data, dict)
+        and isinstance(data.get("nonce"), str)
+        and data["nonce"]
+        and isinstance(data.get("deadline"), int)
+        and not isinstance(data.get("deadline"), bool)
+    ):
+        return data
+    return None
+
+
+def _tun_trial_write(nonce: str, deadline: int) -> None:
+    """Publish the trial marker durably (atomic replace + fsync, 0600) so a
+    power loss or container recreation cannot leave a half-written marker —
+    the trial either exists with its nonce and deadline, or not at all."""
+    import json
+
+    fsio.write_durably(
+        _tun_trial_path(),
+        lambda f: json.dump({"nonce": nonce, "deadline": deadline}, f),
+        prefix=".tun-trial-",
+        suffix=".json",
+        mode=0o600,
+    )
 
 
 def _spawn_tun_watchdog(seconds: int, nonce: str) -> None:
@@ -1398,7 +1437,8 @@ def _spawn_tun_watchdog(seconds: int, nonce: str) -> None:
     a hung terminal, a dropped SSH session, and a daemon crash. It flips
     state.json (never a bare pkill — supervision would restart sing-box with
     the same tun config within ~2s) and lets the daemon reconcile the tun
-    away.
+    away. Duplicates are harmless: expiry is serialized on the trial lock and
+    keyed on the marker's nonce, so only the first matching watchdog acts.
     """
     daemon.spawn_detached(
         "import time\n"
@@ -1416,7 +1456,6 @@ def tun_trial_arm(seconds: int) -> dict:
     :func:`tun_trial_confirm` removes the marker within the window, the
     watchdog flips tun off in state.json and the daemon reconciles.
     """
-    import json
     import secrets
     import time
 
@@ -1425,19 +1464,26 @@ def tun_trial_arm(seconds: int) -> dict:
     _require_tun_privileges()  # fail before arming anything
     nonce = secrets.token_hex(8)
     deadline = int(time.time()) + seconds
-    _tun_trial_path().write_text(json.dumps({"nonce": nonce, "deadline": deadline}))
-    _spawn_tun_watchdog(seconds, nonce)
-    result = _set_tun(True)
+    with fsio.locked(_tun_trial_lock()):
+        _tun_trial_write(nonce, deadline)
+        _spawn_tun_watchdog(seconds, nonce)
+        result = _set_tun(True)
     applog.log(f"TUN trial armed: reverts in {seconds}s unless confirmed")
     return {**result, "trial": {"seconds": seconds, "deadline": deadline}}
 
 
 def tun_trial_confirm() -> dict:
-    """Keep tun on: remove the trial marker so the watchdog does nothing."""
-    path = _tun_trial_path()
-    if _tun_trial_read() is None:
-        raise ServiceError("no TUN trial is pending.")
-    path.unlink(missing_ok=True)
+    """Keep tun on: consume the trial marker so no expiry can act on it.
+
+    Serialized on the trial lock against the watchdog: whichever transition
+    takes the lock first consumes the marker and wins outright. Once this
+    returns, the marker is gone — a pending expiry finds nothing and no-ops,
+    so a reported confirmation can never later be reverted.
+    """
+    with fsio.locked(_tun_trial_lock()):
+        if _tun_trial_read() is None:
+            raise ServiceError("no TUN trial is pending.")
+        _tun_trial_path().unlink(missing_ok=True)
     applog.log("TUN trial confirmed: keeping TUN mode on")
     return {"confirmed": True, "router": _router_info(Store.load())}
 
@@ -1446,15 +1492,186 @@ def tun_trial_expire(nonce: str) -> bool:
     """Watchdog entry: revert TUN mode if *this* trial is still unconfirmed.
 
     The nonce guard means a stale watchdog from an earlier, superseded trial
-    can never revert a newer one. True if a revert happened.
+    can never revert a newer one. The whole read-consume-revert sequence
+    holds the trial lock, so it cannot interleave with a confirm (which would
+    otherwise report success and still lose tun) or with an explicit toggle.
+    True if a revert happened.
     """
-    data = _tun_trial_read()
-    if not data or data.get("nonce") != nonce:
-        return False
-    _tun_trial_path().unlink(missing_ok=True)
-    applog.log("TUN trial expired without confirmation: reverting TUN mode off")
-    _set_tun(False)
+    with fsio.locked(_tun_trial_lock()):
+        data = _tun_trial_read()
+        if not data or data.get("nonce") != nonce:
+            return False
+        _tun_trial_path().unlink(missing_ok=True)
+        applog.log("TUN trial expired without confirmation: reverting TUN mode off")
+        _set_tun(False)
     return True
+
+
+def tun_trial_recover() -> dict | None:
+    """Settle a trial marker left over from a previous boot — the daemon
+    calls this at startup, *before* the first reconcile applies TUN.
+
+    A watchdog is a process, so power loss, daemon death, and container
+    recreation all orphan a pending trial. Under the trial lock:
+
+    - **expired unconfirmed** (deadline passed, marker still present) — the
+      revert the watchdog never delivered happens now, before TUN is applied;
+    - **still live** — a fresh watchdog is re-armed for the *remaining*
+      interval with the same nonce (a surviving duplicate is harmless under
+      nonce serialization);
+    - **unreadable/invalid marker file** — fail closed: an unconfirmed trial
+      cannot be distinguished from a confirmed one, so TUN reverts off and
+      the user re-enables deliberately.
+
+    Returns a summary of what was done, or None when no marker existed.
+    """
+    import time
+
+    with fsio.locked(_tun_trial_lock()):
+        if not _tun_trial_path().exists():
+            return None
+        data = _tun_trial_read()
+        if data is None:
+            _tun_trial_path().unlink(missing_ok=True)
+            applog.log(
+                "TUN trial marker unreadable after restart — failing closed: "
+                "reverting TUN mode off (re-enable with: alle tun on)"
+            )
+            if Store.load().router.get("tun"):
+                _set_tun(False)
+            return {"action": "reverted_invalid"}
+        remaining = int(data["deadline"]) - int(time.time())
+        if remaining <= 0:
+            _tun_trial_path().unlink(missing_ok=True)
+            applog.log(
+                "TUN trial expired while alle was not running: reverting TUN mode off"
+            )
+            if Store.load().router.get("tun"):
+                _set_tun(False)
+            return {"action": "reverted_expired"}
+        _spawn_tun_watchdog(remaining, str(data["nonce"]))
+        applog.log(f"TUN trial re-armed after restart: {remaining}s remaining")
+        return {"action": "rearmed", "remaining": remaining}
+
+
+# ---- gateway profile (container) ---------------------------------------------
+#
+# The explicit, fail-closed startup contract for a Docker gateway container
+# (docs/docker.md): TUN + kill switch are DECLARED before readiness rather
+# than toggled by hand after dependants already started, and readiness stays
+# red until the data plane actually holds. Opt-in via ALLE_GATEWAY=1 — a host
+# install never sees any of this.
+
+
+def gateway_profile_active() -> bool:
+    """The container gateway profile is declared via ``ALLE_GATEWAY=1``."""
+    import os
+
+    return os.environ.get("ALLE_GATEWAY") == "1"
+
+
+def _dev_net_tun_exists() -> bool:
+    return Path("/dev/net/tun").exists()
+
+
+def _has_net_admin_capability() -> bool:
+    """CAP_NET_ADMIN (bit 12) in this process's effective capability set."""
+    try:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("CapEff:"):
+                return bool(int(line.split()[1], 16) & (1 << 12))
+    except (OSError, ValueError, IndexError):
+        return False
+    return False
+
+
+def _gateway_privilege_problems() -> list[str]:
+    """Every unmet privilege precondition of the gateway data plane."""
+    import os
+
+    problems: list[str] = []
+    if os.geteuid() != 0:
+        problems.append(
+            "not running as root — the v1 gateway profile needs "
+            'ALLE_RUN_AS_ROOT=1 (and user: "0" if the image user was overridden)'
+        )
+    if not _dev_net_tun_exists():
+        problems.append("/dev/net/tun is missing — add devices: [/dev/net/tun]")
+    if not _has_net_admin_capability():
+        problems.append("CAP_NET_ADMIN is missing — add cap_add: [NET_ADMIN]")
+    return problems
+
+
+def gateway_init() -> dict:
+    """Declare the gateway data-plane contract at container start, fail-closed.
+
+    Runs from the entrypoint (before the daemon becomes PID 1) when
+    ``ALLE_GATEWAY=1``. Privilege-checks first — a gateway container missing
+    root mode, ``/dev/net/tun``, or ``CAP_NET_ADMIN`` fails its start loudly
+    instead of coming up as a silently non-capturing proxy — then declares
+    **kill switch on** (the explicit fail-closed unmatched policy; never a
+    manual post-start toggle) and **TUN on**, so the first reconcile
+    activates capture with reject-unmatched already in force. Idempotent
+    across restarts. Readiness (:func:`health` under the profile) then stays
+    red until the declared data plane actually holds.
+    """
+    problems = _gateway_privilege_problems()
+    if problems:
+        raise ServiceError(
+            "gateway profile blocked (fail-closed; the container will not "
+            "come up half-capturing):\n  - " + "\n  - ".join(problems)
+        )
+    store = Store.load()
+    if not store.router.get("killswitch"):
+        store.set_killswitch(True)
+        applog.log(
+            "gateway profile: kill switch declared ON (fail-closed unmatched "
+            "policy; overrides any bundle/ad-hoc off)"
+        )
+    result = tun_mode(True)
+    applog.log("gateway profile: TUN declared before readiness")
+    return {"router": result["router"]}
+
+
+def _gateway_health() -> dict:
+    """Verify the declared gateway data plane — the readiness gate.
+
+    Process liveness is not a gateway: every condition of the fail-closed
+    contract must hold before a Compose dependant (``service_healthy``) is
+    allowed to start, so a fresh joined app can never send a direct packet
+    through a half-up gateway. Checks: privileges still granted, TUN + kill
+    switch declared, the TUN interface actually present, sing-box's control
+    API responsive, and at least one enabled channel with a passing probe (a
+    viable route — without one, unmatched-reject means a joined app has no
+    working egress at all, which is exactly what readiness must report).
+    """
+    store = Store.load()
+    router = store.router
+    failing: list[str] = []
+    if _gateway_privilege_problems():
+        failing.append("privileges")
+    if not (router.get("tun") and router.get("killswitch")):
+        failing.append("declared_policy")
+    else:
+        runtime = (daemon.daemon_info() or {}).get("runtime") or {}
+        if runtime.get("singbox") != "ok":
+            # Process/control liveness can belong to the previous accepted
+            # generation while the daemon is still applying (or has rejected)
+            # the current TUN + route state.  Only the daemon's published
+            # reconcile status proves the desired generation was accepted.
+            failing.append("runtime_generation")
+        if not _tun_interface_present():
+            failing.append("tun_interface")
+        if not singbox.Runner().control_alive():
+            failing.append("singbox_control")
+    if not any(ch.enabled and (ch.probe or {}).get("ok") for ch in store.channels()):
+        failing.append("viable_channel")
+    return {"ok": not failing, "failing": failing}
+
+
+def _tun_interface_present() -> bool:
+    """The declared TUN interface actually exists in this network namespace."""
+    return Path(f"/sys/class/net/{Engine._tun_interface_name()}").exists()
 
 
 def setup_export() -> dict:
@@ -2017,13 +2234,21 @@ def health() -> dict:
     pid = daemon.running_pid()
     singbox_up = singbox.Runner().is_running()
     info = daemon.daemon_info() if pid is not None else None
-    return {
+    result = {
         "ok": pid is not None and singbox_up,
         "daemon": pid is not None,
         "singbox": singbox_up,
         "channels": len(Store.load().channels()),
         "runtime": (info or {}).get("runtime"),
     }
+    if gateway_profile_active():
+        # Under the gateway profile, readiness is a data-plane contract, not
+        # process liveness: Compose dependants must stay unstarted until the
+        # declared fail-closed capture actually holds.
+        gateway = _gateway_health()
+        result["gateway"] = gateway
+        result["ok"] = bool(result["ok"] and gateway["ok"])
+    return result
 
 
 def metrics_totals(channel: str | None = None) -> dict:

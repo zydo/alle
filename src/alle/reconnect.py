@@ -86,6 +86,29 @@ def _probe_summary(probe: dict) -> str:
     return ", ".join(bits) if bits else "no probe detail"
 
 
+def _killswitch_diagnostic(store: Store) -> str:
+    """A targeted note when alle's own recovery egress is policy-blocked.
+
+    With TUN + kill switch on and the tunnel down, alle's provider-API calls
+    are captured and rejected like any other unmatched traffic — that is the
+    fail-closed design, deliberately kept: every narrow carve-out evaluated
+    (interpreter process-path route rules, SO_MARK exceptions) is reusable by
+    or unavailable to application traffic somewhere in the host/container
+    privilege matrix (see docs/security.md). So instead of silently lifting
+    the policy, the failure is *named*: recovery needs the tunnel back, a
+    human decision, or a reachable healthy channel.
+    """
+    router = store.router
+    if router.get("tun") and router.get("killswitch"):
+        return (
+            " (TUN + kill switch are on: with the tunnel down, alle's own "
+            "provider-API egress is blocked too — fail-closed by design; "
+            "recovery needs the tunnel back, or a deliberate policy lift: "
+            "alle routes killswitch off)"
+        )
+    return ""
+
+
 def run_pass(
     store: Store, runner: Runner, *, now: float | None = None, resolve=provider_wg
 ) -> None:
@@ -211,6 +234,7 @@ def run_pass(
                     message = (
                         f"reconnect: {ch.provider}/{ch.id} attempt "
                         f"{rc['attempts']}/{MAX_ATTEMPTS} failed — {e}"
+                        + _killswitch_diagnostic(store)
                     )
                 if store.finish_reconnect_attempt(
                     ch.provider, ch.id, fingerprint, nonce, rc

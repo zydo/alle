@@ -27,9 +27,25 @@ run_as() {
 	fi
 }
 
+# Ownership commands below take $STATE from the environment — refuse values
+# whose repair sweep could touch the system: relative paths, the root
+# directory, and system prefixes are configuration errors, not state dirs.
+case "$STATE" in
+/) fail "ALLE_HOME=/ is not a state directory" ;;
+/bin | /bin/* | /dev | /dev/* | /etc | /etc/* | /lib | /lib/* | /proc | /proc/* | /sbin | /sbin/* | /sys | /sys/* | /usr | /usr/*) \
+	fail "ALLE_HOME=$STATE points into a system prefix — mount state elsewhere (default /var/lib/alle)" ;;
+/*) ;;
+*) fail "ALLE_HOME=$STATE must be an absolute path" ;;
+esac
+
+# Started as root (the explicit override profile — the image USER is 1000):
+# initialize the state dir once and repair ONLY wrong-owned entries, instead
+# of an unconditional recursive chown on every restart. A named volume
+# already inherits the image's alle-owned /var/lib/alle, so on a healthy
+# steady state this is a read-only scan.
 if [ "$(id -u)" = "0" ] && [ "${ALLE_RUN_AS_ROOT:-}" != "1" ]; then
-	mkdir -p "$STATE"
-	chown -R alle:alle "$STATE"
+	mkdir -p -- "$STATE"
+	find "$STATE" ! -user alle -exec chown -h -- alle:alle {} +
 fi
 
 # The bundle is the desired state: `alle sync` converges the managed setup on
@@ -61,6 +77,16 @@ ALLE_BUNDLE=none for the explicit no-bundle profile"
 else
 	echo "alle-entrypoint: syncing $BUNDLE" >&2
 	run_as alle sync "$BUNDLE"
+fi
+
+# Gateway profile (ALLE_GATEWAY=1): privilege-check and declare the
+# fail-closed TUN + kill-switch data plane BEFORE the daemon starts, so
+# readiness (the HEALTHCHECK) can gate Compose dependants on the declared
+# contract instead of a manual post-start toggle. Missing root mode,
+# /dev/net/tun, or NET_ADMIN fails the start loudly right here.
+if [ "${ALLE_GATEWAY:-}" = "1" ]; then
+	echo "alle-entrypoint: gateway profile — declaring TUN + kill switch" >&2
+	run_as alle gateway init
 fi
 
 # exec (not a function call) so "$@" becomes PID 1 and receives docker stop's

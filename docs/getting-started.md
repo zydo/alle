@@ -6,10 +6,15 @@ flag; this page is the walkthrough.
 
 ## Install
 
-`alle` is a Python CLI (Python 3.10+) installed as a user-level tool — no
-sudo. Two recommended, fully explicit paths; each step is an ordinary command
-you can inspect, and the tool that installed `alle` is also the one that
-upgrades and uninstalls it.
+Choose a native user-level install or the scoped Docker deployment. Native
+TUN can capture the host; Docker never does.
+
+| Choice           | Supervisor                 | Traffic captured                          | Host-wide VPN |
+| ---------------- | -------------------------- | ----------------------------------------- | ------------- |
+| `uv`             | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
+| `pipx`           | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
+| Docker proxy hub | Docker restart policy      | Proxy-aware containers/apps               | No            |
+| Docker gateway   | Docker restart policy      | alle netns + explicitly joined containers | No            |
 
 **With [`uv`](https://docs.astral.sh/uv/getting-started/installation/):**
 
@@ -41,8 +46,25 @@ the [CLI reference](cli-reference.md#alle-daemon).
 Also works: `python -m pip install alle-proxy` into an environment you manage,
 or one-off runs with `uvx --from alle-proxy alle --help`.
 
-For servers and compose stacks there is also an official Docker image — see
-[docker.md](docker.md).
+**With Docker (proxy hub):**
+
+```bash
+docker pull ziyudo/alle:latest
+docker run -d --name alle --restart unless-stopped \
+  --mount type=volume,src=alle-state,dst=/var/lib/alle \
+  --mount type=bind,src="$PWD/bundle.yaml",dst=/etc/alle/bundle.yaml,readonly \
+  ziyudo/alle:latest
+docker exec alle alle health
+docker exec alle alle status
+```
+
+The bundle mount is optional, but when present use the long syntax so a
+missing host file fails instead of becoming a directory. Docker uses
+`alle run` plus its restart policy, not `alle daemon install`. Gateway mode
+adds an explicit root override, `NET_ADMIN`, and `/dev/net/tun` in place of
+the native helper/setcap/sudo ladder. It captures only alle's network
+namespace and containers explicitly joined to it—not the Linux or macOS host.
+See [docker.md](docker.md) and the [Compose walkthrough](docker-compose.md).
 
 After installation:
 

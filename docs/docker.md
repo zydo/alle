@@ -61,9 +61,10 @@ UI), or set `ALLE_BUNDLE=none` to declare the no-bundle profile explicitly.
 - **State lives in one volume** at `/var/lib/alle` (`ALLE_HOME`): providers,
   channels, keys, the generated sing-box config, logs, and the sing-box
   binary cache. Recreate containers freely; keep the volume.
-- **Runs as user `alle` (uid 1000)** when started as root (the default), after
-  fixing volume ownership. TUN/gateway mode needs `ALLE_RUN_AS_ROOT=1` (plus
-  the capability grants below).
+- **Proxy mode is uid 1000 in OCI metadata and at runtime.** A named volume
+  inherits the image's ownership; bind-mounted state must be owned by uid 1000.
+  The explicit gateway exception uses `user: "0"`, `ALLE_RUN_AS_ROOT=1`, and
+  the capability grants below.
 - **Trust boundary = the container network.** `ALLE_LISTEN=0.0.0.0` makes
   channel and router proxy ports reachable from the container's network —
   and *only* from it, unless you `-p`-publish a port. Publishing a proxy port
@@ -80,8 +81,10 @@ UI), or set `ALLE_BUNDLE=none` to declare the no-bundle profile explicitly.
   control, declare `port:` per channel (and `router: {port: …}`) in the
   bundle — declared ports are honored as written and collide loudly instead
   of silently moving.
-- **HEALTHCHECK** runs `alle health` (daemon + sing-box liveness, strict
-  exit code).
+- **HEALTHCHECK** runs `alle health` with a strict exit code. Proxy mode checks
+  daemon + sing-box liveness. The gateway profile additionally gates on its
+  declared fail-closed policy, accepted runtime generation, TUN interface,
+  control API, privileges, and a viable channel.
 
 ## Configuration: the bundle is the desired state
 
@@ -215,8 +218,10 @@ services:
     restart: unless-stopped
     cap_add: [NET_ADMIN]
     devices: [/dev/net/tun]
+    user: "0"
     environment:
       ALLE_RUN_AS_ROOT: "1"      # v1: tun mode runs as container root
+      ALLE_GATEWAY: "1"          # declare tun + kill switch before readiness
       NORDVPN_TOKEN: ${NORDVPN_TOKEN}
     volumes:
       - alle-state:/var/lib/alle
@@ -236,17 +241,24 @@ volumes:
   alle-state:
 ```
 
-Then enable tun once (persisted in the volume):
-
-```bash
-docker exec alle alle tun on
-```
+`ALLE_GATEWAY=1` privilege-checks and declares TUN plus the kill switch before
+PID 1 starts. Health stays red—and `service_healthy` dependants stay
+unstarted—until the interface, accepted route generation, control plane, and
+a viable channel all hold. Activation failure therefore never opens a direct
+egress window.
 
 Notes for joined containers (`network_mode: service:alle`): they share alle's
 network identity, so any port they serve must be published on the **alle**
 service, and they resolve DNS through alle's hijack like everything else in
 the netns. With `killswitch` on and the tunnel down, joined containers have
 no network — that is the point.
+
+This is namespace-scoped routing, not host takeover. A host application can
+instead use a deliberately `-p`-published router/channel proxy port, but that
+is per-app proxying and the proxy is unauthenticated: publish only to a trusted
+network. Host networking, host PID, `--privileged`, and mounted host-network
+control paths are unsupported; they enlarge the trust and failure boundary,
+and Docker Desktop's Linux VM cannot transparently take over macOS routing.
 
 ## Invariant (why none of this affects your host install)
 

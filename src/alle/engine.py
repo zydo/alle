@@ -109,6 +109,12 @@ class Engine:
         self.store = store
         self.runner = singbox.Runner()
         self._errors: dict[str, str] = {}  # "<provider>/<id>" -> build error
+        # Explicitly declared ports found taken by another process during
+        # stolen-port recovery. A declaration is a contract with outside
+        # configuration (compose wiring, firewalls), so it is never moved;
+        # instead its owner is excluded from the retried config and reported
+        # degraded until the user frees the port or changes the declaration.
+        self._held_ports: set[int] = set()
 
     # ---- config assembly ---------------------------------------------------
     def _endpoint(self, ch: Channel) -> dict:
@@ -146,6 +152,14 @@ class Engine:
                 # provider — the whole point), no route rule. Not an error;
                 # a rule that somehow still targets it compiles fail-closed
                 # to reject via the `built` miss below.
+                continue
+            if ch.port in self._held_ports:
+                errors[f"{ch.provider}/{ch.id}"] = (
+                    f"declared port {ch.port} is in use by another process — "
+                    "a port: declaration is a contract and is never moved; "
+                    "free the port (then restart alle) or change the "
+                    "declaration"
+                )
                 continue
             try:
                 endpoint = self._endpoint(ch)
@@ -273,6 +287,13 @@ class Engine:
         """
         router = self.store.router
         port = int(router.get("port") or 0)
+        if port and port in self._held_ports:
+            errors["router/entrypoint"] = (
+                f"declared router port {port} is in use by another process — "
+                "a declared port is never moved; free the port (then restart "
+                "alle) or change the router: port: declaration"
+            )
+            port = 0  # the entrypoint stays down (degraded), everything else lives
         tun = bool(router.get("tun"))
         entry: list[str] = []
         if port:  # 0 until the first daemon start allocates it
@@ -426,12 +447,27 @@ class Engine:
                 "process — regenerated the endpoint"
             )
             recovered = True
-        for provider, cid, old, new in self.store.reallocate_channel_ports(stolen):
+        moved, held = self.store.reallocate_channel_ports(stolen)
+        for provider, cid, old, new in moved:
             applog.log(
                 f"reconcile: port {old} of {provider}/{cid} was taken by "
                 f"another process — moved to :{new}"
             )
             recovered = True
+        for provider, cid, port in held:
+            owner = (
+                "the router entrypoint"
+                if (provider, cid) == ("router", "entrypoint")
+                else f"channel {provider}/{cid}"
+            )
+            applog.log(
+                f"reconcile: declared port {port} of {owner} is taken by "
+                "another process — declarations are a contract and never "
+                "move; the owner stays degraded until you free the port or "
+                "change the declaration"
+            )
+            self._held_ports.add(port)
+            recovered = True  # the retry rebuilds without the held owner
         return recovered
 
     # ---- probing -----------------------------------------------------------

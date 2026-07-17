@@ -366,6 +366,96 @@ def test_tun_trial_window_is_bounded(rooted):
     assert Store.load().router["tun"] is False  # nothing armed, nothing flipped
 
 
+def test_tun_trial_marker_is_durable_and_private(rooted):
+    import stat
+
+    service.tun_trial_arm(60)
+    path = service._tun_trial_path()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    marker = service._tun_trial_read()
+    assert marker is not None and marker["nonce"] and marker["deadline"] > 0
+
+
+def test_tun_trial_read_rejects_invalid_markers(rooted):
+    path = service._tun_trial_path()
+    for bad in (
+        '"a string"',
+        '{"nonce": "", "deadline": 99}',
+        '{"nonce": "x"}',
+        '{"nonce": "x", "deadline": "soon"}',
+        "not json",
+    ):
+        path.write_text(bad)
+        assert service._tun_trial_read() is None
+
+
+def test_tun_trial_expire_after_confirm_never_reverts(rooted):
+    # the serialized transition order: confirm consumed the marker, so the
+    # expiry that raced it acts on nothing — a reported confirmation stays
+    service.tun_trial_arm(60)
+    marker = service._tun_trial_read()
+    assert marker is not None
+    assert service.tun_trial_confirm()["confirmed"] is True
+    assert service.tun_trial_expire(marker["nonce"]) is False
+    assert Store.load().router["tun"] is True
+    # ...and after an expiry wins, a confirm reports no pending trial
+    service.tun_trial_arm(60)
+    marker = service._tun_trial_read()
+    assert service.tun_trial_expire(marker["nonce"]) is True
+    with pytest.raises(service.ServiceError, match="no TUN trial is pending"):
+        service.tun_trial_confirm()
+
+
+# ---- TUN trial recovery (power loss / container recreation) --------------------
+
+
+def test_tun_trial_recover_reverts_an_expired_trial(rooted):
+    import time
+
+    service.tun_trial_arm(60)
+    assert Store.load().router["tun"] is True
+    # simulate a restart after the deadline: the watchdog process is gone
+    service._tun_trial_write("orphan", int(time.time()) - 5)
+    result = service.tun_trial_recover()
+    assert result == {"action": "reverted_expired"}
+    assert Store.load().router["tun"] is False
+    assert service._tun_trial_read() is None
+
+
+def test_tun_trial_recover_rearms_a_live_trial(rooted):
+    import time
+
+    service.tun_trial_arm(60)
+    marker = service._tun_trial_read()
+    rooted.clear()  # forget the original arm's watchdog
+    remaining = marker["deadline"] - int(time.time())
+    result = service.tun_trial_recover()
+    assert result is not None and result["action"] == "rearmed"
+    assert 0 < result["remaining"] <= remaining
+    # a fresh watchdog for the remaining window, same nonce (duplicates of
+    # the dead one would be harmless under nonce serialization anyway)
+    assert rooted == [(result["remaining"], marker["nonce"])]
+    assert Store.load().router["tun"] is True  # a live trial keeps tun on
+
+
+def test_tun_trial_recover_fails_closed_on_unreadable_marker(rooted):
+    service.tun_trial_arm(60)
+    service._tun_trial_path().write_text("{corrupt")
+    result = service.tun_trial_recover()
+    assert result == {"action": "reverted_invalid"}
+    assert Store.load().router["tun"] is False  # unknown trial -> off
+    assert not service._tun_trial_path().exists()
+
+
+def test_tun_trial_recover_is_a_noop_without_a_marker(rooted):
+    assert service.tun_trial_recover() is None
+    # a confirmed (marker-less) tun stays on across restarts
+    service.tun_trial_arm(60)
+    service.tun_trial_confirm()
+    assert service.tun_trial_recover() is None
+    assert Store.load().router["tun"] is True
+
+
 # ---- restrict-only removal integrity ----------------------------------------------
 
 

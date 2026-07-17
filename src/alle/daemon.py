@@ -262,8 +262,18 @@ def stop() -> bool:
     return True
 
 
-def run_applier() -> None:
-    """Blocking reconcile + probe loop. Run inside the detached daemon process."""
+def run_applier(own_children: bool = False) -> None:
+    """Blocking reconcile + probe loop. Run inside the detached daemon process.
+
+    ``own_children`` marks **foreground ownership** (``alle run`` — a
+    container's PID 1, or an interactive terminal run): a stop signal then
+    means the whole deployment is going away, so shutdown stops and reaps
+    sing-box (whose exit tears down the TUN interface and its routes) and
+    removes the runtime identity files, all within Docker's stop grace
+    period. The supervised path (``alle applier`` under launchd/systemd) and
+    the upgrade self-exit keep the default: sing-box is deliberately left
+    running for adoption by the respawned daemon, so a daemon restart never
+    blips live tunnels."""
     # Imported here so the lightweight lifecycle helpers above don't pull the
     # engine/sing-box stack into every CLI invocation.
     import fcntl
@@ -305,6 +315,17 @@ def run_applier() -> None:
         txn.recover()
     except Exception as e:  # noqa: BLE001 — recovery is best-effort at startup
         applog.log(f"setup-journal recovery failed: {e}")
+
+    try:
+        # A TUN trial orphaned by power loss / container recreation must be
+        # settled BEFORE the first reconcile applies TUN: an expired
+        # unconfirmed trial reverts off now, a live one re-arms its watchdog
+        # for the remaining interval.
+        from alle import service
+
+        service.tun_trial_recover()
+    except Exception as e:  # noqa: BLE001 — recovery is best-effort at startup
+        applog.log(f"tun trial recovery failed: {e}")
 
     try:
         # The always-on router entrypoint's contract port: allocated once, here,
@@ -541,6 +562,22 @@ def run_applier() -> None:
         worker = metrics_worker.get("thread")
         if worker is not None and worker.is_alive():
             worker.join(timeout=3)
+        if own_children and stop_flag["stop"]:
+            # Foreground ownership + stop signal: tear down the owned data
+            # plane. Stopping sing-box (SIGTERM, escalating to SIGKILL, then
+            # reaped) removes its TUN interface and routes with it — within
+            # Docker's stop grace period. Only the signal path: the upgrade
+            # self-exit and the supervised applier (own_children unset) leave
+            # sing-box running for deliberate adoption by the respawned
+            # daemon. The daemon's own identity files go below either way.
+            try:
+                singbox.Runner().stop()
+                applog.log(
+                    "foreground shutdown: sing-box stopped and reaped, "
+                    "data plane released"
+                )
+            except Exception as e:  # noqa: BLE001 — best-effort in the grace period
+                applog.log(f"foreground shutdown: sing-box stop failed: {e}")
         if running_pid() == os.getpid():
             _pid_path().unlink(missing_ok=True)
             _info_path().unlink(missing_ok=True)

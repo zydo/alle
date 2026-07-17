@@ -758,6 +758,7 @@ class Store:
             prov = _require_provider(data, provider)
             chans = prov.setdefault("channels", {})
             cid = _next_id(set(chans), country, city)
+            explicit = bool(port)
             port = _claim_port(data, port) if port else _next_free_port(data)
             chans[cid] = {
                 "country": country,
@@ -766,6 +767,8 @@ class Store:
                 "wg": wg,
                 "probe": {},
             }
+            if explicit:  # a declaration is a contract: only automatic ports
+                chans[cid]["port_explicit"] = True  # may ever self-reallocate
             if label:
                 chans[cid]["label"] = label
             committed = _channel_view(provider, cid, chans[cid])
@@ -815,6 +818,8 @@ class Store:
                     "wg": wg,
                     "probe": {},
                 }
+                if port:
+                    chans[cid]["port_explicit"] = True
                 if label:
                     chans[cid]["label"] = label
             else:
@@ -825,6 +830,8 @@ class Store:
                 )
                 if port and port != int(ch.get("port") or 0):
                     ch["port"] = _claim_port(data, port, exclude=(provider, cid))
+                if port:
+                    ch["port_explicit"] = True
                 if label:  # explicit override; otherwise the existing label stays
                     ch["label"] = label
                 # A re-import is human intervention: forget any reconnect give-up
@@ -1030,35 +1037,51 @@ class Store:
 
     def reallocate_channel_ports(
         self, ports: set[int]
-    ) -> list[tuple[str, str, int, int]]:
-        """Move every channel sitting on one of ``ports`` to a fresh free port.
+    ) -> tuple[list[tuple[str, str, int, int]], list[tuple[str, str, int]]]:
+        """Move every *automatically allocated* port in ``ports`` to a fresh
+        free one; report explicitly declared ones as held.
 
         Recovery for a port another process grabbed between allocation and a
         sing-box (re)start — sing-box treats one unbindable inbound as fatal,
         so a single stolen port would otherwise take every channel down.
-        Returns ``(provider, cid, old_port, new_port)`` per moved channel; the
-        state change moves the config signature, so the daemon re-reconciles.
-        The router entrypoint's contract port is covered too (reported as
-        ``("router", "entrypoint", …)``) — stolen-port recovery is the one
-        sanctioned way that port may ever change.
+        Provenance decides what may move: an **automatic** port is a local
+        allocation nothing external depends on, so it recovers by choosing a
+        replacement; an **explicit** port (``port_explicit`` — declared in a
+        bundle or on add/upsert) is a contract with outside configuration
+        (compose wiring, firewalls), so it is never moved — the caller keeps
+        that channel degraded and names the required user action instead.
+
+        Returns ``(moved, held)``: ``(provider, cid, old_port, new_port)``
+        per moved channel and ``(provider, cid, port)`` per held declaration.
+        The router entrypoint's contract port is covered on both sides
+        (reported as ``("router", "entrypoint", …)``); moving an automatic
+        port changes the config signature, so the daemon re-reconciles.
         """
-        moved = []
+        moved: list[tuple[str, str, int, int]] = []
+        held: list[tuple[str, str, int]] = []
         with transaction() as data:
             for provider, prov in sorted((data.get("providers") or {}).items()):
                 for cid, ch in sorted((prov.get("channels") or {}).items()):
                     old = int(ch.get("port") or 0)
-                    if old in ports:
-                        new = _next_free_port(data)
-                        ch["port"] = new
-                        moved.append((provider, cid, old, new))
+                    if old not in ports:
+                        continue
+                    if ch.get("port_explicit"):
+                        held.append((provider, cid, old))
+                        continue
+                    new = _next_free_port(data)
+                    ch["port"] = new
+                    moved.append((provider, cid, old, new))
             router = data.setdefault("router", _router_blank())
             old = int(router.get("port") or 0)
             if old and old in ports:
-                new = _next_free_port(data)
-                router["port"] = new
-                moved.append(("router", "entrypoint", old, new))
+                if router.get("port_explicit"):
+                    held.append(("router", "entrypoint", old))
+                else:
+                    new = _next_free_port(data)
+                    router["port"] = new
+                    moved.append(("router", "entrypoint", old, new))
         self.data = _read_raw()
-        return moved
+        return moved, held
 
     # ---- router entrypoint + rules -------------------------------------------
     @property
@@ -1459,6 +1482,8 @@ class Store:
                             else _next_free_port(data),
                             "wg": wg,
                         }
+                        if port:
+                            entry["port_explicit"] = True
                         if enabled:
                             entry["probe"] = {}
                         else:
@@ -1473,7 +1498,13 @@ class Store:
                         and ch.get("wg") == wg
                         and ch.get("enabled", True) == enabled
                         and (not label or ch.get("label", "") == label)
-                        and (not port or int(ch.get("port") or 0) == port)
+                        and (
+                            not port
+                            or (
+                                int(ch.get("port") or 0) == port
+                                and bool(ch.get("port_explicit"))
+                            )
+                        )
                     ):
                         summary["unchanged"].append(ref)
                     else:
@@ -1484,6 +1515,8 @@ class Store:
                             ch["port"] = _claim_port(
                                 data, port, exclude=(provider, cid)
                             )
+                        if port:
+                            ch["port_explicit"] = True
                         if label:  # explicit override; otherwise keep the old
                             ch["label"] = label
                         if enabled:
@@ -1527,6 +1560,8 @@ class Store:
                 if router_port in used:
                     raise PortInUseError(router_port, used[router_port])
                 router["port"] = router_port
+            if router_port:
+                router["port_explicit"] = True
         self.data = _read_raw()
         return summary
 
@@ -1739,6 +1774,8 @@ class Store:
                             "wg": wg,
                             "managed": True,
                         }
+                        if port:
+                            entry["port_explicit"] = True
                         if enabled:
                             entry["probe"] = {}
                         else:
@@ -1754,6 +1791,10 @@ class Store:
                         and ch.get("enabled", True) == enabled
                         and (not label or ch.get("label", "") == label)
                         and (not port or int(ch.get("port") or 0) == port)
+                        # provenance converges with the declaration: a port the
+                        # bundle declares must be marked explicit, one it no
+                        # longer declares must drop back to automatic
+                        and bool(port) == bool(ch.get("port_explicit"))
                     ):
                         summary["unchanged"].append(ref)
                     else:
@@ -1766,6 +1807,10 @@ class Store:
                             ch["port"] = _claim_port(
                                 data, port, exclude=(provider, cid)
                             )
+                        if port:
+                            ch["port_explicit"] = True
+                        else:
+                            ch.pop("port_explicit", None)
                         if label:
                             ch["label"] = label
                         if enabled:
@@ -1794,6 +1839,10 @@ class Store:
                 if router_port in used:
                     raise PortInUseError(router_port, used[router_port])
                 router["port"] = router_port
+            if router_port:
+                router["port_explicit"] = True
+            else:  # bundle no longer declares it: back to automatic
+                router.pop("port_explicit", None)
         self.data = _read_raw()
         return summary
 
@@ -1837,6 +1886,8 @@ class Store:
                         # None (a disabled resolve-at-enable spec) stores as {}
                         "wg": spec["wg"] or {},
                     }
+                    if int(spec.get("port") or 0):
+                        entry["port_explicit"] = True
                     # tri-state: only an explicit false disables; unstated
                     # reads enabled on a whole-setup replace
                     if spec.get("enabled") is not False:
@@ -1851,6 +1902,7 @@ class Store:
             router = data.setdefault("router", _router_blank())
             if router_port:
                 router["port"] = router_port
+                router["port_explicit"] = True
             # Declared ports are already in place, so the duplicate check and
             # the fresh allocations below both see them. Ports for new
             # identities are allocated only after the old channel set is gone,

@@ -228,7 +228,35 @@ def _install(key: str, expected: str, target: Path) -> Path:
                 if os.path.exists(staged):
                     os.unlink(staged)
     print(f"alle: verified sing-box {SINGBOX_VERSION} ({key}).", file=sys.stderr)
+    _prune_old_binaries(target)
     return target
+
+
+def _prune_old_binaries(target: Path) -> None:
+    """Bound the ``sing-box@*`` cache once the current verified binary is live.
+
+    Runs under the install lock, only after ``target`` verified. Retention
+    policy: the current binary plus the most recently used previous version
+    (a deliberate rollback copy — a downgraded pin must not need the network);
+    everything older is removed, along with its stale lock file, so upgrades
+    can never grow the state volume without bound. Best-effort: a prune
+    failure never fails the install that just succeeded.
+    """
+    try:
+        old = [
+            p
+            for p in target.parent.glob("sing-box@*")
+            if p != target and not p.name.endswith(".lock")
+        ]
+        old.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for stale in old[1:]:  # keep the newest previous version as rollback
+            stale.unlink(missing_ok=True)
+            stale.with_name(stale.name + ".lock").unlink(missing_ok=True)
+            print(
+                f"alle: pruned old sing-box cache entry {stale.name}", file=sys.stderr
+            )
+    except OSError:
+        pass
 
 
 # ---- Clash API endpoint ------------------------------------------------------
@@ -539,6 +567,11 @@ class Runner:
             if time.monotonic() - t0 >= deadline:
                 return False
             time.sleep(0.1)
+
+    def control_alive(self) -> bool:
+        """Public control-plane readiness: the running instance's Clash API
+        answers on its generated endpoint (used by gateway health)."""
+        return self.is_running() and self._control_alive()
 
     def _control_alive(self) -> bool:
         api = clash_api()

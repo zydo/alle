@@ -94,19 +94,33 @@ the [runbook](docs/tun-runbook.md).
 | Desktop companion | Planned                                                                                                          |
 | Distribution      | PyPI CLI package and Docker Hub image; native installers planned                                                 |
 
-## Install
+## Install or deploy
 
-`alle` is a Python CLI (Python 3.10+) installed as a user-level tool — no sudo:
+| Choice              | Supervisor                 | Traffic captured                          | Host-wide VPN |
+| ------------------- | -------------------------- | ----------------------------------------- | ------------- |
+| `uv` host install   | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
+| `pipx` host install | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
+| Docker proxy hub    | Docker restart policy      | Proxy-aware containers/apps               | No            |
+| Docker gateway      | Docker restart policy      | alle netns + explicitly joined containers | No            |
 
 ```bash
-uv tool install alle-proxy      # or: pipx install alle-proxy
-alle daemon install             # optional: start at login, survive reboots
+# Host, with uv
+uv tool install alle-proxy
+
+# Host, with pipx
+pipx install alle-proxy
+
+# Docker proxy hub (persistent state; no proxy/API ports published)
+docker run -d --name alle --restart unless-stopped \
+  --mount type=volume,src=alle-state,dst=/var/lib/alle \
+  ziyudo/alle:latest
+docker exec alle alle status
 ```
 
-For servers and compose stacks, the same core runs as a Docker container
-(`docker pull ziyudo/alle`). Install details, alternatives, and uninstall:
-[Getting started](docs/getting-started.md); the container:
-[docs/docker.md](docs/docker.md).
+Host installs may add `alle daemon install` to start at login. Containers use
+`alle run` as PID 1 and Docker's restart policy instead; those lifecycle
+commands are intentionally inapplicable there. See [Getting started](docs/getting-started.md)
+for all three choices and [Docker](docs/docker.md) for bundles and gateway scope.
 
 ## Quick start
 

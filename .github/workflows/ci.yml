@@ -143,6 +143,15 @@ jobs:
           # the image profile widens binds to the container network
           docker exec alle-ci sh -c 'grep -o "\"listen\": \"[^\"]*\"" /var/lib/alle/singbox.json | sort -u' \
             | grep -q '0.0.0.0'
+      # The OCI user contract: proxy mode is non-root in the image metadata
+      # (numeric, so runAsNonRoot-style admission checks can verify it), PID 1
+      # actually runs as uid 1000, and the named state volume is usable by it.
+      - name: Assert the OCI user contract
+        run: |
+          [ "$(docker inspect -f '{{.Config.User}}' alle:ci)" = "1000:1000" ]
+          [ "$(docker exec alle-ci id -u)" = "1000" ]
+          [ "$(docker exec alle-ci sh -c "awk '/^Uid:/{print \$2}' /proc/1/status")" = "1000" ]
+          docker exec alle-ci sh -c 'test -O /var/lib/alle/state.json'
       # Startup sync must be idempotent: a restart re-syncs the same bundle
       # and must neither duplicate its ruleset nor change the managed setup.
       - name: Assert restart idempotency (startup sync)
@@ -195,6 +204,45 @@ jobs:
           assert data.get("proof"), data
           print("control API contract ok")
           EOF
+      # The gateway profile declares its fail-closed contract before
+      # readiness: TUN + kill switch land in state at boot, privileges are
+      # verified, and health stays red (no viable channel — dummy keys never
+      # probe healthy) so Compose dependants would stay unstarted.
+      - name: Assert the gateway profile declares fail-closed readiness
+        run: |
+          docker run -d --name alle-ci-gw --network alle-ci-net \
+            --user 0:0 --cap-add NET_ADMIN --device /dev/net/tun \
+            -e ALLE_RUN_AS_ROOT=1 -e ALLE_GATEWAY=1 \
+            --mount type=volume,src=alle-ci-gw-state,dst=/var/lib/alle \
+            alle:ci
+          # gateway health stays deliberately red here (no viable channel),
+          # so wait only for process liveness before asserting the contract
+          for i in $(seq 1 30); do
+            docker exec alle-ci-gw alle health --json 2>/dev/null \
+              | grep -q '"singbox": true' && break
+            sleep 5
+          done
+          docker exec alle-ci-gw alle health --json | tee /tmp/gw-health.json || true
+          python3 - <<'EOF'
+          import json
+          h = json.load(open("/tmp/gw-health.json"))
+          gw = h["gateway"]
+          assert h["ok"] is False, h                     # readiness gates dependants
+          assert "viable_channel" in gw["failing"], gw   # the honest reason
+          assert "declared_policy" not in gw["failing"], gw  # tun+ks were declared
+          assert "privileges" not in gw["failing"], gw
+          print("gateway readiness contract ok:", gw)
+          EOF
+          docker logs alle-ci-gw 2>&1 | grep -q "gateway profile — declaring TUN"
+      # Foreground ownership: docker stop's SIGTERM tears down sing-box (and
+      # with it the TUN) inside the grace period and exits cleanly.
+      - name: Assert clean SIGTERM teardown
+        run: |
+          docker stop alle-ci
+          [ "$(docker inspect -f '{{.State.ExitCode}}' alle-ci)" = "0" ]
+          docker logs alle-ci 2>&1 | grep -q "data plane released"
       - name: Container logs on failure
         if: failure()
-        run: docker logs alle-ci || true
+        run: |
+          docker logs alle-ci || true
+          docker logs alle-ci-gw || true

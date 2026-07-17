@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcap2-bin \
     procps \
     python3 \
+    python3-pycountry \
     python3-yaml \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home sandbox

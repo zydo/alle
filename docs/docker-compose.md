@@ -159,8 +159,10 @@ services:
     restart: unless-stopped
     cap_add: [NET_ADMIN]               # tun creation + route table (this netns only)
     devices: [/dev/net/tun]
+    user: "0"
     environment:
       ALLE_RUN_AS_ROOT: "1"            # v1: tun mode runs as container root
+      ALLE_GATEWAY: "1"                # tun + kill switch before readiness
       NORDVPN_TOKEN: ${NORDVPN_TOKEN}
     volumes:
       - alle-state:/var/lib/alle
@@ -183,19 +185,19 @@ volumes:
   alle-state:
 ```
 
-Enable tun once (the flag persists in the volume across restarts):
+Start the stack; the gateway profile declares TUN plus the kill switch before
+readiness, so `app` remains unstarted until the data plane and a viable channel
+are healthy:
 
 ```bash
 docker compose up -d
-docker compose exec alle alle tun on
-docker compose exec app sh -c 'wget -qO- https://api.ipify.org'   # → VPN exit IP
+docker compose exec app sh -c 'wget -qO- https://api.ipify.org'   # VPN exit IP
 ```
 
 Gateway-mode facts worth knowing:
 
-- **Kill-switch**: `docker compose exec alle alle routes killswitch on` makes
-  unmatched traffic *block* instead of going direct — joined containers go
-  dark if the tunnel drops, rather than leaking your real egress.
+- **Kill-switch**: gateway startup forces it on. Joined containers go dark if
+  the tunnel drops rather than leaking real egress.
 - **Joined containers share alle's network identity**: `network_mode:
   service:alle` means no `ports:` of their own (declare them on the alle
   service), no separate hostname, and DNS answered through alle's hijack.
@@ -330,7 +332,7 @@ Rules of the road:
 | `environment variable 'NORDVPN_TOKEN' is not set` in logs | The variable didn't reach the container: set it in `.env`, the shell, or switch to compose secrets + `token_file`.                                                                                                                                                                                                        |
 | A service can't reach `alle:20010`                        | The port isn't declared in the bundle (allocation order gave it another number — `docker compose exec alle alle status` shows actual ports), the channel is **disabled** (a disabled channel's port isn't listening — `alle channels ls` shows STATUS; enable it), or the two services are on different compose networks. |
 | First start is slow / unhealthy briefly                   | The one-time sing-box download into the volume. The health check's start period covers it; it never repeats while the volume lives.                                                                                                                                                                                       |
-| `alle tun on` says it needs privileges                    | The gateway variant's three grants are missing: `cap_add: [NET_ADMIN]`, `devices: [/dev/net/tun]`, `ALLE_RUN_AS_ROOT=1` — then recreate the container.                                                                                                                                                                    |
+| Gateway startup says it needs privileges                  | The gateway variant's grants are incomplete: `user: "0"`, `cap_add: [NET_ADMIN]`, `devices: [/dev/net/tun]`, `ALLE_RUN_AS_ROOT=1`, and `ALLE_GATEWAY=1` — then recreate the container.                                                                                                                                    |
 | Joined container has no network at all                    | Kill-switch doing its job while the tunnel is down (check `docker compose exec alle alle status`), or the alle container restarted and the joined service needs its compose-driven restart to finish.                                                                                                                     |
 | Web UI unreachable from the host                          | By design: the browser UI stays loopback-only inside the container. Use `docker exec` for management — or expose the REST API (Bearer-authenticated) with `ALLE_API_LISTEN` + `ALLE_API_SECRET` for programmatic control; see the sibling-container variant above.                                                        |
 | API returns 403 `bad host` from a sibling                 | `ALLE_API_LISTEN` isn't set (the server is loopback-only, and only loopback Hosts pass) or the request carries no/wrong Bearer — on a network bind a foreign `Host` is only accepted alongside a valid `Authorization: Bearer` header.                                                                                    |

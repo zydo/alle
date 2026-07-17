@@ -667,9 +667,9 @@ def test_lan_direct_defaults_on_and_round_trips():
 
 def test_reallocate_covers_the_router_port():
     store = Store.load()
-    port = store.ensure_router_port()
-    moved = store.reallocate_channel_ports({port})
-    assert len(moved) == 1
+    port = store.ensure_router_port()  # auto-allocated -> may move
+    moved, held = store.reallocate_channel_ports({port})
+    assert held == [] and len(moved) == 1
     who, what, old, new = moved[0]
     assert (who, what, old) == ("router", "entrypoint", port)
     assert new != port and Store.load().router["port"] == new

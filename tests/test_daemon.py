@@ -473,3 +473,93 @@ def test_stop_routes_through_service_manager(monkeypatch):
     monkeypatch.setattr(daemon.os, "kill", lambda *a: killed.append(a))
     assert daemon.stop() is True  # was running
     assert stopped == [1] and killed == []  # supervisor stopped it, no raw signals
+
+
+# ---- foreground ownership: SIGTERM tears down the owned data plane -------------
+
+
+def _run_owned(monkeypatch, *, own_children, signal_stop, sleeps=2):
+    """Drive run_applier to exit either via a real SIGTERM (the container stop
+    path) or a KeyboardInterrupt (an abnormal break, not a stop signal)."""
+    import os
+
+    from alle import singbox
+
+    stopped = []
+
+    class _Eng:
+        def __init__(self, store):
+            self.store = store
+
+        def reconcile(self):
+            return {}
+
+    class _Runner:
+        def is_running(self):
+            return True
+
+        def connections(self):
+            return []
+
+        def generation(self):
+            return None
+
+        def stop(self):
+            stopped.append(True)
+
+    class _Clock:
+        def __init__(self):
+            self.t = 0.0
+            self.sleeps = 0
+
+        def monotonic(self):
+            return self.t
+
+        def time(self):
+            return 1000.0
+
+        def sleep(self, _s):
+            self.sleeps += 1
+            self.t += 2.1
+            if self.sleeps >= sleeps:
+                if signal_stop:
+                    os.kill(os.getpid(), signal.SIGTERM)
+                else:
+                    raise KeyboardInterrupt
+
+    monkeypatch.setattr("alle.engine.Engine", _Eng)
+    monkeypatch.setattr(singbox, "Runner", _Runner)
+    monkeypatch.setattr(daemon, "time", _Clock())
+    old = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT)
+    try:
+        if signal_stop:
+            daemon.run_applier(own_children=own_children)
+        else:
+            with pytest.raises(KeyboardInterrupt):
+                daemon.run_applier(own_children=own_children)
+    finally:
+        signal.signal(signal.SIGTERM, old[0])
+        signal.signal(signal.SIGINT, old[1])
+    return stopped
+
+
+def test_foreground_sigterm_stops_singbox_and_removes_identity(monkeypatch):
+    stopped = _run_owned(monkeypatch, own_children=True, signal_stop=True)
+    assert stopped == [True]  # sing-box stopped + reaped (TUN goes with it)
+    assert not daemon._info_path().exists()  # runtime identity removed
+    assert not daemon._pid_path().exists()
+    assert "data plane released" in _read_log()
+
+
+def test_supervised_sigterm_leaves_singbox_for_adoption(monkeypatch):
+    # the launchd/systemd applier: a daemon restart must never blip tunnels —
+    # the respawned daemon deliberately adopts the running sing-box
+    stopped = _run_owned(monkeypatch, own_children=False, signal_stop=True)
+    assert stopped == []
+
+
+def test_foreground_abnormal_break_does_not_tear_down(monkeypatch):
+    # only the stop signal means "the deployment is going away"; an abnormal
+    # break leaves the data plane for the respawn (restart policy) to adopt
+    stopped = _run_owned(monkeypatch, own_children=True, signal_stop=False)
+    assert stopped == []
