@@ -91,6 +91,17 @@ def test_publish_runs_full_suite_before_building():
         assert needle in runs, f"publish build job missing gate step: {needle!r}"
 
 
+def test_publish_reproducibility_build_stays_outside_checkout():
+    """The comparison build must not become an input to its own sdist."""
+    wf = _load("publish.yml")
+    runs = " ".join(
+        step.get("run", "") for step in wf["jobs"]["build"].get("steps", [])
+    )
+    assert "$RUNNER_TEMP/dist-offline" in runs
+    assert '--out-dir "$offline_dir"' in runs
+    assert "--out-dir dist-offline" not in runs
+
+
 def test_ci_gates_match_the_publish_gate():
     """Every static gate publish runs must also run in CI — format drift or a
     packaging regression must fail pre-merge, not the release job at tag time."""

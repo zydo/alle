@@ -63,11 +63,12 @@ jobs:
       - name: Build sdist + wheel
         run: |
           uv build --no-build-isolation
-          mkdir dist-offline
-          UV_OFFLINE=1 uv build --no-build-isolation --out-dir dist-offline
-          sha256sum dist/* dist-offline/*
+          offline_dir="$RUNNER_TEMP/dist-offline"
+          mkdir "$offline_dir"
+          UV_OFFLINE=1 uv build --no-build-isolation --out-dir "$offline_dir"
+          sha256sum dist/* "$offline_dir"/*
           for artifact in dist/*; do
-            cmp "$artifact" "dist-offline/$(basename "$artifact")"
+            cmp "$artifact" "$offline_dir/$(basename "$artifact")"
           done
 
       - name: Package smoke (metadata + README render)
