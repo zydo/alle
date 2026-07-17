@@ -1076,6 +1076,10 @@ sudo alle helper uninstall   # remove it (tun on then needs the sudo fallback)
 - `install`/`uninstall` need root (they write `/Library/LaunchDaemons/`); run
   them under `sudo`. `status` does not. The helper serves the user behind
   `sudo` (`SUDO_UID`) over a unix socket, authenticated by peer uid.
+- One helper serves one `ALLE_HOME` — the one active at install time
+  (`alle helper status` reports it as `serves_home`). Commands from a
+  different home are refused; to move the helper to another home, rerun
+  `sudo alle helper install` from that home.
 - The helper is deliberately minimal — it only launches/stops/reloads sing-box
   against the fixed config path; it never parses state or sees credentials. See
   `docs/security.md` for the trust model.

@@ -1325,24 +1325,36 @@ def _require_tun_privileges() -> None:
 
     The check runs *before* touching state, so an unprivileged daemon without
     any of these is never left chasing a config it can only fail to apply.
+
+    A helper that answers but serves a *different* ``ALLE_HOME`` (or predates
+    home scoping) grants nothing; when no other privilege path applies, the
+    error names that helper specifically — "install the helper" would be
+    wrong advice when one is already installed but bound elsewhere.
     """
     import os
 
     from alle import helper as helper_mod
 
-    if helper_mod.reachable():
+    hp = helper_mod.probe()
+    if hp["state"] == "ok":
         return  # the helper will run sing-box as root — no privilege needed here
     if _singbox_has_net_admin():
         return  # Linux setcap path — no root anywhere required
     info = daemon.daemon_info()
-    if info is None:
-        if os.geteuid() == 0:
-            return
-        raise ServiceError(
-            "TUN needs the privileged helper (or root) — " + _tun_privilege_hint()
-        )
-    if _process_uid(int(info["pid"])) == 0:
+    if info is None and os.geteuid() == 0:
         return
+    if info is not None and _process_uid(int(info["pid"])) == 0:
+        return
+    if hp["state"] == "foreign":
+        raise ServiceError(
+            f"the privileged helper serves a different ALLE_HOME ({hp['home']}); "
+            f"rebind it from this home:  {helper_mod.REINSTALL_HINT}"
+        )
+    if hp["state"] == "stale":
+        raise ServiceError(
+            "the installed privileged helper predates home scoping — "
+            f"reinstall it:  {helper_mod.REINSTALL_HINT}"
+        )
     raise ServiceError(
         "TUN needs the privileged helper (or root) — " + _tun_privilege_hint()
     )

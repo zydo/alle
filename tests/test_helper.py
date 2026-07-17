@@ -53,9 +53,15 @@ def fake_runner(monkeypatch):
     return r
 
 
+# The one home the test helper serves; foreign-home tests use a different one.
+SERVED_HOME = "/homes/served"
+FOREIGN_HOME = "/homes/foreign"
+
+
 @pytest.fixture
 def live_helper(monkeypatch, tmp_path, fake_runner):
-    """A helper daemon bound to a temp socket, serving uid 1000, in a thread."""
+    """A helper daemon bound to a temp socket, serving uid 1000 and
+    SERVED_HOME, in a thread."""
     # macOS caps AF_UNIX paths at ~104 chars; pytest's tmp_path is far longer,
     # so bind under /tmp with a short unique name.
     sock_path = f"/tmp/alle-test-{os.getpid()}.sock"
@@ -86,7 +92,7 @@ def live_helper(monkeypatch, tmp_path, fake_runner):
                 req = helper._recv(conn)
                 if req is None:
                     continue
-                helper._send(conn, helper._handle(req, 1000))
+                helper._send(conn, helper._handle(req, 1000, SERVED_HOME))
             finally:
                 conn.close()
 
@@ -103,15 +109,22 @@ def live_helper(monkeypatch, tmp_path, fake_runner):
         pass
 
 
-def _ask(sock_path, cmd, **fields):
+def _ask(sock_path, cmd, home=SERVED_HOME, **fields):
     """Send one command as uid 1000 (we can't spoof uid over AF_UNIX, so these
     tests connect as the real test process uid — the fixture's serve() accepts
     any uid in {0, 1000} OR, to make the suite portable, we relax: actually we
-    accept the real uid too). See conftest note below."""
+    accept the real uid too). See conftest note below.
+
+    ``home`` defaults to the served home (the well-behaved v2 client);
+    pass another value for foreign-home tests or None to omit the field
+    entirely (a pre-v2 client)."""
+    payload = {"cmd": cmd, **fields}
+    if home is not None:
+        payload["home"] = home
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
         s.settimeout(5)
         s.connect(sock_path)
-        s.sendall((json.dumps({"cmd": cmd, **fields}) + "\n").encode())
+        s.sendall((json.dumps(payload) + "\n").encode())
         buf = b""
         while b"\n" not in buf:
             chunk = s.recv(65536)
@@ -138,7 +151,7 @@ def test_ping_reports_protocol_version_and_served_uid(live_helper):
 
 def test_status_reports_not_running_initially(live_helper, fake_runner):
     res = _ask(live_helper, "status")
-    assert res == {"ok": True, "running": False}
+    assert res == {"ok": True, "running": False, "home": SERVED_HOME}
 
 
 def test_start_then_status_reports_running_with_generation(live_helper, fake_runner):
@@ -181,6 +194,117 @@ def test_authorization_rejects_non_installing_uid(monkeypatch, fake_runner):
     allowed = 1000
     uid = 1001
     assert not (uid == 0 or uid == allowed)
+
+
+# ---- home scoping: the helper serves exactly one ALLE_HOME ------------------
+
+
+def test_ping_reports_served_home(live_helper):
+    res = _ask(live_helper, "ping")
+    assert res["ok"] and res["home"] == SERVED_HOME
+
+
+def test_foreign_home_is_refused_for_every_state_command(live_helper, fake_runner):
+    fake_runner.running = True
+    for cmd in ("status", "start", "stop", "reload"):
+        res = _ask(live_helper, cmd, home=FOREIGN_HOME)
+        assert res["ok"] is False, cmd
+        assert res.get("foreign_home") is True, cmd
+        assert SERVED_HOME in res["error"], cmd
+        assert "sudo alle helper install" in res["error"], cmd
+    # and none of the refused commands touched the runner
+    assert fake_runner.calls == []
+
+
+def test_missing_home_field_is_refused(live_helper, fake_runner):
+    # A pre-v2 client sends no home — it must be refused, not silently served.
+    res = _ask(live_helper, "stop", home=None)
+    assert res["ok"] is False and res.get("foreign_home") is True
+    assert fake_runner.calls == []
+
+
+def test_matching_home_responses_carry_the_served_home(live_helper, fake_runner):
+    assert _ask(live_helper, "start")["home"] == SERVED_HOME
+    assert _ask(live_helper, "status")["home"] == SERVED_HOME
+    assert _ask(live_helper, "reload")["home"] == SERVED_HOME
+    assert _ask(live_helper, "stop")["home"] == SERVED_HOME
+    assert fake_runner.calls == ["start", "reload", "stop"]
+
+
+def test_client_request_injects_caller_home(live_helper, monkeypatch):
+    from alle import paths
+
+    monkeypatch.setattr(paths, "state_dir", lambda: SERVED_HOME)
+    monkeypatch.setenv("ALLE_HELPER_SOCKET", live_helper)
+    res = helper.request("status")
+    assert res["ok"] is True  # served: the client sent the matching home
+    monkeypatch.setattr(paths, "state_dir", lambda: FOREIGN_HOME)
+    res = helper.request("status")
+    assert res["ok"] is False and res.get("foreign_home") is True
+
+
+def test_probe_classifies_absent_stale_foreign_and_ok(live_helper, monkeypatch):
+    from alle import paths
+
+    monkeypatch.setenv("ALLE_HELPER_SOCKET", live_helper)
+    monkeypatch.setattr(paths, "state_dir", lambda: SERVED_HOME)
+    assert helper.probe()["state"] == "ok"
+    monkeypatch.setattr(paths, "state_dir", lambda: FOREIGN_HOME)
+    p = helper.probe()
+    assert p["state"] == "foreign" and p["home"] == SERVED_HOME
+    # stale: a pre-v2 helper answers ping without a home
+    monkeypatch.setattr(
+        helper, "ping", lambda: {"ok": True, "version": 1, "allowed_uid": 1000}
+    )
+    assert helper.probe()["state"] == "stale"
+    # absent: nothing answers
+    monkeypatch.setattr(helper, "ping", lambda: {"ok": False, "error": "unreachable"})
+    assert helper.probe()["state"] == "absent"
+
+
+def test_runner_never_adopts_without_a_matching_home(monkeypatch, tmp_path):
+    """The regression at the heart of the bug: a status response that does not
+    prove the served home (pre-v2 helper, or any foreign response) must not be
+    adopted as our own sing-box."""
+    from alle import paths, singbox
+
+    monkeypatch.setattr(paths, "state_dir", lambda: tmp_path)
+    r = singbox.Runner()
+    # pre-v2 helper shape: ok+running but no home — must NOT be adopted
+    monkeypatch.setattr(
+        helper, "request", lambda cmd, **kw: {"ok": True, "running": True, "pid": 4242}
+    )
+    assert r._helper_owned_pid() is None
+    # v2 foreign helper: refused upstream — must not be adopted
+    monkeypatch.setattr(
+        helper,
+        "request",
+        lambda cmd, **kw: {"ok": False, "error": "foreign", "foreign_home": True},
+    )
+    assert r._helper_owned_pid() is None
+    # v2 same-home helper: adopted
+    monkeypatch.setattr(
+        helper,
+        "request",
+        lambda cmd, **kw: {"ok": True, "running": True, "pid": 4242, "home": str(tmp_path)},
+    )
+    assert r._helper_owned_pid() == 4242
+
+
+def test_tun_privilege_gate_names_foreign_and_stale_helpers(monkeypatch):
+    from alle import service
+
+    monkeypatch.setattr(service, "_singbox_has_net_admin", lambda: False)
+    monkeypatch.setattr(service.daemon, "daemon_info", lambda: None)
+    monkeypatch.setattr(os, "geteuid", lambda: 501)
+    monkeypatch.setattr(
+        helper, "probe", lambda: {"state": "foreign", "home": FOREIGN_HOME, "version": 2}
+    )
+    with pytest.raises(service.ServiceError, match="different ALLE_HOME"):
+        service._require_tun_privileges()
+    monkeypatch.setattr(helper, "probe", lambda: {"state": "stale", "version": 1})
+    with pytest.raises(service.ServiceError, match="sudo alle helper install"):
+        service._require_tun_privileges()
 
 
 # ---- install machinery: plist generation + root/sudo guards ----------------

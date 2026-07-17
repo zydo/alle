@@ -160,18 +160,28 @@ def test_apply_runtime_failure_when_control_api_never_answers(monkeypatch):
 class _FakeHelper:
     """A stateful stand-in for alle.helper: tracks whether it 'owns' sing-box
     and records the request stream, so apply's on/off transitions can be
-    asserted without a real helper or sing-box."""
+    asserted without a real helper or sing-box. Speaks the v2 (home-scoped)
+    protocol, serving whatever home the test process currently uses."""
 
     def __init__(self, *, owning=False):
         self._owning = owning
         self._generation = 1
         self.calls: list[str] = []
 
+    def _home(self) -> str:
+        from alle import paths
+
+        return str(paths.state_dir())
+
     def reachable(self) -> bool:
         return True
 
+    def probe(self) -> dict:
+        return {"state": "ok", "home": self._home(), "version": 2}
+
     def request(self, cmd, **fields):
         self.calls.append(cmd)
+        home = self._home()
         if cmd == "status":
             return (
                 {
@@ -179,22 +189,24 @@ class _FakeHelper:
                     "running": True,
                     "pid": 777,
                     "generation": f"777/s{self._generation}",
+                    "home": home,
                 }
                 if self._owning
-                else {"ok": True, "running": False}
+                else {"ok": True, "running": False, "home": home}
             )
         if cmd == "start":
             self._owning = True
-            return {"ok": True, "pid": 777, "generation": "777/s"}
+            return {"ok": True, "pid": 777, "generation": "777/s", "home": home}
         if cmd == "stop":
             self._owning = False
-            return {"ok": True}
+            return {"ok": True, "home": home}
         if cmd == "reload":
             self._generation += 1
             return {
                 "ok": True,
                 "reloaded": True,
                 "generation": f"777/s{self._generation}",
+                "home": home,
             }
         return {"ok": False, "error": "nope"}
 
@@ -203,6 +215,7 @@ def _wire_helper(monkeypatch, fake):
     import alle.helper as helper_mod
 
     monkeypatch.setattr(helper_mod, "reachable", fake.reachable)
+    monkeypatch.setattr(helper_mod, "probe", fake.probe)
     monkeypatch.setattr(helper_mod, "request", fake.request)
 
 

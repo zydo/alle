@@ -26,8 +26,17 @@ authenticates each connection by the peer's effective uid against the single
 installing user recorded at install time (``ALLE_HELPER_ALLOWED_UID``). No
 shared secret: the kernel vouches for the peer. A non-installing user is
 refused before any command runs. The protocol carries **no paths from the
-client** — the binary, config, and log paths are all fixed at install time, so
-the helper can never be talked into ``exec``\\ ing an arbitrary binary as root.
+client** that the helper acts on — the binary, config, and log paths are all
+fixed at install time, so the helper can never be talked into ``exec``\\ ing an
+arbitrary binary as root.
+
+One helper serves one machine — and exactly one ``ALLE_HOME``. The socket is
+machine-wide but state is per-home, so every state command carries the
+caller's home and the helper refuses a mismatch the same way it refuses a
+foreign uid (the home is compared, never used as a path). Without this, a
+second/fresh ``ALLE_HOME`` on a helper-installed machine would adopt — and
+could stop — the real install's root sing-box. Rebinding to another home is
+one explicit step: ``sudo alle helper install`` from that home.
 
 Linux does not use this helper: ``setcap cap_net_admin`` on the pinned binary
 is the one-time-install equivalent there (no root process at all).
@@ -41,15 +50,20 @@ import socket
 import struct
 from typing import NoReturn
 
-from alle import applog, singbox
+from alle import applog, paths, singbox
 
 # /var/run is root-owned (not world-writable like /tmp), so a non-root process
 # cannot pre-create the socket path and spoof the helper before it binds.
 HELPER_SOCKET_DEFAULT = "/var/run/alle.helper.sock"
 HELPER_LABEL = "com.github.zydo.alle.helper"
 # Bumped when the protocol/behaviour changes; the client can refuse to delegate
-# to an older helper it cannot trust.
-PROTOCOL_VERSION = 1
+# to an older helper it cannot trust. v2: every state command carries the
+# caller's ALLE_HOME and the helper serves exactly one home.
+PROTOCOL_VERSION = 2
+
+# The one-step fix for every home/version mismatch: reinstalling rebinds the
+# helper to the invoking user's home and restarts it on current code.
+REINSTALL_HINT = "sudo alle helper install"
 
 # macOS LOCAL_PEERCRED: retrieve the connected peer's effective uid. SOL_LOCAL
 # is 0 and LOCAL_PEERCRED is 0x001 on Darwin; the returned xucred begins
@@ -91,31 +105,46 @@ def _runner() -> singbox.Runner:
     return singbox.Runner(local_only=True)
 
 
-def _handle(req: dict, allowed_uid: int) -> dict:
+def _handle(req: dict, allowed_uid: int, served_home: str) -> dict:
     """One request → one response. Authorized by the caller (peer uid checked
-    in the accept loop before this runs)."""
+    in the accept loop before this runs); every state command must additionally
+    name the served home — state is per-``ALLE_HOME`` and this helper serves
+    exactly one."""
     cmd = req.get("cmd")
-    runner = _runner()
     if cmd == "ping":
-        return _ok(version=PROTOCOL_VERSION, allowed_uid=allowed_uid)
+        return _ok(version=PROTOCOL_VERSION, allowed_uid=allowed_uid, home=served_home)
+    caller_home = req.get("home")
+    if caller_home != served_home:
+        # A different home (or a pre-v2 client sending none): refuse before
+        # touching the runner, exactly like a foreign uid. The home is only
+        # compared — never used as a path.
+        return _err(
+            f"this helper serves ALLE_HOME {served_home}, not "
+            f"{caller_home or '(unspecified)'}; to rebind it run from that "
+            f"home: {REINSTALL_HINT}",
+            foreign_home=True,
+        )
+    runner = _runner()
     if cmd == "status":
         pid = runner.running_pid()
         if pid is None:
-            return _ok(running=False)
-        return _ok(running=True, pid=pid, generation=runner.generation())
+            return _ok(running=False, home=served_home)
+        return _ok(
+            running=True, pid=pid, generation=runner.generation(), home=served_home
+        )
     if cmd == "start":
         try:
             runner.start()
         except singbox.SingBoxError as e:
             return _err(str(e))
         pid = runner.running_pid()
-        return _ok(pid=pid, generation=runner.generation())
+        return _ok(pid=pid, generation=runner.generation(), home=served_home)
     if cmd == "stop":
         runner.stop()
-        return _ok()
+        return _ok(home=served_home)
     if cmd == "reload":
         reloaded = runner.reload()
-        return _ok(reloaded=reloaded, generation=runner.generation())
+        return _ok(reloaded=reloaded, generation=runner.generation(), home=served_home)
     return _err(f"unknown command {cmd!r}")
 
 
@@ -152,10 +181,13 @@ def run_daemon() -> int:
         applog.log(f"alle-helper: {e}")
         return 2
     socket_path = os.environ.get("ALLE_HELPER_SOCKET", HELPER_SOCKET_DEFAULT)
-    _serve_forever(socket_path, allowed_uid)
+    # The served home: resolved once from the install plist's ALLE_HOME (via
+    # the normal paths machinery), then enforced on every state command.
+    served_home = str(paths.state_dir())
+    _serve_forever(socket_path, allowed_uid, served_home)
 
 
-def _serve_forever(socket_path: str, allowed_uid: int) -> NoReturn:
+def _serve_forever(socket_path: str, allowed_uid: int, served_home: str) -> NoReturn:
     """Bind the socket and handle requests until the process is killed."""
     # Clean any stale socket (a previous helper that crashed mid-bind). Root
     # owns /var/run so this unlink cannot hit a file we did not create.
@@ -171,7 +203,10 @@ def _serve_forever(socket_path: str, allowed_uid: int) -> NoReturn:
     os.chmod(socket_path, 0o660)
     os.chown(socket_path, allowed_uid, os.getgid())
     srv.listen(8)
-    applog.log(f"alle-helper: listening on {socket_path} (serving uid {allowed_uid})")
+    applog.log(
+        f"alle-helper: listening on {socket_path} "
+        f"(serving uid {allowed_uid}, home {served_home})"
+    )
 
     while True:
         try:
@@ -193,7 +228,7 @@ def _serve_forever(socket_path: str, allowed_uid: int) -> NoReturn:
             req = _recv(conn)
             if req is None:
                 continue
-            _send(conn, _handle(req, allowed_uid))
+            _send(conn, _handle(req, allowed_uid, served_home))
         except Exception as e:  # noqa: BLE001 — a bad request must not kill the daemon
             try:
                 _send(conn, _err(f"helper error: {e}"))
@@ -236,20 +271,28 @@ def _recv(conn: socket.socket) -> dict | None:
 # ---- client (user side) ------------------------------------------------------
 
 
+def _client_home() -> str:
+    """This process's ALLE_HOME, as sent with every state command."""
+    return str(paths.state_dir())
+
+
 def request(cmd: str, **fields) -> dict:
     """Send one command to the helper and return its response dict.
 
-    ``{"ok": False, "error": ...}`` when the helper is unreachable (not
-    installed, not running, or the socket absent) — callers treat that as
-    "no helper; fall back to the local path." Never raises on a missing
-    helper: the delegation gate depends on a clean downgrade.
+    Every request carries this process's home; the helper refuses a mismatch
+    (see the module docstring). ``{"ok": False, "error": ...}`` when the
+    helper is unreachable (not installed, not running, or the socket absent) —
+    callers treat that as "no helper; fall back to the local path." Never
+    raises on a missing helper: the delegation gate depends on a clean
+    downgrade.
     """
     path = os.environ.get("ALLE_HELPER_SOCKET", HELPER_SOCKET_DEFAULT)
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(5.0)
             s.connect(path)
-            s.sendall((json.dumps({"cmd": cmd, **fields}) + "\n").encode())
+            payload = {"cmd": cmd, "home": _client_home(), **fields}
+            s.sendall((json.dumps(payload) + "\n").encode())
             buf = b""
             while b"\n" not in buf:
                 chunk = s.recv(65536)
@@ -264,10 +307,42 @@ def request(cmd: str, **fields) -> dict:
 
 
 def ping() -> dict:
-    """Is the helper alive and which uid does it serve? Cheaper than status."""
+    """Is the helper alive, and which uid + home does it serve?"""
     return request("ping")
 
 
 def reachable() -> bool:
-    """True iff a helper is installed, running, and answers ping."""
+    """True iff a helper is installed, running, and answers ping — regardless
+    of which home it serves. Delegation gates must use :func:`probe` /
+    :func:`serves_this_home` instead; this remains only for liveness display
+    (``alle helper status``)."""
     return bool(ping().get("ok"))
+
+
+def probe() -> dict:
+    """Classify the installed helper relative to this process's ``ALLE_HOME``.
+
+    ``state`` is one of:
+
+    - ``"absent"``  — nothing answers the socket;
+    - ``"stale"``   — a pre-v2 helper answered: it cannot prove which home it
+      serves, so it must be treated as unusable until reinstalled;
+    - ``"foreign"`` — a v2 helper serving a *different* home (``home`` carries
+      whose);
+    - ``"ok"``      — a v2 helper serving this home.
+    """
+    res = ping()
+    if not res.get("ok"):
+        return {"state": "absent"}
+    version = int(res.get("version") or 0)
+    if version < 2 or "home" not in res:
+        return {"state": "stale", "version": version}
+    home = res["home"]
+    if home != _client_home():
+        return {"state": "foreign", "home": home, "version": version}
+    return {"state": "ok", "home": home, "version": version}
+
+
+def serves_this_home() -> bool:
+    """True iff a helper is live AND provably serves this ``ALLE_HOME``."""
+    return probe()["state"] == "ok"

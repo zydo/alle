@@ -417,13 +417,23 @@ class Runner:
         mode (the helper itself using a Runner — it must not ask itself).
         When it returns a pid, the live sing-box is root-owned and *only* the
         helper can signal it — callers must delegate start/stop/reload.
+
+        Adoption additionally requires the response to *prove* the served
+        home matches ours: a pre-v2 helper (no ``home`` in the response) or a
+        foreign-home helper (refused upstream) is never adopted — otherwise a
+        second ``ALLE_HOME`` would claim, and could stop, another install's
+        root sing-box.
         """
         if self.local_only:
             return None
-        from alle import helper
+        from alle import helper, paths
 
         st = helper.request("status")
-        if st.get("ok") and st.get("running"):
+        if (
+            st.get("ok")
+            and st.get("running")
+            and st.get("home") == str(paths.state_dir())
+        ):
             pid = st.get("pid")
             if isinstance(pid, int):
                 return pid
@@ -476,19 +486,45 @@ class Runner:
         # Privileged-helper delegation: a tun inbound needs root, which only
         # the helper can provide; and once the helper owns sing-box only it
         # can signal the process. So the apply path forks on whether this
-        # config wants the helper AND the helper is installed. Everything
-        # else — config write, `check`, the Clash-API health probe — is
-        # uid-agnostic and stays local either way.
+        # config wants the helper AND a helper provably serving *this* home
+        # is live. Everything else — config write, `check`, the Clash-API
+        # health probe — is uid-agnostic and stays local either way.
         from alle import helper as helper_mod
 
         has_tun = any(i.get("type") == "tun" for i in config.get("inbounds", []))
-        want_helper = has_tun and not self.local_only and helper_mod.reachable()
-        if want_helper:
+        hp = {"state": "absent"} if self.local_only else helper_mod.probe()
+        if has_tun and hp["state"] == "ok":
             return self._apply_via_helper(helper_mod)
+        if has_tun and hp["state"] in ("stale", "foreign"):
+            # Fail closed rather than run tun without the helper: the installed
+            # helper exists but cannot be used from here.
+            if hp["state"] == "foreign":
+                detail = (
+                    f"the privileged helper serves a different ALLE_HOME "
+                    f"({hp['home']}); rebind it from this home: "
+                    f"{helper_mod.REINSTALL_HINT}"
+                )
+            else:
+                detail = (
+                    "the installed privileged helper predates home scoping "
+                    f"and cannot be trusted; reinstall it: {helper_mod.REINSTALL_HINT}"
+                )
+            return ApplyResult(ApplyOutcome.RUNTIME_FAILED, detail)
         # Turning tun off while the helper owns a root sing-box: stop it via
         # the helper (the user can't signal it), then proceed locally.
         if self._ownership()[0] == "helper":
             helper_mod.request("stop")
+        elif hp["state"] == "stale":
+            # A pre-v2 helper may be running OUR root sing-box (it cannot
+            # prove whose) — starting a local one would fight it over the
+            # same ports. Fail closed until the helper is reinstalled.
+            st = helper_mod.request("status")
+            if st.get("ok") and st.get("running"):
+                return ApplyResult(
+                    ApplyOutcome.RUNTIME_FAILED,
+                    "a pre-home-scoping privileged helper is running sing-box; "
+                    f"reinstall it before continuing: {helper_mod.REINSTALL_HINT}",
+                )
         if self.is_running():
             if self.reload() and self._verify_healthy():  # noqa: S1066
                 return ApplyResult(ApplyOutcome.APPLIED)  # reloaded in place

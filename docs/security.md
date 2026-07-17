@@ -91,11 +91,15 @@ table is privileged. Two things change while TUN mode is on:
   process (sing-box itself, exactly as on the sudo path), but the helper adds
   no second consumer of them. The helper authenticates each request by the
   peer's kernel-verified uid (macOS `LOCAL_PEERCRED`), accepting only the one
-  installing user (and root); the protocol carries no file paths, so the
-  helper cannot be talked into `exec`-ing an arbitrary binary as root. Install
-  it only on a machine you trust the installing user on: anyone who can drive
-  the helper can ask root to run the pinned sing-box (nothing more, but that
-  is a real root-backed action).
+  installing user (and root); it also serves exactly **one `ALLE_HOME`** — the
+  one recorded at install — and refuses state commands from any other home the
+  same way it refuses a foreign uid, so a second alle home on the machine can
+  neither adopt nor stop the served install's sing-box (rebind with
+  `sudo alle helper install` from the other home). The protocol carries no
+  file paths the helper acts on, so it cannot be talked into `exec`-ing an
+  arbitrary binary as root. Install it only on a machine you trust the
+  installing user on: anyone who can drive the helper can ask root to run the
+  pinned sing-box (nothing more, but that is a real root-backed action).
 - **The tun captures every local user's traffic, not just yours.** A system
   route table is machine-wide: once alle owns the default route, traffic from
   **other OS users** on the machine is pulled through your channels and your

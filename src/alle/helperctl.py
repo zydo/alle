@@ -149,6 +149,7 @@ def install() -> dict:
         "reinstalled": already,
         "plist": LAUNCHD_PLIST,
         "serves_uid": uid,
+        "serves_home": alle_home,
         "socket": HELPER_SOCKET_DEFAULT,
     }
 
@@ -182,6 +183,16 @@ def is_loaded() -> bool:
     return _run(["launchctl", "list", HELPER_LABEL]).returncode == 0
 
 
+def _installed_home() -> str | None:
+    """The ALLE_HOME the installed plist binds the helper to, or None."""
+    try:
+        pl = plistlib.loads(Path(LAUNCHD_PLIST).read_bytes())
+        home = pl.get("EnvironmentVariables", {}).get("ALLE_HOME")
+        return str(home) if home else None
+    except (OSError, plistlib.InvalidFileException):
+        return None
+
+
 def status() -> dict:
     if not _supported():
         return {"supported": False, "platform": platform.system()}
@@ -195,4 +206,7 @@ def status() -> dict:
         # — a root-free ping — as the authoritative liveness signal.
         "plist": LAUNCHD_PLIST if installed else None,
         "socket": HELPER_SOCKET_DEFAULT if installed else None,
+        # Which home the installed helper serves (from the plist, so it works
+        # even when the helper is not answering). One helper, one home.
+        "serves_home": _installed_home() if installed else None,
     }
