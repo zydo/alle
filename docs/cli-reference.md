@@ -583,7 +583,12 @@ human rendering is a summary.
 ## `alle start` / `stop` / `restart`
 
 - **`alle start`** — start the runtime (background reconciler + sing-box). Runs idle if
-  no channels are configured yet.
+  no channels are configured yet. The first interactive start offers — exactly
+  once, ever — to register the login service (`alle daemon install`); answer
+  `n` and it never asks again. `--yes` installs the service without asking,
+  `--no-service` declines without asking (both suited to scripts). The offer
+  is skipped entirely on non-TTY runs, in containers, under a supervisor, or
+  when a unit already exists — and a skipped offer is not a spent one.
 - **`alle stop`** — stop the runtime. Channels stay in config; only the processes stop.
 - **`alle restart`** — stop then start. Also clears any `Reconnect failed` flags so
   dead channels are retried from scratch.

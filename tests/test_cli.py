@@ -503,3 +503,110 @@ def test_config_flag_rejected_for_api_provider(capsys, no_background, tmp_path):
     with pytest.raises(SystemExit) as exc:
         cli.main(["channels", "add", "nordvpn", "--config", str(conf)])
     assert "uses an API" in str(exc.value)
+
+
+# ---- first-use daemon-install offer on `alle start` ---------------------------
+
+
+@pytest.fixture
+def offerable(monkeypatch, no_background):
+    """`alle start` in a context where the one-time offer may fire: interactive
+    TTY, host (not container), no unit installed, never asked before."""
+    monkeypatch.setattr(service, "start", lambda: {"has_channels": False})
+    monkeypatch.setattr(service, "web_ui_url", lambda: "http://127.0.0.1:1")
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    from alle import daemonctl, runtime
+
+    monkeypatch.setattr(runtime, "in_container", lambda: False)
+    monkeypatch.setattr(daemonctl, "is_installed", lambda: False)
+    monkeypatch.delenv("ALLE_SERVICE", raising=False)
+    installs = []
+    monkeypatch.setattr(
+        service, "daemon_install", lambda linger=False: installs.append(1) or {}
+    )
+    return installs
+
+
+def test_start_offers_once_and_remembers_declination(offerable, monkeypatch, capsys):
+    from alle.state import Store
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "n")
+    cli.main(["start"])
+    assert offerable == []  # declined: no install
+    assert Store.load().service_offer_recorded() is True
+    # the second start must not ask again (input would raise if called)
+    def boom(prompt=""):
+        raise AssertionError("asked twice")
+
+    monkeypatch.setattr("builtins.input", boom)
+    cli.main(["start"])
+
+
+def test_start_offer_accept_installs(offerable, monkeypatch, capsys):
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+    cli.main(["start"])
+    assert offerable == [1]
+
+
+def test_start_yes_installs_without_prompt(offerable, monkeypatch, capsys):
+    def boom(prompt=""):
+        raise AssertionError("prompted despite --yes")
+
+    monkeypatch.setattr("builtins.input", boom)
+    cli.main(["start", "--yes"])
+    assert offerable == [1]
+
+
+def test_start_no_service_declines_without_prompt(offerable, monkeypatch, capsys):
+    from alle.state import Store
+
+    def boom(prompt=""):
+        raise AssertionError("prompted despite --no-service")
+
+    monkeypatch.setattr("builtins.input", boom)
+    cli.main(["start", "--no-service"])
+    assert offerable == []
+    assert Store.load().service_offer_recorded() is True
+
+
+def test_start_never_prompts_without_a_tty(offerable, monkeypatch, capsys):
+    from alle.state import Store
+
+    monkeypatch.setattr(cli, "_interactive", lambda: False)
+
+    def boom(prompt=""):
+        raise AssertionError("prompted without a TTY")
+
+    monkeypatch.setattr("builtins.input", boom)
+    cli.main(["start"])
+    assert offerable == []
+    # a non-interactive run must NOT burn the one-time offer
+    assert Store.load().service_offer_recorded() is False
+
+
+def test_start_never_prompts_when_unit_exists(offerable, monkeypatch, capsys):
+    from alle import daemonctl
+
+    monkeypatch.setattr(daemonctl, "is_installed", lambda: True)
+
+    def boom(prompt=""):
+        raise AssertionError("prompted with a unit already installed")
+
+    monkeypatch.setattr("builtins.input", boom)
+    cli.main(["start"])
+    assert offerable == []
+
+
+def test_start_never_prompts_in_container_or_supervised(offerable, monkeypatch, capsys):
+    from alle import runtime
+
+    def boom(prompt=""):
+        raise AssertionError("prompted in a container")
+
+    monkeypatch.setattr("builtins.input", boom)
+    monkeypatch.setattr(runtime, "in_container", lambda: True)
+    cli.main(["start"])
+    monkeypatch.setattr(runtime, "in_container", lambda: False)
+    monkeypatch.setenv("ALLE_SERVICE", "1")
+    cli.main(["start"])
+    assert offerable == []

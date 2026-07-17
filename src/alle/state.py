@@ -1363,6 +1363,18 @@ class Store:
             data.setdefault("router", _router_blank())["tun"] = bool(enabled)
         self.data = _read_raw()
 
+    def service_offer_recorded(self) -> bool:
+        """Was the one-time `alle start` daemon-install offer already made?"""
+        return bool(self.data.get("service_offered"))
+
+    def record_service_offer(self) -> None:
+        """Remember that the offer was made (accepted or declined) — `alle
+        start` asks exactly once, ever. An additive top-level key: absent
+        reads False, so older state files need no migration."""
+        with transaction() as data:
+            data["service_offered"] = True
+        self.data = _read_raw()
+
     def rules_referencing(self, refs: set[tuple[str, str]]) -> dict[str, list[dict]]:
         """``"provider/cid" -> [rule, …]`` from this snapshot (plan-time view;
         the authoritative check re-runs inside the removal transaction)."""

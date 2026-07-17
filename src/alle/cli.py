@@ -950,6 +950,60 @@ def cmd_start(args):
             "Add one: alle channels add <provider> --country …"
         )
     print(f"Web UI: {service.web_ui_url()}  (open it: alle ui)")
+    _maybe_offer_daemon_install(args)
+
+
+def _interactive() -> bool:
+    """A human on both ends: prompt-safe only when stdin AND stdout are TTYs."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _maybe_offer_daemon_install(args) -> None:
+    """The one-time login-service offer after a manual `alle start`.
+
+    The manual `alle daemon install` path stays canonical; this only surfaces
+    it once, in the one situation it helps (an interactive user who just
+    started the daemon by hand). Suppressed wherever a prompt would be wrong:
+    non-TTY runs, `--yes`/`--no-service` automation, a supervised daemon
+    (`ALLE_SERVICE=1` — the service manager already owns it), a container
+    (no login service exists there), an already-installed unit, and any run
+    after the question was answered once. Only an actual ask (or an explicit
+    flag) burns the one-time offer — a cron/script start never silently
+    consumes it.
+    """
+    from alle import daemonctl, runtime
+    from alle.state import Store
+
+    if getattr(args, "yes", False):
+        service.daemon_install()
+        Store.load().record_service_offer()
+        print("Login service installed (alle daemon install).")
+        return
+    store = Store.load()
+    if getattr(args, "no_service", False):
+        if not store.service_offer_recorded():
+            store.record_service_offer()
+        return
+    if os.environ.get("ALLE_SERVICE") or runtime.in_container():
+        return
+    if daemonctl.is_installed() or store.service_offer_recorded():
+        return
+    if not _interactive():
+        return
+    try:
+        answer = input(
+            "Start alle automatically at login (installs a user-level service; "
+            "you can undo with `alle daemon uninstall`)? [y/N] "
+        )
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return  # an aborted prompt is not an answer — offer again next time
+    store.record_service_offer()  # asked and answered: exactly once, ever
+    if answer.strip().lower() in ("y", "yes"):
+        service.daemon_install()
+        print("Login service installed. Undo any time: alle daemon uninstall")
+    else:
+        print("Okay — not asking again. Opt in later with: alle daemon install")
 
 
 def cmd_stop(args):
@@ -1465,9 +1519,20 @@ def build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("status", help="show system status (run state, router, Web UI)")
     st.add_argument("--json", action="store_true", help="print machine-readable JSON")
     st.set_defaults(func=cmd_status)
-    sub.add_parser(
+    sta = sub.add_parser(
         "start", help="start sing-box (idle if no channels) + apply + probe"
-    ).set_defaults(func=cmd_start)
+    )
+    sta.add_argument(
+        "--yes",
+        action="store_true",
+        help="also install the login service (alle daemon install) without asking",
+    )
+    sta.add_argument(
+        "--no-service",
+        action="store_true",
+        help="never offer to install the login service (recorded; asked at most once)",
+    )
+    sta.set_defaults(func=cmd_start)
     sub.add_parser("stop", help="stop sing-box (channels kept in config)").set_defaults(
         func=cmd_stop
     )
