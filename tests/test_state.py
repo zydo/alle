@@ -463,6 +463,19 @@ def test_update_channels_wg_commits_the_whole_batch():
         assert got.wg["private_key"] == "FRESH="
 
 
+def test_token_channel_refresh_clears_reconnect_for_unresolved_siblings():
+    store = Store.load()
+    store.add_provider("nordvpn")
+    refreshed = store.add_channel("nordvpn", "US", "", dict(WG))
+    unresolved = store.add_channel("nordvpn", "Japan", "", dict(WG))
+    for ch in (refreshed, unresolved):
+        store.set_reconnect("nordvpn", ch.id, {"failed": True, "error": "old token"})
+    store.update_channels_wg("nordvpn", {refreshed.id: dict(WG)})
+    latest = Store.load()
+    assert latest.get_channel("nordvpn", refreshed.id).reconnect == {}
+    assert latest.get_channel("nordvpn", unresolved.id).reconnect == {}
+
+
 def test_merge_setup_upserts_and_appends_in_one_pass():
     store = Store.load()
     store.add_provider("nordvpn")

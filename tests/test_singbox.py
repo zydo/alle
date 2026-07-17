@@ -30,10 +30,25 @@ def test_apply_is_noop_when_config_unchanged_and_running(monkeypatch):
     r = _runner()
     r.config_path.write_text(json.dumps({"a": 1}, indent=2))  # matches json.dumps form
     monkeypatch.setattr(r, "running_pid", lambda: 123)
+    monkeypatch.setattr(r, "_verify_healthy", lambda: True)
     rewrote: list[str] = []
     monkeypatch.setattr(r, "_write_protected", lambda text: rewrote.append(text))
     assert _outcome(r.apply({"a": 1})) is singbox.ApplyOutcome.UNCHANGED
     assert rewrote == []  # a no-op reconcile does not rewrite the file
+
+
+def test_identical_config_with_dead_control_plane_recovers(monkeypatch):
+    r = _runner()
+    r.config_path.write_text(json.dumps({"inbounds": []}, indent=2))
+    monkeypatch.setattr(r, "running_pid", lambda: 123)
+    monkeypatch.setattr(r, "_verify_healthy", lambda: False)
+    monkeypatch.setattr(r, "check", lambda: True)
+    monkeypatch.setattr(r, "reload", lambda: False)
+    restarted = []
+    monkeypatch.setattr(r, "restart", lambda: restarted.append(1))
+    result = r.apply({"inbounds": []})
+    assert result.outcome is singbox.ApplyOutcome.RUNTIME_FAILED
+    assert restarted == [1]
 
 
 def test_apply_bad_config_rolls_back_and_keeps_process_running(monkeypatch):
@@ -146,6 +161,7 @@ class _FakeHelper:
 
     def __init__(self, *, owning=False):
         self._owning = owning
+        self._generation = 1
         self.calls: list[str] = []
 
     def reachable(self) -> bool:
@@ -155,7 +171,12 @@ class _FakeHelper:
         self.calls.append(cmd)
         if cmd == "status":
             return (
-                {"ok": True, "running": True, "pid": 777, "generation": "777/s"}
+                {
+                    "ok": True,
+                    "running": True,
+                    "pid": 777,
+                    "generation": f"777/s{self._generation}",
+                }
                 if self._owning
                 else {"ok": True, "running": False}
             )
@@ -166,7 +187,12 @@ class _FakeHelper:
             self._owning = False
             return {"ok": True}
         if cmd == "reload":
-            return {"ok": True, "reloaded": True}
+            self._generation += 1
+            return {
+                "ok": True,
+                "reloaded": True,
+                "generation": f"777/s{self._generation}",
+            }
         return {"ok": False, "error": "nope"}
 
 
@@ -219,6 +245,7 @@ def test_apply_tun_reload_via_helper_when_already_owned(monkeypatch):
     _wire_helper(monkeypatch, fake)
     monkeypatch.setattr(r, "check", lambda: True)
     monkeypatch.setattr(r, "_verify_healthy", lambda: True)
+    monkeypatch.setattr(r, "_control_alive", lambda: True)
     monkeypatch.setattr(singbox.proc, "read_pidfile", lambda *a, **k: None)
     assert _outcome(r.apply(_tun_cfg())) is singbox.ApplyOutcome.APPLIED
     assert "reload" in fake.calls and "start" not in fake.calls  # in-place
@@ -316,6 +343,20 @@ def test_config_is_created_private_then_locked_readonly():
     assert stat.S_IMODE(r.config_path.stat().st_mode) == 0o400  # carries WG keys
     r._write_protected('{"a": 2}')  # our own rewrite of the read-only file works
     assert r.config_path.read_text() == '{"a": 2}'
+    assert stat.S_IMODE(r.config_path.stat().st_mode) == 0o400
+
+
+def test_failed_atomic_config_publish_preserves_previous_bytes(monkeypatch):
+    r = _runner()
+    r._write_protected('{"old": true}')
+
+    def fail_replace(_src, _dst):
+        raise OSError("interrupted rename")
+
+    monkeypatch.setattr(singbox.fsio.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="interrupted rename"):
+        r._write_protected('{"new": true}')
+    assert r.config_path.read_text() == '{"old": true}'
     assert stat.S_IMODE(r.config_path.stat().st_mode) == 0o400
 
 

@@ -114,7 +114,8 @@ def _handle(req: dict, allowed_uid: int) -> dict:
         runner.stop()
         return _ok()
     if cmd == "reload":
-        return _ok(reloaded=runner.reload())
+        reloaded = runner.reload()
+        return _ok(reloaded=reloaded, generation=runner.generation())
     return _err(f"unknown command {cmd!r}")
 
 

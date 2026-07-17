@@ -40,6 +40,7 @@ mid-attempt can never lose the backoff state and turn into a retry storm.
 
 from __future__ import annotations
 
+import secrets
 import time
 
 from alle import applog
@@ -50,7 +51,7 @@ from alle.providers import (
     kind,
     provider_wg,
 )
-from alle.state import Store
+from alle.state import Store, channel_fingerprint
 from alle.singbox import Runner
 
 FAIL_THRESHOLD = (
@@ -97,7 +98,9 @@ def run_pass(
     costs nothing but this pass's shake-out attempt.
     """
     now = time.time() if now is None else now
-    restart_refs: list[str] = []
+    updates = {}
+    actions = {}
+    messages = {}
     for ch in store.channels():
         if not ch.enabled:
             # Never re-resolve or re-materialise a disabled channel — that
@@ -109,11 +112,11 @@ def run_pass(
 
         if probe.get("ok"):
             if rc:  # recovered — forget all the failure bookkeeping
-                applog.log(
+                messages[(ch.provider, ch.id)] = (
                     f"reconnect: {ch.provider}/{ch.id} recovered after "
                     f"{rc.get('fails', 0)} failed probe(s) — {_probe_summary(probe)}"
                 )
-                store.set_reconnect(ch.provider, ch.id, {})
+                updates[(ch.provider, ch.id)] = (channel_fingerprint(ch), rc, {})
             continue
         if probe.get("error") == "stopped":
             continue  # the whole service is down, not this channel — nothing to do
@@ -122,14 +125,22 @@ def run_pass(
 
         rc["fails"] = rc.get("fails", 0) + 1
         if rc["fails"] < FAIL_THRESHOLD:
-            applog.log(
+            messages[(ch.provider, ch.id)] = (
                 f"reconnect: {ch.provider}/{ch.id} failure {rc['fails']}/{FAIL_THRESHOLD} — "
                 f"{probe.get('error') or 'probe failed'}"
             )
-            store.set_reconnect(ch.provider, ch.id, rc)
+            updates[(ch.provider, ch.id)] = (
+                channel_fingerprint(ch),
+                dict(ch.reconnect or {}),
+                rc,
+            )
             continue
         if now < rc.get("next_at", 0):
-            store.set_reconnect(ch.provider, ch.id, rc)  # still backing off
+            updates[(ch.provider, ch.id)] = (
+                channel_fingerprint(ch),
+                dict(ch.reconnect or {}),
+                rc,
+            )
             continue
 
         attempts = rc.get("attempts", 0)
@@ -137,19 +148,80 @@ def run_pass(
             rc["failed"] = True
             last_error = probe.get("error") or "probe failed"
             rc["error"] = f"gave up after {attempts} reconnect attempts"
-            store.set_reconnect(ch.provider, ch.id, rc)
-            applog.log(
+            updates[(ch.provider, ch.id)] = (
+                channel_fingerprint(ch),
+                dict(ch.reconnect or {}),
+                rc,
+            )
+            messages[(ch.provider, ch.id)] = (
                 f"reconnect: {ch.provider}/{ch.id} failed — {rc['error']}; last probe: {last_error}"
             )
             continue
 
-        applog.log(
+        nonce = secrets.token_hex(16)
+        rc["attempts"] = attempts + 1
+        rc["last_at"] = int(now)
+        rc["next_at"] = int(now) + _backoff(attempts)
+        rc["attempt_nonce"] = nonce
+        messages[(ch.provider, ch.id)] = (
             f"reconnect: {ch.provider}/{ch.id} still failing after "
             f"{min(rc['fails'], FAIL_THRESHOLD)}/{FAIL_THRESHOLD} probes — "
             f"attempt {attempts + 1}/{MAX_ATTEMPTS} due"
         )
-        if _attempt(store, ch, rc, now, attempts, resolve):
+        ref = (ch.provider, ch.id)
+        fingerprint = channel_fingerprint(ch)
+        updates[ref] = (fingerprint, dict(ch.reconnect or {}), rc)
+        actions[ref] = (ch, dict(rc), fingerprint, nonce, attempts)
+
+    committed_order = store.prepare_reconnects(updates)
+    committed = set(committed_order)
+    for ref in committed_order:
+        if ref in messages:
+            applog.log(messages[ref])
+
+    restart_refs: list[str] = []
+    for ref, action in actions.items():
+        if ref not in committed:
+            continue
+        ch, rc, fingerprint, nonce, attempts = action
+        if is_functional(ch.provider) and kind(ch.provider) == "token":
+            try:
+                wg = resolve(ch.provider, ch.country, ch.city or "")
+                if not store.finish_reconnect_attempt(
+                    ch.provider, ch.id, fingerprint, nonce, rc, wg=wg
+                ):
+                    applog.log(
+                        f"reconnect: {ch.provider}/{ch.id} result discarded — "
+                        "channel changed during resolution"
+                    )
+                    continue
+                applog.log(
+                    f"reconnect: {ch.provider}/{ch.id} attempt {rc['attempts']}/{MAX_ATTEMPTS} — "
+                    f"re-resolved server; reload pending; next retry in {_backoff(attempts)}s if still unhealthy"
+                )
+            except ProviderError as e:
+                if _is_non_retryable(e):
+                    rc["failed"] = True
+                    rc["error"] = str(e)
+                    message = (
+                        f"reconnect: {ch.provider}/{ch.id} permanent failure — {e}"
+                    )
+                else:
+                    rc["error"] = str(e)
+                    message = (
+                        f"reconnect: {ch.provider}/{ch.id} attempt "
+                        f"{rc['attempts']}/{MAX_ATTEMPTS} failed — {e}"
+                    )
+                if store.finish_reconnect_attempt(
+                    ch.provider, ch.id, fingerprint, nonce, rc
+                ):
+                    applog.log(message)
+        else:
             restart_refs.append(f"{ch.provider}/{ch.id}")
+            applog.log(
+                f"reconnect: {ch.provider}/{ch.id} attempt {rc['attempts']}/{MAX_ATTEMPTS} — "
+                f"sing-box restart queued; next retry in {_backoff(attempts)}s if still unhealthy"
+            )
 
     if restart_refs:
         try:
@@ -163,45 +235,3 @@ def run_pass(
                 f"reconnect: sing-box restart failed — {e} "
                 "(attempt bookkeeping kept; the next due pass retries)"
             )
-
-
-def _attempt(store, ch, rc, now, attempts, resolve) -> bool:
-    """Make one reconnect attempt for a channel and record the outcome.
-
-    Returns True when the channel's recovery needs a sing-box restart (the
-    config archetype) — the caller coalesces those into one restart per pass.
-    The bookkeeping (attempts / backoff timestamps) is persisted in
-    ``finally`` so even an unexpected error mid-attempt cannot lose the
-    backoff state and turn into a retry storm.
-    """
-    rc["attempts"] = attempts + 1
-    rc["last_at"] = int(now)
-    rc["next_at"] = int(now) + _backoff(attempts)
-    needs_restart = False
-    try:
-        if is_functional(ch.provider) and kind(ch.provider) == "token":
-            wg = resolve(ch.provider, ch.country, ch.city or "")
-            store.update_channel_wg(ch.provider, ch.id, wg)
-            applog.log(
-                f"reconnect: {ch.provider}/{ch.id} attempt {rc['attempts']}/{MAX_ATTEMPTS} — "
-                f"re-resolved server; reload pending; next retry in {_backoff(attempts)}s if still unhealthy"
-            )
-        else:
-            needs_restart = True
-            applog.log(
-                f"reconnect: {ch.provider}/{ch.id} attempt {rc['attempts']}/{MAX_ATTEMPTS} — "
-                f"sing-box restart queued; next retry in {_backoff(attempts)}s if still unhealthy"
-            )
-    except ProviderError as e:
-        if _is_non_retryable(e):
-            rc["failed"] = True
-            rc["error"] = str(e)
-            applog.log(f"reconnect: {ch.provider}/{ch.id} permanent failure — {e}")
-        else:
-            rc["error"] = str(e)
-            applog.log(
-                f"reconnect: {ch.provider}/{ch.id} attempt {rc['attempts']}/{MAX_ATTEMPTS} failed — {e}"
-            )
-    finally:
-        store.set_reconnect(ch.provider, ch.id, rc)
-    return needs_restart

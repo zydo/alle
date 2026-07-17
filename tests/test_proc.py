@@ -7,6 +7,9 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
+
+import pytest
 
 from alle import daemon, paths, proc, singbox
 
@@ -49,6 +52,20 @@ def test_start_time_of_rejects_dead_pids():
     child = subprocess.Popen(["sleep", "0"])
     child.wait()  # reaped — the PID no longer exists
     assert proc.start_time_of(child.pid) is None
+
+
+def test_start_time_of_rejects_an_unreaped_zombie():
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and proc.process_state_of(child.pid) != "Z":
+            time.sleep(0.01)
+        if proc.process_state_of(child.pid) != "Z":
+            pytest.skip("platform did not expose the child as a zombie")
+        assert proc.start_time_of(child.pid) is None
+        assert proc.verify({"pid": child.pid, "start": "any"}, ()) is False
+    finally:
+        child.wait()
 
 
 def test_verify_matches_on_recorded_start_time():

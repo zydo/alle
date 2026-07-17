@@ -42,6 +42,7 @@ class _FakeRunner:
 
     def reload(self):
         self.calls.append("reload")
+        self._pid += 1
         return True
 
 

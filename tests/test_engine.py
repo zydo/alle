@@ -562,3 +562,23 @@ def test_probe_all_runs_channels_concurrently(monkeypatch):
     # every channel got a result persisted
     for ch in Store.load().provider_channels("nordvpn"):
         assert ch.probe.get("ok") is True
+
+
+def test_probe_result_is_discarded_after_channel_identity_changes(monkeypatch):
+    store = Store.load()
+    store.add_provider("nordvpn")
+    ch = store.add_channel("nordvpn", "US", "", dict(WG))
+    eng = Engine(store)
+    runner = _FakeRunner()
+    runner._running = True
+    eng.runner = cast(singbox.Runner, runner)
+
+    def probe_then_disable(_port):
+        Store.load().set_channels_enabled([("nordvpn", ch.id)], False)
+        return {"ok": False, "at": 1, "error": "old tunnel failed"}
+
+    monkeypatch.setattr("alle.engine.probe.probe_channel", probe_then_disable)
+    eng.probe_all([ch])
+    current = Store.load().get_channel("nordvpn", ch.id)
+    assert current is not None and current.enabled is False
+    assert current.probe == {}

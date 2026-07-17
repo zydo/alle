@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -32,6 +33,14 @@ from pathlib import Path
 
 from alle import applog, fsio, paths, proc
 from alle.constants import SINGBOX_SHA256, SINGBOX_VERSION
+
+
+_DOWNLOAD_LIMIT = 128 << 20
+_BINARY_LIMIT = 256 << 20
+_CHECK_TIMEOUT = 15.0
+_CHECK_OUTPUT_LIMIT = 256 << 10
+_children: dict[int, subprocess.Popen] = {}
+_children_lock = threading.Lock()
 
 
 class SingBoxError(RuntimeError):
@@ -93,7 +102,23 @@ def bin_path() -> Path:
 def _download(url: str, dest: Path) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": "alle/1"})
     with urllib.request.urlopen(req, timeout=120) as r:  # noqa: S310 (pinned https URL)
-        dest.write_bytes(r.read())
+        length = r.headers.get("Content-Length")
+        if length is not None:
+            try:
+                too_large = int(length) > _DOWNLOAD_LIMIT
+            except ValueError as e:
+                raise SingBoxError("sing-box archive has an invalid size") from e
+            if too_large:
+                raise SingBoxError("sing-box archive exceeds the download size limit")
+        total = 0
+        with dest.open("wb") as out:
+            while chunk := r.read(1 << 20):
+                total += len(chunk)
+                if total > _DOWNLOAD_LIMIT:
+                    raise SingBoxError(
+                        "sing-box archive exceeds the download size limit"
+                    )
+                out.write(chunk)
 
 
 def _sha256_file(path: Path) -> str:
@@ -129,16 +154,21 @@ def ensure_binary() -> Path:
                 f"got {got}"
             )
         return target
-    if target.exists():
-        if _sha256_file(target) == expected:
+    if target.exists() and _sha256_file(target) == expected:
+        return target
+    with fsio.locked(target.with_name(target.name + ".lock")):
+        # Another process may have completed the installation while this
+        # caller waited.  Re-verify under the lock before touching the cache.
+        if target.exists() and _sha256_file(target) == expected:
             return target
-        print(
-            f"alle: sing-box at {target} failed checksum verification — "
-            "re-downloading the pinned build.",
-            file=sys.stderr,
-        )
-        target.unlink()
-    return _install(key, expected, target)
+        if target.exists():
+            print(
+                f"alle: sing-box at {target} failed checksum verification — "
+                "re-downloading the pinned build.",
+                file=sys.stderr,
+            )
+            target.unlink()
+        return _install(key, expected, target)
 
 
 def _install(key: str, expected: str, target: Path) -> Path:
@@ -163,6 +193,8 @@ def _install(key: str, expected: str, target: Path) -> Path:
             )
             if member is None:
                 raise SingBoxError(f"{asset} did not contain a sing-box binary")
+            if not member.isfile() or member.size > _BINARY_LIMIT:
+                raise SingBoxError(f"{asset} sing-box member is invalid or too large")
             target.parent.mkdir(parents=True, exist_ok=True)
             src = tf.extractfile(member)
             if src is None:
@@ -172,9 +204,18 @@ def _install(key: str, expected: str, target: Path) -> Path:
             # even mid-crash or with a concurrent ensure_binary() reading it.
             fd, staged = tempfile.mkstemp(dir=str(target.parent), prefix=".sing-box-")
             try:
+                digest = hashlib.sha256()
+                copied = 0
                 with os.fdopen(fd, "wb") as out, src:
-                    out.write(src.read())
-                got = _sha256_file(Path(staged))
+                    while chunk := src.read(1 << 20):
+                        copied += len(chunk)
+                        if copied > _BINARY_LIMIT:
+                            raise SingBoxError("sing-box binary exceeds the size limit")
+                        digest.update(chunk)
+                        out.write(chunk)
+                    out.flush()
+                    os.fsync(out.fileno())
+                got = digest.hexdigest()
                 if got != expected:
                     raise SingBoxError(
                         f"sing-box checksum mismatch (expected {expected}, got {got}); "
@@ -182,6 +223,7 @@ def _install(key: str, expected: str, target: Path) -> Path:
                     )
                 os.chmod(staged, 0o755)  # noqa: S2612
                 os.replace(staged, target)
+                fsio._fsync_dir(target.parent)
             finally:
                 if os.path.exists(staged):
                     os.unlink(staged)
@@ -255,6 +297,31 @@ def _log_path() -> Path:
     return paths.state_dir() / "singbox.log"
 
 
+def _remember_child(child: subprocess.Popen) -> None:
+    with _children_lock:
+        _children[child.pid] = child
+
+
+def _reap_child(pid: int) -> bool:
+    """Reap a locally spawned child if it exited; return whether it is live."""
+    with _children_lock:
+        child = _children.get(pid)
+        if child is None:
+            return True
+        if child.poll() is None:
+            return True
+        child.wait()
+        _children.pop(pid, None)
+        return False
+
+
+def _reap_exited_children() -> None:
+    with _children_lock:
+        pids = list(_children)
+    for pid in pids:
+        _reap_child(pid)
+
+
 class ApplyOutcome(Enum):
     """What :meth:`Runner.apply` actually achieved — a delivered signal is not
     proof of a healthy applied generation, so the boolean it replaced could not
@@ -298,7 +365,12 @@ class Runner:
         pidfile read returns None then, because os.kill on a root pid gets
         EPERM, which proc.verify reads as "not ours").
         """
+        _reap_exited_children()
         local = proc.read_pidfile(_pid_path(), ("sing-box",))
+        if local is not None and not _reap_child(local):
+            _pid_path().unlink(missing_ok=True)
+            _started_path().unlink(missing_ok=True)
+            local = None
         if local is not None:
             return ("local", local)
         if self.local_only:
@@ -359,7 +431,7 @@ class Runner:
         """
         new = json.dumps(config, indent=2)
         old = self.config_path.read_text() if self.config_path.exists() else None
-        if new == old and self.is_running():
+        if new == old and self.is_running() and self._verify_healthy():
             return ApplyResult(ApplyOutcome.UNCHANGED)
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self._write_protected(new)
@@ -419,8 +491,12 @@ class Runner:
         if proc.read_pidfile(_pid_path(), ("sing-box",)) is not None:
             self._stop_local()
         if self._ownership()[0] == "helper":
-            helper_mod.request("reload")
-            if self._verify_healthy():
+            previous = self.generation()
+            response = helper_mod.request("reload")
+            acknowledged = (
+                response.get("ok") is True and response.get("reloaded") is True
+            )
+            if acknowledged and self._verify_healthy_after(previous):
                 return ApplyResult(ApplyOutcome.APPLIED)
             helper_mod.request("stop")  # reload didn't take — cold start
         r = helper_mod.request("start")
@@ -434,6 +510,19 @@ class Runner:
                 "the helper started sing-box but its control API is unreachable",
             )
         return ApplyResult(ApplyOutcome.APPLIED)
+
+    def _verify_healthy_after(
+        self, previous: str | None, deadline: float = 3.0
+    ) -> bool:
+        """Wait for a healthy generation distinct from the one being replaced."""
+        t0 = time.monotonic()
+        while True:
+            current = self.generation()
+            if current is not None and current != previous and self._control_alive():
+                return True
+            if time.monotonic() - t0 >= deadline:
+                return False
+            time.sleep(0.1)
 
     def _verify_healthy(self, deadline: float = 3.0) -> bool:
         """The process is alive *and* its control API answers.
@@ -470,12 +559,13 @@ class Runner:
         WireGuard private key, so it must never exist under the default
         (usually world-readable) umask mode, even briefly.
         """
-        if self.config_path.exists():
-            os.chmod(self.config_path, 0o600)  # allow our own overwrite
-        fd = os.open(self.config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(text)
-        os.chmod(self.config_path, 0o400)
+        fsio.write_durably(
+            self.config_path,
+            lambda f: f.write(text),
+            prefix=".singbox-config-",
+            suffix=".json",
+            mode=0o400,
+        )
 
     def start(self) -> None:
         if self.is_running():
@@ -490,6 +580,7 @@ class Runner:
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
             )
+        _remember_child(child)
         # Identity is captured while the child is still ours and unreaped, so
         # the recorded start time provably belongs to this sing-box.
         proc.write_pidfile(_pid_path(), child.pid)
@@ -499,6 +590,7 @@ class Runner:
         # the failure is loud instead of a dead PID behind a fresh pidfile.
         time.sleep(0.3)
         if child.poll() is not None:
+            _reap_child(child.pid)
             _pid_path().unlink(missing_ok=True)
             _started_path().unlink(missing_ok=True)
             raise SingBoxRuntimeError(
@@ -537,6 +629,14 @@ class Runner:
                 os.kill(pid, signal.SIGKILL)
             except OSError:
                 pass
+        with _children_lock:
+            child = _children.get(pid)
+        if child is not None:
+            try:
+                child.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+            _reap_child(pid)
         _pid_path().unlink(missing_ok=True)
         _started_path().unlink(missing_ok=True)
 
@@ -552,17 +652,31 @@ class Runner:
         must not be mistaken for "config rejected" (which triggers a rollback).
         """
         binary = ensure_binary()
-        result = subprocess.run(
-            [str(binary), "check", "-c", str(self.config_path)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
+        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            try:
+                child = subprocess.Popen(
+                    [str(binary), "check", "-c", str(self.config_path)],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+                try:
+                    returncode = child.wait(timeout=_CHECK_TIMEOUT)
+                except subprocess.TimeoutExpired as e:
+                    child.kill()
+                    child.wait()
+                    raise SingBoxError(
+                        f"sing-box check exceeded {_CHECK_TIMEOUT:g} seconds"
+                    ) from e
+            except OSError as e:
+                raise SingBoxError(f"could not run sing-box check: {e}") from e
+            stderr.seek(0)
+            error = stderr.read(_CHECK_OUTPUT_LIMIT).decode(errors="replace").strip()
+        if returncode != 0:
             # kept for apply() to attach to the REJECTED outcome — "reported"
             # must include *why* sing-box refused the generation
-            self._check_error = result.stderr.strip() or "sing-box rejected the config"
+            self._check_error = error or "sing-box rejected the config"
             print(
-                f"alle: sing-box rejected the config:\n{result.stderr.strip()}",
+                f"alle: sing-box rejected the config:\n{error}",
                 file=sys.stderr,
             )
             return False

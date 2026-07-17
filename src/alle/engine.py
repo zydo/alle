@@ -31,7 +31,7 @@ from alle.constants import (
     TUN_MTU,
 )
 from alle.providers import ProviderError
-from alle.state import Channel, Store
+from alle.state import Channel, Store, channel_fingerprint
 
 # Probe concurrency: enough parallelism that a fleet of dead channels stays
 # bounded, small enough not to burst-load every tunnel at once.
@@ -466,39 +466,44 @@ class Engine:
                     "error": "stopped",
                 }
         elif channels:
-            with ThreadPoolExecutor(
-                max_workers=min(PROBE_POOL_SIZE, len(channels))
-            ) as pool:
-                futures = {
-                    pool.submit(probe.probe_channel, ch.port): ch for ch in channels
-                }
+            deadline = time.monotonic() + PROBE_PASS_DEADLINE
+            pool = ThreadPoolExecutor(max_workers=min(PROBE_POOL_SIZE, len(channels)))
+            futures = {pool.submit(probe.probe_channel, ch.port): ch for ch in channels}
+            try:
                 try:
-                    for fut in as_completed(futures, timeout=PROBE_PASS_DEADLINE):
+                    remaining = max(0.0, deadline - time.monotonic())
+                    for fut in as_completed(futures, timeout=remaining):
                         ch = futures[fut]
                         out[f"{ch.provider}/{ch.id}"] = fut.result()
                 except TimeoutError:
-                    for fut, ch in futures.items():
-                        ref = f"{ch.provider}/{ch.id}"
-                        if ref in out:
-                            continue
-                        if fut.done() and not fut.cancelled():
-                            out[ref] = fut.result()  # finished during the sweep
-                            continue
-                        fut.cancel()  # unstarted work is dropped, not orphaned
-                        out[ref] = {
-                            "ok": False,
-                            "at": int(time.time()),
-                            "latency_ms": None,
-                            "ip": None,
-                            "error": (
-                                "probe pass deadline "
-                                f"({PROBE_PASS_DEADLINE:g}s) exceeded"
-                            ),
-                        }
-        # Persist sequentially from this thread: results land in stable
-        # channel order and the store transactions never contend.
-        for ch in channels:
-            ref = f"{ch.provider}/{ch.id}"
-            self.store.set_probe(ch.provider, ch.id, out[ref])
+                    pass
+                for fut, ch in futures.items():
+                    ref = f"{ch.provider}/{ch.id}"
+                    if ref in out:
+                        continue
+                    # Once the absolute deadline expires, even a result racing
+                    # with this sweep is late and cannot be published.
+                    fut.cancel()
+                    out[ref] = {
+                        "ok": False,
+                        "at": int(time.time()),
+                        "latency_ms": None,
+                        "ip": None,
+                        "error": (
+                            f"probe pass deadline ({PROBE_PASS_DEADLINE:g}s) exceeded"
+                        ),
+                    }
+            finally:
+                # Do not let a non-cooperative probe extend the pass deadline.
+                # Workers only return data; all state publication stays here.
+                pool.shutdown(wait=False, cancel_futures=True)
+        updates = {
+            (ch.provider, ch.id): (
+                channel_fingerprint(ch),
+                out[f"{ch.provider}/{ch.id}"],
+            )
+            for ch in channels
+        }
+        self.store.set_probes(updates)
         applog.log(_probe_log(channels, out))
         return out

@@ -25,6 +25,27 @@ import subprocess
 from pathlib import Path
 
 
+def process_state_of(pid: int) -> str | None:
+    """Kernel process state, or ``None`` when it cannot be determined."""
+    if pid <= 0:
+        return None
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        return stat.rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        pass
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "state="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return out.stdout.strip()[:1] or None
+
+
 def command_of(pid: int) -> str | None:
     """The command line of a live process, or ``None`` if it can't be read.
 
@@ -59,6 +80,8 @@ def start_time_of(pid: int) -> str | None:
     reuse). Elsewhere: ``ps lstart``, the full start timestamp.
     """
     if pid <= 0:
+        return None
+    if process_state_of(pid) == "Z":
         return None
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()

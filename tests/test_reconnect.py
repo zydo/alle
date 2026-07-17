@@ -261,6 +261,26 @@ def test_attempt_bookkeeping_persists_when_resolve_raises(channel):
     assert "api exploded" in rc["error"]
 
 
+def test_attempt_is_precommitted_and_stale_resolution_cannot_overwrite(channel):
+    store = Store.load()
+    human_wg = wg_config("human.example.com")
+
+    def slow_resolution(provider, country, city):
+        claimed = Store.load().get_channel(provider, channel)
+        assert claimed is not None
+        assert claimed.reconnect["attempts"] == 1
+        assert claimed.reconnect["attempt_nonce"]
+        Store.load().update_channel_wg(provider, channel, human_wg)
+        return dict(NEW_WG)
+
+    for i in range(reconnect.FAIL_THRESHOLD):
+        store.set_probe("nordvpn", channel, dict(FAIL))
+        _pass(now=1000 + i, resolve=slow_resolution)
+    current = Store.load().get_channel("nordvpn", channel)
+    assert current is not None
+    assert current.wg["peer"]["endpoint_host"] == "human.example.com"
+
+
 def test_bookkeeping_persists_when_a_config_restart_fails(monkeypatch, channel):
     """A restart failure is reported but does not lose attempt bookkeeping — the
     next due pass retries (config archetype, so restart is the recovery)."""

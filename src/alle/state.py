@@ -21,6 +21,7 @@ underscore slugs, so the split is unambiguous.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -199,6 +200,23 @@ class Channel:
         if self.city:
             return f"{self.city}, {self.country}"
         return self.country or "—"
+
+
+def _channel_fingerprint_raw(ch: dict) -> str:
+    """Identity of the channel configuration a background result observed."""
+    material = {
+        "enabled": bool(ch.get("enabled", True)),
+        "port": int(ch.get("port", 0)),
+        "wg": ch.get("wg") or {},
+    }
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def channel_fingerprint(ch: Channel) -> str:
+    return _channel_fingerprint_raw(
+        {"enabled": ch.enabled, "port": ch.port, "wg": ch.wg}
+    )
 
 
 def tag_to_ref(tag: str) -> tuple[str, str] | None:
@@ -893,12 +911,42 @@ class Store:
         return found
 
     def set_probe(self, provider: str, cid: str, probe: dict) -> None:
+        """Set one probe unconditionally (interactive/test compatibility).
+
+        Background probe passes use :meth:`set_probes`, whose captured
+        identity check is what prevents delayed network results from landing.
+        """
         with transaction() as data:
             prov = data["providers"].get(provider) or {}
             ch = (prov.get("channels") or {}).get(cid)
             if ch is not None:
                 ch["probe"] = probe
         self.data = _read_raw()
+
+    def set_probes(
+        self,
+        updates: dict[tuple[str, str], tuple[str, dict]],
+    ) -> list[tuple[str, str]]:
+        """Publish a probe pass atomically when channel identity still matches.
+
+        Each result is paired with the configuration fingerprint captured
+        before its network request.  A concurrent disable, port move, reimport,
+        or key rotation makes that result stale, so it is skipped while valid
+        siblings from the same pass still commit in one state transaction.
+        """
+        if not updates:
+            return []
+        applied: list[tuple[str, str]] = []
+        with transaction() as data:
+            for (provider, cid), (expected, result) in updates.items():
+                prov = data["providers"].get(provider) or {}
+                ch = (prov.get("channels") or {}).get(cid)
+                if ch is None or _channel_fingerprint_raw(ch) != expected:
+                    continue
+                ch["probe"] = result
+                applied.append((provider, cid))
+        self.data = _read_raw()
+        return applied
 
     def set_reconnect(self, provider: str, cid: str, reconnect: dict) -> None:
         """Persist a channel's reconnect state machine dict.
@@ -916,6 +964,69 @@ class Store:
                 else:
                     ch.pop("reconnect", None)
         self.data = _read_raw()
+
+    def prepare_reconnects(
+        self,
+        updates: dict[tuple[str, str], tuple[str, dict, dict]],
+    ) -> list[tuple[str, str]]:
+        """Atomically claim reconnect bookkeeping derived from one snapshot.
+
+        Values are ``(channel fingerprint, expected reconnect, replacement)``.
+        Comparing both identities prevents overlapping daemon passes or a
+        concurrent human edit from claiming the same attempt twice.
+        """
+        if not updates:
+            return []
+        applied: list[tuple[str, str]] = []
+        with transaction() as data:
+            for (provider, cid), (
+                fingerprint,
+                expected,
+                replacement,
+            ) in updates.items():
+                chans = (data["providers"].get(provider) or {}).get("channels") or {}
+                ch = chans.get(cid)
+                if (
+                    ch is None
+                    or _channel_fingerprint_raw(ch) != fingerprint
+                    or (ch.get("reconnect") or {}) != expected
+                ):
+                    continue
+                if replacement:
+                    ch["reconnect"] = replacement
+                else:
+                    ch.pop("reconnect", None)
+                applied.append((provider, cid))
+        self.data = _read_raw()
+        return applied
+
+    def finish_reconnect_attempt(
+        self,
+        provider: str,
+        cid: str,
+        fingerprint: str,
+        nonce: str,
+        reconnect: dict,
+        *,
+        wg: dict | None = None,
+    ) -> bool:
+        """Conditionally commit one attempt's result and optional WG config."""
+        applied = False
+        with transaction() as data:
+            chans = (data["providers"].get(provider) or {}).get("channels") or {}
+            ch = chans.get(cid)
+            current = (ch or {}).get("reconnect") or {}
+            if (
+                ch is not None
+                and _channel_fingerprint_raw(ch) == fingerprint
+                and current.get("attempt_nonce") == nonce
+            ):
+                if wg is not None:
+                    ch["wg"] = wg
+                ch["reconnect"] = reconnect
+                applied = True
+        self.data = _read_raw()
+        return applied
 
     def reallocate_channel_ports(
         self, ports: set[int]
@@ -1255,6 +1366,11 @@ class Store:
                 if ch is not None:
                     ch["wg"] = wg
                     updated.append(cid)
+            # Replacing a token is explicit human intervention. Clear every
+            # give-up flag, including channels whose immediate refresh failed,
+            # so the daemon may retry them with the new credential.
+            for ch in chans.values():
+                ch.pop("reconnect", None)
         self.data = _read_raw()
         return updated
 

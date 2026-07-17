@@ -5,6 +5,8 @@ restarts — and deleted rows must stay deleted (tombstones)."""
 
 from __future__ import annotations
 
+import pytest
+
 from alle import metrics
 
 
@@ -117,6 +119,33 @@ def test_connections_without_a_channel_chain_are_ignored():
     )
     assert banked == {}
     assert metrics.totals() == {}
+
+
+def test_parse_failure_does_not_advance_any_watermark():
+    acc = _primed()
+    acc.observe([_conn("a", "out-nordvpn-us_1", 100, 100)], generation="g1")
+    malformed = _conn("b", "out-nordvpn-us_1", "not-a-counter", 1)
+    with pytest.raises(ValueError):
+        acc.observe(
+            [_conn("a", "out-nordvpn-us_1", 150, 160), malformed],
+            generation="g1",
+        )
+    banked = acc.observe([_conn("a", "out-nordvpn-us_1", 160, 170)], generation="g1")
+    assert banked == {("nordvpn", "us_1"): (60, 70)}
+
+
+def test_database_failure_does_not_advance_watermarks(monkeypatch):
+    acc = _primed()
+    acc.observe([_conn("a", "out-nordvpn-us_1", 100, 100)], generation="g1")
+    real_add = metrics.add_deltas
+    monkeypatch.setattr(
+        metrics, "add_deltas", lambda _deltas: (_ for _ in ()).throw(OSError("disk"))
+    )
+    with pytest.raises(OSError, match="disk"):
+        acc.observe([_conn("a", "out-nordvpn-us_1", 150, 160)], generation="g1")
+    monkeypatch.setattr(metrics, "add_deltas", real_add)
+    banked = acc.observe([_conn("a", "out-nordvpn-us_1", 160, 170)], generation="g1")
+    assert banked == {("nordvpn", "us_1"): (60, 70)}
 
 
 def test_remove_channel_and_provider_clear_totals():

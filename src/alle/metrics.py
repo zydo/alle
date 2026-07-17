@@ -91,23 +91,35 @@ def add_delta(provider: str, channel: str, sent: int, received: int) -> None:
     daemon sample must not recreate its row (checked in the same SQLite
     transaction as the insert, so it cannot race the removal either).
     """
-    if sent <= 0 and received <= 0:
+    add_deltas({(provider, channel): (sent, received)})
+
+
+def add_deltas(deltas: dict[tuple[str, str], tuple[int, int]]) -> None:
+    """Fold a complete sample into SQLite in one all-or-nothing transaction."""
+    deltas = {
+        ref: (max(0, sent), max(0, received))
+        for ref, (sent, received) in deltas.items()
+        if sent > 0 or received > 0
+    }
+    if not deltas:
         return
     now = int(time.time())
     with _db() as conn:
-        if _tombstoned(conn, provider, channel):
-            return
-        conn.execute(
-            """
-            INSERT INTO channel_traffic (provider, channel, sent, received, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(provider, channel) DO UPDATE SET
-                sent       = sent + excluded.sent,
-                received   = received + excluded.received,
-                updated_at = excluded.updated_at
-            """,
-            (provider, channel, max(0, sent), max(0, received), now),
-        )
+        for (provider, channel), (sent, received) in deltas.items():
+            if _tombstoned(conn, provider, channel):
+                continue
+            conn.execute(
+                """
+                INSERT INTO channel_traffic
+                    (provider, channel, sent, received, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(provider, channel) DO UPDATE SET
+                    sent       = sent + excluded.sent,
+                    received   = received + excluded.received,
+                    updated_at = excluded.updated_at
+                """,
+                (provider, channel, sent, received, now),
+            )
 
 
 def totals() -> dict[tuple[str, str], dict]:
@@ -226,35 +238,36 @@ class Accumulator:
             return {}
         if generation != self._generation:
             # First sight of this sing-box instance: baseline, don't bank.
-            self._generation = generation
-            self._seen = {}
+            candidate: dict[str, tuple[int, int]] = {}
             for conn in connections:
                 cid = conn.get("id")
                 if cid and self._ref(conn) is not None:
                     up = int(conn.get("upload") or 0)
                     down = int(conn.get("download") or 0)
-                    self._seen[cid] = (up, down)
+                    candidate[cid] = (up, down)
+            self._generation = generation
+            self._seen = candidate
             return {}
         deltas: dict[tuple[str, str], list[int]] = {}
-        alive: set[str] = set()
+        candidate = {}
         for conn in connections:
             cid = conn.get("id")
             ref = self._ref(conn)
             if not cid or ref is None:
                 continue
-            alive.add(cid)
             up = int(conn.get("upload") or 0)
             down = int(conn.get("download") or 0)
             last_up, last_down = self._seen.get(cid, (0, 0))
             d_up = up - last_up if up >= last_up else up
             d_down = down - last_down if down >= last_down else down
-            self._seen[cid] = (up, down)
+            candidate[cid] = (up, down)
             acc = deltas.setdefault(ref, [0, 0])
             acc[0] += d_up
             acc[1] += d_down
-        for cid in self._seen.keys() - alive:  # closed connections
-            del self._seen[cid]
         banked = {ref: (up, down) for ref, (up, down) in deltas.items() if up or down}
-        for (provider, channel), (up, down) in banked.items():
-            add_delta(provider, channel, up, down)
+        # Persist the whole sample before advancing live watermarks. If SQLite
+        # fails, the prior snapshot remains intact and a retry cannot lose the
+        # uncommitted bytes.
+        add_deltas(banked)
+        self._seen = candidate
         return banked

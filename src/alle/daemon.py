@@ -366,6 +366,31 @@ def run_applier() -> None:
             applog.log(f"probe cycle failed: {e}")
 
     probe_worker: dict = {"thread": None}
+    metrics_worker: dict = {"thread": None}
+    metrics_error: dict = {"text": None, "at": float("-inf")}
+
+    def _metrics_pass() -> None:
+        try:
+            runner = singbox.Runner()
+            if not runner.is_running():
+                return
+            before = runner.generation()
+            if before is None:
+                return
+            connections = runner.connections()
+            after = runner.generation()
+            # A reload between the two identity reads makes the snapshot
+            # ambiguous: discard it without moving accumulator watermarks.
+            if before != after:
+                return
+            accumulator.observe(connections, generation=before)
+            metrics_error["text"] = None
+        except Exception as e:  # noqa: BLE001 — sampling is optional
+            message = str(e)
+            now = time.monotonic()
+            if message != metrics_error["text"] or now - metrics_error["at"] >= 60:
+                applog.log(f"metrics sample failed: {e}")
+                metrics_error.update(text=message, at=now)
 
     # The self-exit-on-upgrade only makes sense when a supervisor respawns us
     # onto *new code*. A container image is immutable — the installed version
@@ -490,18 +515,13 @@ def run_applier() -> None:
             # Clash API only reports live connections, so the more often we look
             # the fewer short-lived connections slip through between samples.
             if now - last_metrics >= METRICS_INTERVAL:
-                try:
-                    runner = singbox.Runner()
-                    if runner.is_running():
-                        # generation keys the counter watermarks: a restarted
-                        # sing-box re-baselines instead of reading its fresh
-                        # counters as deltas; a failed sample (None) banks
-                        # nothing and keeps the watermarks.
-                        accumulator.observe(
-                            runner.connections(), generation=runner.generation()
-                        )
-                except Exception as e:  # noqa: BLE001
-                    applog.log(f"metrics sample failed: {e}")
+                worker = metrics_worker["thread"]
+                if worker is None or not worker.is_alive():
+                    worker = threading.Thread(
+                        target=_metrics_pass, name="alle-metrics", daemon=True
+                    )
+                    metrics_worker["thread"] = worker
+                    worker.start()
                 last_metrics = now
 
             if now - last_probe >= PROBE_INTERVAL:
@@ -518,6 +538,9 @@ def run_applier() -> None:
 
             time.sleep(POLL_SECONDS)
     finally:
+        worker = metrics_worker.get("thread")
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=3)
         if running_pid() == os.getpid():
             _pid_path().unlink(missing_ok=True)
             _info_path().unlink(missing_ok=True)
