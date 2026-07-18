@@ -59,6 +59,7 @@ omit the prefix.
   - [Environment variables](#environment-variables)
   - [Files](#files)
   - [Recovery](#recovery)
+    - [Upgrade checklist](#upgrade-checklist)
 
 ## Conventions
 
@@ -1071,9 +1072,10 @@ alle daemon install
 alle daemon install --linger      # Linux: survive logout
 ```
 
-(There is no Homebrew formula yet. The planned macOS/Linux formula will ship
-only the CLI and bundled Web UI, without the tray/companion; `brew services`
-will own registration for that channel.)
+(**Homebrew:** the `alle` formula in the `zydo/tap` tap ships only the CLI and
+bundled Web UI — no tray/companion. On that channel let `brew services` own
+registration instead of `alle daemon install`: `brew services start alle`.
+`alle upgrade` recognizes a brew-owned install and delegates to `brew upgrade`.)
 
 ### `alle daemon uninstall`
 
@@ -1092,10 +1094,10 @@ Daemon: running, version 0.1.3.
 ```
 
 **Upgrades:** the service unit execs a stable shim, so `uv tool upgrade
-alle-proxy` (or `pipx upgrade`) never needs to touch it, and a supervised daemon
-notices the new version and restarts itself onto it within ~30s. For an
-unsupervised daemon, `alle status` prints a one-line warning when the running
-daemon is older than the CLI (`run alle restart to pick up the upgrade`).
+alle-proxy` (or `pipx upgrade`, or `brew upgrade alle`) never needs to touch it,
+and a supervised daemon notices the new version and restarts itself onto it
+within ~30s. For an unsupervised daemon, `alle status` prints a one-line warning
+when the running daemon is older than the CLI (`run alle restart to pick up the upgrade`).
 
 ---
 

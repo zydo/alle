@@ -13,6 +13,7 @@ TUN can capture the host; Docker never does.
 | ---------------- | -------------------------- | ----------------------------------------- | ------------- |
 | `uv`             | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
 | `pipx`           | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
+| Homebrew         | `brew services`            | Host apps or host TUN                     | Yes           |
 | Docker proxy hub | Docker restart policy      | Proxy-aware containers/apps               | No            |
 | Docker gateway   | Docker restart policy      | alle netns + explicitly joined containers | No            |
 
@@ -42,6 +43,21 @@ Step 3 is optional: without it the runtime auto-starts on first use
 `alle daemon install` registers it as a user-level login service (macOS
 LaunchAgent / `systemd --user`) so it starts at login and is supervised — see
 the [CLI reference](cli-reference.md#alle-daemon).
+
+**With [Homebrew](https://brew.sh) (macOS + Linux):**
+
+```bash
+# 1. add the tap and install the headless CLI + Web UI
+brew install zydo/tap/alle
+# 2. run the background daemon at login, supervised by brew services
+brew services start alle
+```
+
+The Homebrew channel is deliberately headless — CLI, daemon, control API, and
+bundled Web UI, with no menu-bar/tray app. On this channel let `brew services`
+own the daemon rather than `alle daemon install` (they would register competing
+launchd/`systemd --user` units for the same user). `alle upgrade` recognizes a
+brew-owned install and delegates to `brew upgrade`.
 
 Also works: `python -m pip install alle-proxy` into an environment you manage,
 or one-off runs with `uvx --from alle-proxy alle --help`.

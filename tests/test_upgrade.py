@@ -50,6 +50,30 @@ def test_detects_pipx_by_prefix(monkeypatch):
     assert upgrade.detect_channel() == "pipx"
 
 
+def test_detects_homebrew_cellar_keg(monkeypatch):
+    # macOS arm Cellar, Intel Cellar, and Linuxbrew all contain /Cellar/alle/.
+    _no_container(monkeypatch)
+    monkeypatch.setattr(upgrade, "_editable_install", lambda: False)
+    for prefix in (
+        "/opt/homebrew/Cellar/alle/0.1.8/libexec",
+        "/usr/local/Cellar/alle/0.1.8/libexec",
+        "/home/linuxbrew/.linuxbrew/Cellar/alle/0.1.8/libexec",
+        "/opt/homebrew/opt/alle/libexec",
+    ):
+        monkeypatch.setattr(upgrade.sys, "prefix", prefix)
+        assert upgrade.detect_channel() == "homebrew", prefix
+
+
+def test_homebrew_does_not_shadow_uv_or_pipx(monkeypatch):
+    # A uv/pipx install must not be misread as brew just because brew exists.
+    _no_container(monkeypatch)
+    monkeypatch.setattr(upgrade, "_editable_install", lambda: False)
+    monkeypatch.setattr(
+        upgrade.sys, "prefix", "/Users/x/.local/share/uv/tools/alle-proxy"
+    )
+    assert upgrade.detect_channel() == "uv-tool"
+
+
 def test_detects_plain_pip_when_distribution_exists(monkeypatch):
     _no_container(monkeypatch)
     monkeypatch.setattr(upgrade, "_editable_install", lambda: False)
@@ -125,6 +149,34 @@ def test_run_surfaces_a_failed_command(monkeypatch):
 
 def test_run_requires_the_owning_tool_on_path(monkeypatch):
     monkeypatch.setattr(upgrade, "detect_channel", lambda: "uv-tool")
+    monkeypatch.setattr(upgrade.shutil, "which", lambda name: None)
+    with pytest.raises(upgrade.UpgradeError, match="PATH"):
+        upgrade.run()
+
+
+def test_run_delegates_to_brew_upgrade(monkeypatch):
+    # The keg is named for the formula (`alle`), not the PyPI package.
+    monkeypatch.setattr(upgrade, "detect_channel", lambda: "homebrew")
+    monkeypatch.setattr(
+        upgrade.shutil, "which", lambda name: f"/opt/homebrew/bin/{name}"
+    )
+    versions = iter(["0.1.8", "0.1.9"])
+    monkeypatch.setattr(upgrade.daemon, "installed_version", lambda: next(versions))
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(upgrade.subprocess, "run", fake_run)
+    res = upgrade.run()
+    assert calls == [["/opt/homebrew/bin/brew", "upgrade", "alle"]]
+    assert res["channel"] == "homebrew"
+    assert res["changed"] is True
+
+
+def test_run_requires_brew_on_path(monkeypatch):
+    monkeypatch.setattr(upgrade, "detect_channel", lambda: "homebrew")
     monkeypatch.setattr(upgrade.shutil, "which", lambda name: None)
     with pytest.raises(upgrade.UpgradeError, match="PATH"):
         upgrade.run()

@@ -216,6 +216,83 @@ jobs:
           readme-filepath: ./README.md
           enable-url-completion: true
 
+  publish-homebrew:
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      # The tap tracks stable releases only; prerelease tags publish to PyPI
+      # and Docker but never move the formula.
+      - name: Gate on a stable tag
+        id: tag
+        run: |
+          if echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "stable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download the gated release artifacts
+        if: steps.tag.outputs.stable == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Pin the formula to the published sdist
+        if: steps.tag.outputs.stable == 'true'
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # Retry: PyPI's JSON API can lag the upload by a few seconds.
+          for attempt in 1 2 3 4 5; do
+            if scripts/update-homebrew-formula.py --version "$version"; then
+              break
+            elif [ "$attempt" = 5 ]; then
+              echo "::error::PyPI metadata for $version never became available"
+              exit 1
+            fi
+            sleep 20
+          done
+          # One release identity across every channel: the digest PyPI recorded
+          # must match the exact sdist this workflow built and published.
+          formula_sha=$(grep -m1 -E '^  sha256 "' packaging/homebrew/alle.rb | grep -oE '[0-9a-f]{64}')
+          artifact_sha=$(sha256sum dist/*.tar.gz | awk '{print $1}')
+          if [ "$formula_sha" != "$artifact_sha" ]; then
+            echo "::error::formula sha256 $formula_sha does not match the built sdist $artifact_sha"
+            exit 1
+          fi
+
+      - name: Push the formula to the tap
+        if: steps.tag.outputs.stable == 'true'
+        env:
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          umask 077
+          key="$RUNNER_TEMP/tap_deploy_key"
+          printf '%s\n' "$DEPLOY_KEY" > "$key"
+          known_hosts="$RUNNER_TEMP/known_hosts"
+          # GitHub's published ed25519 host key (docs: "GitHub's SSH key
+          # fingerprints") — pinned, no TOFU.
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes"
+          git clone --depth 1 git@github.com:zydo/homebrew-tap.git "$RUNNER_TEMP/tap"
+          install -m 644 packaging/homebrew/alle.rb "$RUNNER_TEMP/tap/Formula/alle.rb"
+          cd "$RUNNER_TEMP/tap"
+          if git diff --quiet; then
+            echo "tap already carries this formula — nothing to push"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "alle ${GITHUB_REF_NAME#v}"
+          git push origin HEAD:main
+
   github-release:
     needs: [publish-pypi, publish-docker]
     runs-on: ubuntu-latest

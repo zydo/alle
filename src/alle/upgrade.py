@@ -71,8 +71,8 @@ def _dist_exists() -> bool:
 
 
 def detect_channel() -> str:
-    """One of ``uv-tool`` / ``pipx`` / ``pip`` / ``checkout`` / ``container`` /
-    ``unknown`` — the tool that owns this installation's files."""
+    """One of ``uv-tool`` / ``pipx`` / ``homebrew`` / ``pip`` / ``checkout`` /
+    ``container`` / ``unknown`` — the tool that owns this installation's files."""
     from alle import runtime
 
     if runtime.in_container():
@@ -80,6 +80,11 @@ def detect_channel() -> str:
     if _editable_install():
         return "checkout"
     prefix = sys.prefix.replace("\\", "/")
+    low = prefix.lower()
+    # A Homebrew keg's venv lives in the formula's libexec under Cellar (or the
+    # `opt` symlink); the headless brew channel upgrades via `brew upgrade`.
+    if "/cellar/alle/" in low or "/homebrew/opt/alle/" in low:
+        return "homebrew"
     if "/uv/tools/" in prefix:
         return "uv-tool"
     if "/pipx/venvs/" in prefix:
@@ -108,7 +113,8 @@ _REFUSALS = {
 def _command_for(channel: str) -> list[str]:
     if channel == "pip":
         return [sys.executable, "-m", "pip", "install", "--upgrade", PACKAGE]
-    tool = {"uv-tool": "uv", "pipx": "pipx"}[channel]
+    # The brew keg is named for the formula (`alle`), not the PyPI package.
+    tool = {"uv-tool": "uv", "pipx": "pipx", "homebrew": "brew"}[channel]
     exe = shutil.which(tool)
     if not exe:
         raise UpgradeError(
@@ -117,6 +123,8 @@ def _command_for(channel: str) -> list[str]:
         )
     if channel == "uv-tool":
         return [exe, "tool", "upgrade", PACKAGE]
+    if channel == "homebrew":
+        return [exe, "upgrade", "alle"]
     return [exe, "upgrade", PACKAGE]
 
 
@@ -182,9 +190,9 @@ def _version_newer(latest: str, current: str) -> bool:
 def _fetch_pypi_version(timeout: float) -> str:
     import urllib.request
 
-    req = urllib.request.Request(PYPI_JSON_URL, headers={"Accept": "application/json"})  # noqa: S310 — fixed https/loopback URL, no user-supplied scheme
+    req = urllib.request.Request(PYPI_JSON_URL, headers={"Accept": "application/json"})  # noqa: S310
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — fixed https URL
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
             data = json.load(resp)
     except (OSError, ValueError) as e:
         raise UpgradeError(
