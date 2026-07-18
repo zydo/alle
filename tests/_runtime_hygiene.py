@@ -507,7 +507,8 @@ class RuntimeHandle:
         else:
             parts.append("applier.info=absent")
         parts.extend(
-            self._log_diagnostic(name) for name in ("applier.log", "singbox.log")
+            self._log_diagnostic(name)
+            for name in ("alle.log", "applier.log", "singbox.log")
         )
         return "\n".join(parts)
 

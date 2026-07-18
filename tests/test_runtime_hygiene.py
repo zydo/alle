@@ -16,6 +16,7 @@ from _runtime_hygiene import RuntimeSession, record_is_live, recover_stale_sessi
 
 ROOT = Path(__file__).resolve().parents[1]
 _FAILED_RUNTIME: dict = {}
+DATA_PLANE_START_TIMEOUT = 60.0
 
 
 class _ExpectedLifecycleFailure(Exception):
@@ -34,7 +35,10 @@ def test_real_runtime_is_reaped_before_its_home(real_background_runtime):
     parent = handle.home.parent
     handle.start()
     applier = handle.wait_for("applier")
-    data_plane = handle.wait_for("singbox", timeout=20)
+    # Fresh hosted macOS runners can spend more than 20 seconds cold-starting
+    # the detached interpreter and validating the staged sing-box executable.
+    # This gate owns cleanup, not startup performance, but remains bounded.
+    data_plane = handle.wait_for("singbox", timeout=DATA_PLANE_START_TIMEOUT)
 
     assert record_is_live(applier["record"])
     assert record_is_live(data_plane["record"])
@@ -59,7 +63,7 @@ def test_failing_test_still_reaps_its_runtime(real_background_runtime):
     _FAILED_RUNTIME.update(
         parent=handle.home.parent,
         applier=handle.wait_for("applier")["record"],
-        singbox=handle.wait_for("singbox", timeout=20)["record"],
+        singbox=handle.wait_for("singbox", timeout=DATA_PLANE_START_TIMEOUT)["record"],
     )
     raise _ExpectedLifecycleFailure(
         "intentional failure after starting the opted-in runtime"
@@ -85,6 +89,7 @@ def test_runtime_timeout_reports_sanitized_process_and_log_state(runtime_guard):
     assert "applier.pid=absent" in diagnostic
     assert "singbox.pid=absent" in diagnostic
     assert "applier.info=absent" in diagnostic
+    assert "alle.log=absent" in diagnostic
     assert "startup failed below <test-home>" in diagnostic
     assert str(home) not in diagnostic
     assert runtime_guard.session.token not in diagnostic
