@@ -2,31 +2,29 @@ name: Dependabot automerge
 
 on:
   workflow_run:
-    workflows: [CI, Supply Chain]
-    types: [completed]
+    workflows: [CI]
+    types: [requested]
 
-# CI and Supply Chain complete independently. Serialize their completion
-# events so only one privileged run can approve and merge a given head.
+# Queue each immutable head once, as soon as CI is requested. Branch
+# protection—not this privileged workflow—holds the merge until every CI and
+# Supply Chain check passes.
 concurrency:
   group: dependabot-automerge-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: false
 
 permissions:
-  actions: read
   contents: write
   pull-requests: write
 
 jobs:
   merge:
-    if: >-
-      github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.conclusion == 'success'
+    if: github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       # `workflow_run` has a write-capable token, so never check out or run
       # code from the PR. Trust only GitHub API data and exact immutable SHAs.
-      - name: Verify Dependabot identity and required workflows
+      - name: Verify Dependabot identity
         id: verify
         env:
           BASE_REF: ${{ github.event.repository.default_branch }}
@@ -58,20 +56,6 @@ jobs:
             exit 0
           fi
 
-          runs=$(gh api \
-            "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=100")
-          for workflow in CI 'Supply Chain'; do
-            result=$(jq -r --arg workflow "$workflow" '
-              [.workflow_runs[] | select(.name == $workflow)]
-              | sort_by(.id) | last
-              | "\(.status):\(.conclusion)"
-            ' <<<"$runs")
-            if [[ "$result" != 'completed:success' ]]; then
-              echo "$workflow is not green for $HEAD_SHA ($result)"
-              exit 0
-            fi
-          done
-
           echo "merge=true" >>"$GITHUB_OUTPUT"
 
       - name: Approve the verified update
@@ -81,14 +65,14 @@ jobs:
           PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
         run: |
           gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --approve \
-            --body "Dependabot identity and all repository gates verified."
+            --body "Dependabot identity verified; required checks gate auto-merge."
 
-      - name: Squash-merge the verified head
+      - name: Enable auto-merge for the verified head
         if: steps.verify.outputs.merge == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
         run: |
-          gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --squash \
-            --delete-branch --match-head-commit "$HEAD_SHA"
+          gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --auto \
+            --squash --match-head-commit "$HEAD_SHA"
