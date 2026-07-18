@@ -205,6 +205,8 @@ Planned next steps:
 
 - More WireGuard-capable VPN providers. See
   [VPN Provider Research](docs/vpn-provider-research.md).
+- Homebrew distribution of the CLI and bundled Web UI on macOS and Linux.
+- A one-command uv-based CLI/Web UI installation on macOS and Linux.
 - Desktop companion with OS-level VPN integration.
 - Windows support and broader distribution.
 

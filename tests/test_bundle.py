@@ -9,7 +9,6 @@ import json
 import stat
 import urllib.error
 import urllib.request
-from threading import Thread
 
 import pytest
 import yaml
@@ -17,16 +16,12 @@ import yaml
 from alle import bundle, cli, credentials, service
 from alle.providers import ProviderError
 from alle.state import Store
+from conftest import start_test_server, stop_test_server
 from alle.api import server
 
 KEY_A = base64.b64encode(bytes([1] * 32)).decode()
 KEY_B = base64.b64encode(bytes([2] * 32)).decode()
 KEY_C = base64.b64encode(bytes([3] * 32)).decode()
-
-
-@pytest.fixture(autouse=True)
-def no_background(monkeypatch):
-    monkeypatch.setattr(service.daemon, "ensure_running", lambda: None)
 
 
 def wg(host="1.2.3.4", private_key=KEY_A, preshared=None):
@@ -821,12 +816,12 @@ def test_cli_import_missing_file_fails_cleanly():
 def live():
     seed()
     httpd = server.build_server()
-    Thread(target=httpd.serve_forever, daemon=True).start()
+    thread = start_test_server(httpd)
     api = server.control_api()
     try:
         yield f"http://{api['address']}", api["secret"], api["address"]
     finally:
-        httpd.shutdown()
+        stop_test_server(httpd, thread)
 
 
 def _req(url, *, method="GET", headers=None, data=None):

@@ -6,27 +6,26 @@ from __future__ import annotations
 
 import json
 import urllib.request
-from threading import Thread
 
 import pytest
 
 from alle import companion
 from alle.state import Store
 from alle.api import server
+from conftest import start_test_server, stop_test_server
 
 
 @pytest.fixture
-def live(monkeypatch):
+def live():
     """A running control server + a CompanionClient pointed at it. Yields the
-    client. Daemon spawning is neutralized so lifecycle calls stay hermetic."""
-    monkeypatch.setattr("alle.service.daemon.ensure_running", lambda: None)
+    client. Global runtime isolation keeps lifecycle calls hermetic."""
     Store.load().add_provider("nordvpn")
     httpd = server.build_server()
-    Thread(target=lambda: httpd.serve_forever(poll_interval=0.02), daemon=True).start()
+    thread = start_test_server(httpd)
     try:
         yield companion.CompanionClient()
     finally:
-        httpd.shutdown()
+        stop_test_server(httpd, thread)
 
 
 def test_health_ok_only_when_our_daemon_is_behind_the_port(live):
@@ -182,7 +181,7 @@ def test_secret_never_sent_to_a_squatted_port(monkeypatch, tmp_path):
             pass  # keep pytest output clean
 
     httpd = HTTPServer(("127.0.0.1", 0), Squatter)
-    Thread(target=httpd.serve_forever, daemon=True).start()
+    thread = start_test_server(httpd)
     try:
         cfg = tmp_path / "control_api.json"
         cfg.write_text(
@@ -202,7 +201,7 @@ def test_secret_never_sent_to_a_squatted_port(monkeypatch, tmp_path):
         with pytest.raises(companion.DaemonUnavailable, match="health challenge"):
             client.web_ui_login_url()
     finally:
-        httpd.shutdown()
+        stop_test_server(httpd, thread)
     assert any(path.startswith("/health") for path, _ in hits)  # challenge ran
     assert not any(had_auth for _, had_auth in hits)  # the secret never left
 

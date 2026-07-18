@@ -11,11 +11,6 @@ from alle.providers import ProviderError
 WG = {"private_key": "x", "peer": {}}
 
 
-@pytest.fixture(autouse=True)
-def no_background(monkeypatch):
-    monkeypatch.setattr(service.daemon, "ensure_running", lambda: None)
-
-
 def test_resolve_provider_rejects_unknown():
     with pytest.raises(service.ServiceError) as exc:
         service.resolve_provider("bogus")

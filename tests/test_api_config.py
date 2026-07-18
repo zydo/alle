@@ -9,18 +9,12 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from threading import Thread
 
 import pytest
 
-from alle import service
 from alle.api import server
 from alle.state import Store
-
-
-@pytest.fixture(autouse=True)
-def no_background(monkeypatch):
-    monkeypatch.setattr(service.daemon, "ensure_running", lambda: None)
+from conftest import start_test_server, stop_test_server
 
 
 def _req(url, *, method="GET", headers=None, data=None):
@@ -174,12 +168,12 @@ def live_net(monkeypatch):
     Store.load().add_provider("nordvpn")
     httpd = server.build_server()
     monkeypatch.setattr(server._Handler, "net", True)
-    Thread(target=lambda: httpd.serve_forever(poll_interval=0.02), daemon=True).start()
+    thread = start_test_server(httpd)
     api = server.control_api()
     try:
         yield f"http://{api['address']}", api["secret"]
     finally:
-        httpd.shutdown()
+        stop_test_server(httpd, thread)
 
 
 @pytest.fixture
@@ -187,12 +181,12 @@ def live(monkeypatch):
     """A running control server in the default (loopback) mode."""
     Store.load().add_provider("nordvpn")
     httpd = server.build_server()
-    Thread(target=lambda: httpd.serve_forever(poll_interval=0.02), daemon=True).start()
+    thread = start_test_server(httpd)
     api = server.control_api()
     try:
         yield f"http://{api['address']}", api["secret"]
     finally:
-        httpd.shutdown()
+        stop_test_server(httpd, thread)
 
 
 FOREIGN = {"Host": "alle:8080"}  # what a compose sibling's request carries
@@ -263,7 +257,7 @@ def test_default_bind_keeps_the_strict_host_pin(live):
 def test_injected_secret_is_the_live_credential(monkeypatch):
     monkeypatch.setenv("ALLE_API_SECRET", "an-injected-secret-value")
     httpd = server.build_server()
-    Thread(target=lambda: httpd.serve_forever(poll_interval=0.02), daemon=True).start()
+    thread = start_test_server(httpd)
     api = server.control_api()
     base = f"http://{api['address']}"
     try:
@@ -279,4 +273,4 @@ def test_injected_secret_is_the_live_credential(monkeypatch):
         )
         assert st == 401
     finally:
-        httpd.shutdown()
+        stop_test_server(httpd, thread)

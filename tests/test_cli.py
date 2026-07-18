@@ -11,7 +11,6 @@ from alle import __version__, cli, service
 
 @pytest.fixture
 def no_background(monkeypatch):
-    monkeypatch.setattr(service.daemon, "ensure_running", lambda: None)
     monkeypatch.setattr(service.daemon, "stop", lambda: False)
 
 

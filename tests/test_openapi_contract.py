@@ -24,14 +24,13 @@ import json
 import pathlib
 import urllib.error
 import urllib.request
-from threading import Thread
 
 import pytest
 import yaml
 
-from alle import service
 from alle.api import server
 from alle.state import Store
+from conftest import start_test_server, stop_test_server
 
 SPEC_PATH = pathlib.Path(__file__).resolve().parent.parent / "docs" / "openapi.yaml"
 SPEC = yaml.safe_load(SPEC_PATH.read_text())
@@ -57,21 +56,16 @@ def _spec_operations() -> list[tuple[str, str]]:
     ]
 
 
-@pytest.fixture(autouse=True)
-def no_background(monkeypatch):
-    monkeypatch.setattr(service.daemon, "ensure_running", lambda: None)
-
-
 @pytest.fixture
 def live():
     Store.load().add_provider("nordvpn")
     httpd = server.build_server()
-    Thread(target=lambda: httpd.serve_forever(poll_interval=0.02), daemon=True).start()
+    thread = start_test_server(httpd)
     api = server.control_api()
     try:
         yield f"http://{api['address']}", api["secret"]
     finally:
-        httpd.shutdown()
+        stop_test_server(httpd, thread)
 
 
 def test_every_documented_operation_dispatches(live):

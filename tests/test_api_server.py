@@ -8,24 +8,15 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
-from threading import Thread
 
 import pytest
 
 from alle import service
 from alle.state import Store
 from alle.api import auth, server
-from conftest import wg_config
+from conftest import start_test_server, stop_test_server, wg_config
 
 WG = wg_config("1.2.3.4")
-
-
-@pytest.fixture(autouse=True)
-def no_background(monkeypatch):
-    """Mutations reached over the API must not spawn a real applier daemon —
-    without this, every mutation test leaked a live `-m alle applier` (which
-    then downloaded its own sing-box) into a deleted temp home."""
-    monkeypatch.setattr(service.daemon, "ensure_running", lambda: None)
 
 
 @pytest.fixture
@@ -34,12 +25,12 @@ def live():
     Store.load().add_provider("nordvpn")  # a little content for /status
     httpd = server.build_server()
     # a short poll interval keeps each test's shutdown() near-instant
-    Thread(target=lambda: httpd.serve_forever(poll_interval=0.02), daemon=True).start()
+    thread = start_test_server(httpd)
     api = server.control_api()
     try:
         yield f"http://{api['address']}", api["secret"]
     finally:
-        httpd.shutdown()
+        stop_test_server(httpd, thread)
 
 
 def _req(url, *, method="GET", headers=None, data=None, raw=None):
@@ -1157,7 +1148,6 @@ def test_killswitch_requires_a_strict_boolean(live):
 def test_tun_endpoint_toggles_and_gates_on_privileges(live, monkeypatch):
     base, secret = live
     origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
-    monkeypatch.setattr(service.daemon, "ensure_running", lambda: None)
     monkeypatch.setattr(service.daemon, "daemon_info", lambda: None)
 
     # unprivileged enable → 400 carrying the documented sudo path, state untouched

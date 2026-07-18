@@ -23,11 +23,6 @@ KEY_A = base64.b64encode(bytes([1] * 32)).decode()
 KEY_B = base64.b64encode(bytes([2] * 32)).decode()
 
 
-@pytest.fixture(autouse=True)
-def no_background(monkeypatch):
-    monkeypatch.setattr(service.daemon, "ensure_running", lambda: None)
-
-
 def seed_channel(country="United States", city=""):
     store = Store.load()
     if not store.has_provider("nordvpn"):

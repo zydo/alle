@@ -10,11 +10,6 @@ from alle import service
 WG = {"private_key": "x", "peer": {}}
 
 
-@pytest.fixture(autouse=True)
-def no_background(monkeypatch):
-    monkeypatch.setattr(service.daemon, "ensure_running", lambda: None)
-
-
 def test_provider_remove_many_preflights_before_mutating():
     store = service.Store.load()
     store.add_provider("nordvpn")

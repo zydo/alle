@@ -449,7 +449,7 @@ def _read_log() -> str:
 # ---- ownership handoff to a service manager ------------------------------------
 
 
-def test_ensure_running_defers_to_service_manager(monkeypatch):
+def test_ensure_running_defers_to_service_manager(monkeypatch, background_runtime):
     from alle import daemonctl
 
     monkeypatch.setattr(daemon, "is_running", lambda: False)

@@ -13,17 +13,12 @@ import base64
 
 import pytest
 
-from alle import bundle, cli, credentials, paths, service
+from alle import bundle, cli, credentials, paths
 from alle.providers import ProviderError
 from alle.state import Store
 
 KEY_A = base64.b64encode(bytes([1] * 32)).decode()
 KEY_B = base64.b64encode(bytes([2] * 32)).decode()
-
-
-@pytest.fixture(autouse=True)
-def no_background(monkeypatch):
-    monkeypatch.setattr(service.daemon, "ensure_running", lambda: None)
 
 
 def wg(host="1.2.3.4"):

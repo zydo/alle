@@ -17,8 +17,7 @@ WG = wg_config("1.2.3.4")
 
 
 @pytest.fixture(autouse=True)
-def no_background(monkeypatch):
-    monkeypatch.setattr(service.daemon, "ensure_running", lambda: None)
+def reset_gateway_profile(monkeypatch):
     monkeypatch.delenv("ALLE_GATEWAY", raising=False)
 
 

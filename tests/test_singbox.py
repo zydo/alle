@@ -640,6 +640,7 @@ def test_prune_is_a_noop_with_only_the_current_binary(tmp_path):
 def test_ensure_binary_repairs_mode_on_a_valid_cached_binary(monkeypatch):
     import hashlib
 
+    monkeypatch.delenv("ALLE_SINGBOX")
     content = b"#!/bin/sh\nexit 0\n"
     key = singbox.host_platform()
     monkeypatch.setitem(
@@ -657,6 +658,7 @@ def test_ensure_binary_repairs_mode_on_a_valid_cached_binary(monkeypatch):
 def test_ensure_binary_rejects_a_foreign_owned_cached_binary(monkeypatch):
     import hashlib
 
+    monkeypatch.delenv("ALLE_SINGBOX")
     content = b"binary"
     key = singbox.host_platform()
     monkeypatch.setitem(

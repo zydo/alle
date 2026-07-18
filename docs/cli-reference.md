@@ -1071,8 +1071,9 @@ alle daemon install
 alle daemon install --linger      # Linux: survive logout
 ```
 
-(There is no Homebrew formula yet; when one ships, `brew services` will own
-registration for that channel.)
+(There is no Homebrew formula yet. The planned macOS/Linux formula will ship
+only the CLI and bundled Web UI, without the tray/companion; `brew services`
+will own registration for that channel.)
 
 ### `alle daemon uninstall`
 
@@ -1124,8 +1125,9 @@ sudo alle helper uninstall   # remove it (tun on then needs the sudo fallback)
 - The helper is deliberately minimal — it only launches/stops/reloads sing-box
   against the fixed config path; it never parses state or sees credentials. See
   `docs/security.md` for the trust model.
-- The signed, GUI-installed variant (SMAppService inside the `.app`) is deferred
-  to Phase 8; this launchd helper is the no-signing steady state.
+- The signed, GUI-installed variant (SMAppService inside the `.app`) is later
+  signed-app distribution work; this launchd helper is the no-signing steady
+  state.
 
 ---
 
