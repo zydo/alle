@@ -58,6 +58,7 @@ omit the prefix.
   - [Exit codes](#exit-codes)
   - [Environment variables](#environment-variables)
   - [Files](#files)
+  - [Recovery](#recovery)
 
 ## Conventions
 
@@ -1070,8 +1071,8 @@ alle daemon install
 alle daemon install --linger      # Linux: survive logout
 ```
 
-Homebrew users don't need this — `brew services start alle` owns registration
-there.
+(There is no Homebrew formula yet; when one ships, `brew services` will own
+registration for that channel.)
 
 ### `alle daemon uninstall`
 
@@ -1156,6 +1157,9 @@ alle version
 - `0` — success.
 - `1` — a user-correctable error (bad input, unknown provider/channel, rejected
   credential, missing config file, etc.); the message explains what to fix.
+  Two commands also use `1` as a deliberate monitoring signal: `alle health`
+  (daemon/sing-box liveness) and `alle test --fail` (any probed channel
+  unhealthy, or nothing probed).
 - `2` — argument/usage error (argparse); help is printed.
 - `130` — interrupted (Ctrl-C).
 
@@ -1198,3 +1202,54 @@ testing: `ALLE_HOME=/tmp/alle-test alle status`):
 - `bin/sing-box@<version>` — pinned, checksum-verified sing-box binary.
 - `alle.log`, plus `*.pid` and `applier.info.json` (daemon pid + version, read by
   `alle status` for the skew warning) / runtime files while running.
+
+## Recovery
+
+What alle does when things break, and what is yours to do:
+
+- **Corrupt `state.json`.** A file that no longer parses is **quarantined
+  loudly** — moved aside as `state.json.corrupt-<timestamp>-<pid>` (evidence
+  kept, never overwritten) and alle continues from a fresh store. Restore from
+  your latest [`alle export`](#alle-export---out-file) bundle. A state file
+  written by a **newer** alle is different: it is *not* corruption, so nothing
+  is quarantined — reads and mutations abort until you upgrade alle. An
+  unreadable file (permissions, transient I/O) also aborts rather than
+  proceeding from an empty view that the next write would persist.
+- **Occupied / stolen ports.** If sing-box fails to start because another
+  program took a channel, router, or contract port, alle detects the bind
+  failure, **reallocates the port and retries the apply on its own** — no
+  manual step. Ports you declared explicitly (`--port`, bundle `port:`) are a
+  contract and are *not* silently moved; free the port or change the
+  declaration.
+- **Rejected config.** Every generated config passes `sing-box check` before
+  it is applied; a rejection **keeps the last-known-good config running**
+  (restarting it if the process was down) and reports the rejection. Nothing
+  to recover — fix the state that produced it (the error names it), or
+  `alle upgrade` if the rejection follows a sing-box version change.
+- **Service-manager failures.** A failed `alle daemon install` rolls back the
+  previous unit (or removes the fresh one) and brings back a manually running
+  daemon — you are never left with less than you started with. A failed
+  uninstall whose stop half did not land **keeps** the unit file for
+  diagnosis; inspect `launchctl print gui/$UID/com.github.zydo.alle` or
+  `systemctl --user status alle.service`, then retry.
+- **Daemon ↔ CLI version skew** (after an upgrade): `alle status` warns;
+  `alle restart` moves the daemon onto the installed version (a supervised
+  daemon does this itself within ~30s).
+
+### Upgrade checklist
+
+`alle upgrade` handles the mechanics (delegate to the owning tool, restart the
+daemon). Around a meaningful version jump:
+
+1. **Back up first**: `alle export` — the bundle is the full setup (it contains
+   secrets; store it accordingly). You have now rehearsed restore-from-bundle
+   the day you need it.
+2. **Upgrade**: `alle upgrade` (or your tool's own `uv tool upgrade alle-proxy` /
+   `pipx upgrade alle-proxy`; container: pull the new image tag).
+3. **Verify**: `alle status` (no skew warning), `alle health`, and
+   `alle test --fail` if channels should be up. State schema migrations are
+   automatic and forward-only; an older alle refuses a newer state file rather
+   than guessing (see Recovery above).
+4. **Roll back if needed**: install the previous version through the same tool
+   (e.g. `uv tool install alle-proxy==<old>`), then `alle import --replace`
+   your pre-upgrade bundle if the newer version already migrated state.
