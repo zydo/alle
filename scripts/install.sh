@@ -94,12 +94,16 @@ validate_state_path() {
 	"$state_dir"/*) die "refusing state path '$state_dir' because it contains the bootstrap receipt." ;;
 	esac
 	if [ -e "$state_dir" ] || [ -L "$state_dir" ]; then
-		[ -d "$state_dir" ] && [ ! -L "$state_dir" ] || die "refusing replaced recorded state path '$state_dir'."
+		if ! { [ -d "$state_dir" ] && [ ! -L "$state_dir" ]; }; then
+			die "refusing replaced recorded state path '$state_dir'."
+		fi
 		canonical_state=$(canonical_dir "$state_dir") || die "cannot validate recorded state path '$state_dir'."
 		[ "$canonical_state" = "$state_dir" ] || die "refusing non-canonical recorded state path '$state_dir'."
 		state_marker=$state_dir/.alle-bootstrap-receipt
 		if [ -e "$state_marker" ] || [ -L "$state_marker" ]; then
-			[ -f "$state_marker" ] && [ ! -L "$state_marker" ] || die "refusing replaced state ownership marker: $state_marker"
+			if ! { [ -f "$state_marker" ] && [ ! -L "$state_marker" ]; }; then
+				die "refusing replaced state ownership marker: $state_marker"
+			fi
 			if ! { [ "$(wc -l <"$state_marker" | tr -d ' ')" = 3 ] &&
 				grep -Fqx 'receipt_version=1' "$state_marker" &&
 				grep -Fqx "receipt_path=$receipt" "$state_marker" &&
@@ -113,7 +117,9 @@ validate_state_path() {
 }
 
 load_receipt() {
-	[ -f "$receipt" ] && [ ! -L "$receipt" ] && [ -r "$receipt" ] || die "refusing unreadable or linked bootstrap receipt: $receipt"
+	if ! { [ -f "$receipt" ] && [ ! -L "$receipt" ] && [ -r "$receipt" ]; }; then
+		die "refusing unreadable or linked bootstrap receipt: $receipt"
+	fi
 	[ "$(wc -l <"$receipt" | tr -d ' ')" = 6 ] || die "refusing malformed bootstrap receipt: $receipt"
 	if grep -Ev '^(receipt_version|state_dir|uv_path|uv_tools_dir|uv_bin_dir|linger_changed)=' "$receipt" >/dev/null; then
 		die "refusing malformed bootstrap receipt: $receipt"
@@ -138,8 +144,9 @@ phase_value() {
 }
 
 read_uninstall_phase() {
-	[ -f "$phase_file" ] && [ ! -L "$phase_file" ] && [ -r "$phase_file" ] ||
+	if ! { [ -f "$phase_file" ] && [ ! -L "$phase_file" ] && [ -r "$phase_file" ]; }; then
 		die "refusing unreadable or linked uninstall phase: $phase_file"
+	fi
 	[ "$(wc -l <"$phase_file" | tr -d ' ')" = 4 ] || die "refusing malformed uninstall phase: $phase_file"
 	if grep -Ev '^(phase_version|receipt_path|state_dir|phase)=' "$phase_file" >/dev/null; then
 		die "refusing malformed uninstall phase: $phase_file"

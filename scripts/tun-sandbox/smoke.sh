@@ -19,6 +19,7 @@
 # namespace it runs in.
 set -euo pipefail
 
+# shellcheck source=/dev/null
 . "$(dirname "$0")/lib.sh"
 
 TUN_NAME="sbtun0"

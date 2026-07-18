@@ -55,12 +55,14 @@ jobs:
       - name: Lint
         run: |
           uv run ruff check
-          shellcheck scripts/install.sh scripts/install-systemd-smoke.sh
+          git ls-files -z '*.sh' | xargs -0 uv run shellcheck
           sh -n scripts/install.sh
           bash -n scripts/install-systemd-smoke.sh
 
       - name: Format check
-        run: uv run ruff format --check
+        run: |
+          uv run ruff format --check
+          git ls-files -z '*.sh' | xargs -0 uv run shfmt -d
 
       - name: Test
         run: uv run pytest -q

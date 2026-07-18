@@ -17,6 +17,7 @@
 # Never run outside the sandbox.
 set -euo pipefail
 
+# shellcheck source=/dev/null
 . "$(dirname "$0")/lib.sh"
 
 TUN_NAME="alle-tun"

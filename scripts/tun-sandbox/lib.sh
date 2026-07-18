@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared helpers for the Tier 2 sandbox scripts (sourced, never executed).
 # Callers set TUN_NAME and SB_LOG before using start_singbox/stop_singbox.
 

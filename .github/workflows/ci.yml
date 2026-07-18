@@ -35,11 +35,13 @@ jobs:
       - name: Check lint (incl. flake8-bandit security rules)
         run: |
           uv run ruff check
-          shellcheck scripts/install.sh scripts/install-systemd-smoke.sh
+          git ls-files -z '*.sh' | xargs -0 uv run shellcheck
           sh -n scripts/install.sh
           bash -n scripts/install-systemd-smoke.sh
       - name: Check format
-        run: uv run ruff format --check
+        run: |
+          uv run ruff format --check
+          git ls-files -z '*.sh' | xargs -0 uv run shfmt -d
       - name: Check types (mypy, zero-error baseline)
         run: uv run mypy
       - name: Check browser modules and stream protocols
