@@ -113,6 +113,8 @@ def test_ci_gates_match_the_publish_gate():
         "twine check",
     ):
         assert needle in runs, f"ci missing gate step: {needle!r}"
+    assert "shellcheck scripts/install.sh" in runs
+    assert "sh -n scripts/install.sh" in runs
 
 
 def test_publish_reuses_the_one_built_artifact():
@@ -120,13 +122,22 @@ def test_publish_reuses_the_one_built_artifact():
     pypi = wf["jobs"]["publish-pypi"]
     assert "build" in pypi["needs"]
     docker = wf["jobs"]["publish-docker"]
-    assert "build" in docker["needs"]
+    assert set(docker["needs"]) == {
+        "build",
+        "bootstrap-smoke-macos",
+        "bootstrap-smoke-systemd",
+    }
     assert set(wf["jobs"]["github-release"]["needs"]) == {
         "publish-pypi",
         "publish-docker",
+        "publish-homebrew",
+        "bootstrap-smoke-macos",
+        "bootstrap-smoke-systemd",
     }
     consumers = (
         (wf, "publish-pypi"),
+        (wf, "publish-docker"),
+        (wf, "publish-homebrew"),
         (wf, "github-release"),
     )
     for workflow, name in consumers:
@@ -244,3 +255,95 @@ def test_ci_cancels_superseded_work_and_jobs_are_bounded():
         for job_name, job in workflow.get("jobs", {}).items():
             if "uses" not in job:
                 assert "timeout-minutes" in job, f"{name}.{job_name} has no timeout"
+
+
+def test_stable_release_stages_and_verifies_the_pinned_installer():
+    wf = _load("publish.yml")
+    steps = wf["jobs"]["github-release"]["steps"]
+    runs = "\n".join(step.get("run", "") for step in steps)
+    assert 'grep -qx "ALLE_VERSION=\\"$version\\"" scripts/install.sh' in runs
+    assert "sha256sum install.sh > install.sh.sha256" in runs
+    assert "gh release create" in runs and "--draft" in runs
+    assert "gh release download" in runs
+    assert "gh release edit" in runs and "--draft=false" in runs
+    assert "/releases/download/$GITHUB_REF_NAME/install.sh" in runs
+    assert "/releases/latest/download/install.sh" in runs
+    assert (
+        'cmp "$RUNNER_TEMP/exact-install.sh" "$RUNNER_TEMP/latest-install.sh"' in runs
+    )
+
+
+def test_release_smokes_staged_bootstrap_on_macos_and_real_systemd():
+    wf = _load("publish.yml")
+    macos = wf["jobs"]["bootstrap-smoke-macos"]
+    linux = wf["jobs"]["bootstrap-smoke-systemd"]
+    assert macos["needs"] == "publish-pypi"
+    assert linux["needs"] == "publish-pypi"
+    smokes = {"bootstrap-smoke-macos", "bootstrap-smoke-systemd"}
+    assert smokes < set(wf["jobs"]["publish-docker"]["needs"])
+    assert set(wf["jobs"]["publish-homebrew"]["needs"]) == {
+        "publish-pypi",
+        *smokes,
+    }
+    assert macos["runs-on"].startswith("macos-")
+    mac_runs = "\n".join(step.get("run", "") for step in macos["steps"])
+    linux_runs = "\n".join(step.get("run", "") for step in linux["steps"])
+    assert "sh scripts/install.sh" in mac_runs
+    assert "leaving the tool unchanged" in mac_runs
+    assert "scripts/install-systemd-smoke.sh" in linux_runs
+
+    harness = (ROOT / "scripts" / "install-systemd-smoke.sh").read_text()
+    dockerfile = (ROOT / "scripts" / "install-systemd-smoke.Dockerfile").read_text()
+    assert "--privileged" in harness
+    assert "--user root" in harness
+    assert 'test "$(run_as_tester id -u)" = 1001' in harness
+    assert "USER tester" in dockerfile
+    assert "loginctl enable-linger" in harness
+    assert "systemctl start user@1001.service" in harness
+    assert "XDG_RUNTIME_DIR=/run/user/1001" in harness
+    assert re.search(r"^FROM ubuntu@sha256:[0-9a-f]{64}$", dockerfile, re.M)
+    assert "Ubuntu 24.04" in dockerfile
+
+
+def test_docker_tags_use_pep440_but_latest_is_numeric_stable_only():
+    wf = _load("publish.yml")
+    metadata = next(
+        step
+        for step in wf["jobs"]["publish-docker"]["steps"]
+        if step.get("uses", "").startswith("docker/metadata-action")
+    )
+    assert metadata["with"]["flavor"] == "latest=false"
+    tags = metadata["with"]["tags"]
+    assert "type=pep440,pattern={{version}}" in tags
+    assert "type=pep440,pattern={{major}}.{{minor}}" in tags
+    assert "type=semver" not in tags
+    assert (
+        "type=raw,value=latest,"
+        "enable=${{ steps.artifact.outputs.stable == 'true' }}" in tags
+    )
+
+    artifact = next(
+        step
+        for step in wf["jobs"]["publish-docker"]["steps"]
+        if step.get("id") == "artifact"
+    )
+    assert "^v[0-9]+\\.[0-9]+\\.[0-9]+$" in artifact["run"]
+
+
+def test_published_manifest_check_uses_the_normalized_pep440_tag():
+    """PEP 440 aliases normalize (for example ``-rc1`` becomes ``rc1``), so
+    the post-push check must inspect metadata-action's emitted tag rather than
+    reconstructing a potentially different tag from the raw Git ref.
+    """
+    workflow = _load("publish.yml")
+    manifest = next(
+        step
+        for step in workflow["jobs"]["publish-docker"]["steps"]
+        if step.get("name") == "Assert the published manifest architectures"
+    )
+    run = manifest["run"]
+    assert (
+        'image="${{ vars.DOCKERHUB_USERNAME }}/alle:'
+        '${{ steps.meta.outputs.version }}"' in run
+    )
+    assert "${GITHUB_REF_NAME#v}" not in run

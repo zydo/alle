@@ -51,10 +51,34 @@ def test_daemon_install_surfaces_ctl_errors(monkeypatch):
 
 
 def test_daemon_uninstall_delegates(monkeypatch):
+    events = []
     monkeypatch.setattr(
-        daemonctl, "uninstall", lambda: {"manager": "systemd", "removed": True}
+        daemonctl,
+        "uninstall",
+        lambda: events.append("unit") or {"manager": "systemd", "removed": True},
+    )
+    monkeypatch.setattr(
+        service.singbox,
+        "Runner",
+        lambda: type("Runner", (), {"stop": lambda self: events.append("sing-box")})(),
     )
     assert service.daemon_uninstall()["removed"] is True
+    assert events == ["unit", "sing-box"]
+
+
+def test_daemon_uninstall_does_not_stop_manual_runtime_when_no_unit_was_removed(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        daemonctl, "uninstall", lambda: {"manager": "systemd", "removed": False}
+    )
+    monkeypatch.setattr(
+        service.singbox,
+        "Runner",
+        lambda: pytest.fail("no removed supervisor means no owned data plane"),
+    )
+
+    assert service.daemon_uninstall()["removed"] is False
 
 
 # ---- version skew in status ----------------------------------------------------

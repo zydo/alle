@@ -5,13 +5,15 @@ against a real server on an ephemeral loopback port."""
 from __future__ import annotations
 
 import json
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 import pytest
 
-from alle import service
+from alle import daemon, service, upgrade
 from alle.state import Store
 from alle.api import auth, server
 from conftest import start_test_server, stop_test_server, wg_config
@@ -1058,7 +1060,12 @@ def test_upgrade_check_is_get_and_authed(live, monkeypatch):
     monkeypatch.setattr(
         service,
         "upgrade_check",
-        lambda: {"current": "0.1.8", "latest": "0.1.9", "update_available": True},
+        lambda: {
+            "channel": "uv-tool",
+            "current": "0.1.8",
+            "latest": "0.1.9",
+            "update_available": True,
+        },
     )
     st, body, _ = _req(base + "/api/v1/upgrade/check")
     assert st == 401  # no credentials, no version disclosure
@@ -1068,6 +1075,7 @@ def test_upgrade_check_is_get_and_authed(live, monkeypatch):
     )
     assert st == 200
     assert json.loads(body) == {
+        "channel": "uv-tool",
         "current": "0.1.8",
         "latest": "0.1.9",
         "update_available": True,
@@ -1081,14 +1089,23 @@ def test_upgrade_post_calls_service_and_surfaces_refusals(live, monkeypatch):
         service,
         "upgrade_run",
         lambda: {
-            "channel": "uv-tool",
+            "channel": "homebrew",
+            "command": ["/opt/homebrew/bin/brew", "upgrade", "alle"],
             "before": "0.1.8",
             "after": "0.1.9",
+            "latest": "0.1.9",
             "changed": True,
+            "restart_pending": True,
+            "restart_owner": "homebrew",
         },
     )
     st, body, _ = _req(base + "/api/v1/upgrade", method="POST", headers=origin, data={})
-    assert st == 200 and json.loads(body)["changed"] is True
+    assert st == 200
+    result = json.loads(body)
+    assert result["changed"] is True
+    assert result["latest"] == "0.1.9"
+    assert result["command"][-1] == "alle"
+    assert result["restart_owner"] == "homebrew"
 
     def refuse():
         raise service.ServiceError("this alle is a git checkout — upgrade with git")
@@ -1101,6 +1118,135 @@ def test_upgrade_post_calls_service_and_surfaces_refusals(live, monkeypatch):
         base + "/api/v1/upgrade", headers={"Authorization": f"Bearer {secret}"}
     )
     assert st == 405 and headers.get("Allow") == "POST"
+
+
+def test_upgrade_post_defers_daemon_exit_through_response_flush(live, monkeypatch):
+    base, secret = live
+    origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    monkeypatch.setattr(
+        service,
+        "upgrade_run",
+        lambda: {
+            "channel": "homebrew",
+            "command": ["/opt/homebrew/bin/brew", "upgrade", "alle"],
+            "before": "0.1.8",
+            "after": "0.1.9",
+            "latest": "0.1.9",
+            "changed": True,
+            "restart_pending": True,
+            "restart_owner": "homebrew",
+        },
+    )
+    flush_entered = threading.Event()
+    allow_flush = threading.Event()
+    original_flush = server._Handler._flush_upgrade_response
+
+    def paused_flush(handler):
+        # This is the exact watcher race window: package mutation and JSON
+        # serialization are complete, but the response has not been flushed.
+        assert daemon.upgrade_restart_deferred() is True
+        flush_entered.set()
+        if not allow_flush.wait(timeout=2):
+            raise RuntimeError("test did not release the upgrade response flush")
+        original_flush(handler)
+
+    monkeypatch.setattr(server._Handler, "_flush_upgrade_response", paused_flush)
+    response = {}
+
+    def request_upgrade():
+        response["value"] = _req(
+            base + "/api/v1/upgrade", method="POST", headers=origin, data={}
+        )
+
+    request_thread = threading.Thread(target=request_upgrade)
+    request_thread.start()
+    assert flush_entered.wait(timeout=2)
+    assert daemon.upgrade_restart_deferred() is True
+
+    allow_flush.set()
+    request_thread.join(timeout=2)
+    assert not request_thread.is_alive()
+    assert response["value"][0] == 200
+    deadline = time.monotonic() + 1
+    while daemon.upgrade_restart_deferred() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert daemon.upgrade_restart_deferred() is False
+
+
+def test_upgrade_post_defers_native_restart_until_response_flush(live, monkeypatch):
+    base, secret = live
+    origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    spawned = []
+    monkeypatch.setattr(daemon, "spawn_detached", lambda code: spawned.append(code))
+
+    def native_upgrade():
+        # This is what service.upgrade_run requests for a uv/pipx/pip upgrade
+        # running inside the daemon process.
+        daemon.schedule_lifecycle("restart", delay=0.0)
+        return {
+            "channel": "uv-tool",
+            "command": ["/usr/bin/uv", "tool", "install", "alle-proxy"],
+            "before": "0.1.8",
+            "after": "0.1.9",
+            "latest": "0.1.9",
+            "changed": True,
+            "restart": {"reconnect_cleared": 0, "restarting": True},
+        }
+
+    monkeypatch.setattr(service, "upgrade_run", native_upgrade)
+    flush_entered = threading.Event()
+    allow_flush = threading.Event()
+    original_flush = server._Handler._flush_upgrade_response
+
+    def paused_flush(handler):
+        flush_entered.set()
+        if not allow_flush.wait(timeout=2):
+            raise RuntimeError("test did not release the upgrade response flush")
+        original_flush(handler)
+
+    monkeypatch.setattr(server._Handler, "_flush_upgrade_response", paused_flush)
+    response = {}
+
+    request_thread = threading.Thread(
+        target=lambda: response.setdefault(
+            "value",
+            _req(base + "/api/v1/upgrade", method="POST", headers=origin, data={}),
+        )
+    )
+    request_thread.start()
+    assert flush_entered.wait(timeout=2)
+    # Longer than the former 0.35-second heuristic: the restart is tied to the
+    # actual flush now, not merely assumed to follow it quickly.
+    time.sleep(0.45)
+    assert spawned == []
+
+    allow_flush.set()
+    request_thread.join(timeout=2)
+    assert not request_thread.is_alive()
+    assert response["value"][0] == 200
+    deadline = time.monotonic() + 1
+    while not spawned and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(spawned) == 1
+    assert "service.restart()" in spawned[0]
+
+
+def test_upgrade_post_maps_cross_process_lock_contention_to_503(
+    live, monkeypatch, tmp_path
+):
+    base, secret = live
+    origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    lock_directory = tmp_path / "account"
+    lock_directory.mkdir(mode=0o700)
+    monkeypatch.setattr(upgrade, "_upgrade_lock_directory", lambda: lock_directory)
+
+    with upgrade._upgrade_lock():
+        status, body, _ = _req(
+            base + "/api/v1/upgrade", method="POST", headers=origin, data={}
+        )
+
+    assert status == 503
+    assert "already running" in json.loads(body)["error"]
 
 
 # ---- strict request validation (fail closed, never coerce) ----

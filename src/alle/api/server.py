@@ -855,6 +855,10 @@ class _Handler(BaseHTTPRequestHandler):
         headers = {"Cache-Control": "no-store", **(extra or {})}
         self._send(code, body, "application/json", headers)
 
+    def _flush_upgrade_response(self) -> None:
+        """Commit an upgrade response before the daemon may self-restart."""
+        self.wfile.flush()
+
     def _unexpected(self) -> None:
         """Bound unexpected handler failures without exposing request data."""
         request_id = secrets.token_hex(6)
@@ -1109,16 +1113,20 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -- /api/v1 (a 1:1 projection of alle.service; no business logic here) --
     def _call(self, fn, *args, **kwargs):
-        """Run a service call and return its result as JSON; map a user-facing
-        error to a 400 whose message the UI shows verbatim (blocker lists,
-        rejected tokens, …). An error that carries a ``web_message`` (the same
-        refusal phrased for a browser — ruleset names instead of rule ids and
-        CLI commands) sends that instead of the CLI text."""
+        """Run a service call and return its result as JSON.
+
+        Retryable cross-process contention maps to 503; other user-facing
+        errors map to 400 with the message the UI shows verbatim (blocker
+        lists, rejected tokens, …). An error carrying ``web_message`` sends
+        that browser-specific refusal instead of the CLI text.
+        """
         from alle import service
         from alle.providers import ProviderError
 
         try:
             return self._json(200, fn(*args, **kwargs))
+        except service.ServiceBusyError as e:
+            return self._json(503, {"error": str(e)})
         except (service.ServiceError, ProviderError) as e:
             message = getattr(e, "web_message", None) or str(e)
             return self._json(400, {"error": message})
@@ -1257,8 +1265,9 @@ class _Handler(BaseHTTPRequestHandler):
             ("locations",): lambda: _locations(self.path),
             ("metrics",): lambda: service.metrics_totals(_channel_query(self.path)),
             ("logs",): lambda: {"text": service.logs_tail(_log_lines(self.path))},
-            # on-demand only: PyPI is contacted because the user clicked, never
-            # on a timer — alle's no-background-traffic posture
+            # On-demand only: the owning channel (tap for Homebrew, PyPI for
+            # Python managers) is contacted because the user clicked, never on
+            # a timer. Refusal channels surface through the usual 400 mapping.
             ("upgrade", "check"): service.upgrade_check,
         }
         fn = routes_.get(tuple(seg))
@@ -1528,15 +1537,26 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._stream_test(channel)
             return self._call(service.test, speed=False, channel=channel or None)
         if method == "POST" and seg == ["upgrade"]:
+            from alle import daemon as daemon_runtime
+
             # Delegates to the owning install channel; a refusal (container,
             # checkout, unknown) is a 400 whose message the UI shows verbatim.
-            # Single-flight: a second click must not race a live upgrade. The
-            # daemon restart is scheduled after this response is flushed.
+            # Single-flight: a second click must not race a live upgrade.
+            # Restart disposition is ownership-aware: native service work can
+            # be scheduled after this response, while Homebrew reports its own
+            # pending/required restart mode for the UI to render accurately.
             _fields(body)
             with _guarded("upgrade") as acquired:
                 if not acquired:
                     return self._json(503, {"error": "an upgrade is already running"})
-                return self._call(service.upgrade_run)
+                # The package watcher is on the daemon's main thread. Hold its
+                # exit lease across both manager mutation and response flush;
+                # returning from service.upgrade_run is too early because the
+                # old process still has to serialize and write the result.
+                with daemon_runtime.defer_upgrade_restart_until_response():
+                    result = self._call(service.upgrade_run)
+                    self._flush_upgrade_response()
+                    return result
         if method == "POST" and seg == ["lifecycle", "start"]:
             _fields(body)
             return self._call(service.start)

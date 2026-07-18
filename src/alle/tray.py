@@ -1,11 +1,12 @@
-"""macOS menu-bar companion — a v1 thin-client spike over :mod:`alle.companion`.
+"""Planned macOS menu-bar companion prototype over :mod:`alle.companion`.
 
 Deliberately tiny and rendering-only: every action delegates to
 :class:`alle.companion.CompanionClient` through one coalescing background
 worker, so the tray adds no capability the client does not already expose and
-never blocks the AppKit callback thread. ``rumps`` is an
-optional dependency (``pip install alle-proxy[tray]``, macOS only); importing
-this module without it raises a clear message rather than a bare ImportError.
+never blocks the AppKit callback thread. This source is retained for in-tree
+development, but the released wheel deliberately excludes it and provides no
+``tray`` extra or ``alle-tray`` launcher. ``rumps`` must therefore be installed
+separately when exercising the prototype from a checkout.
 
 Scope (hard contract — nothing richer ever lives here): status line, channel
 summary, start/stop/restart, tun on/off, kill-switch, open Web UI. Rule editing
@@ -107,11 +108,11 @@ def _dispatch_main(callback):
 def _require_rumps():
     try:
         import rumps
-    except ImportError as e:  # pragma: no cover - exercised only without the extra
+    except ImportError as e:  # pragma: no cover - source-only prototype dependency
         raise SystemExit(
-            "the menu-bar companion needs the optional 'tray' extra (macOS):\n"
-            "  pip install 'alle-proxy[tray]'\n"
-            "or use the CLI (alle status / alle tun) and the Web UI (alle ui)."
+            "the menu-bar companion is a source-only prototype (macOS).\n"
+            "For in-tree development, install rumps in the checkout environment;\n"
+            "released alle installations use the CLI and Web UI."
         ) from e
     return rumps
 

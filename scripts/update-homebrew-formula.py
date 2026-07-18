@@ -7,8 +7,8 @@ that passed the tag publish gate and reached PyPI. This script reads the sdist's
 URL and SHA-256 straight from PyPI's JSON API (the digest PyPI recorded for the
 uploaded file — never one this script computes) and rewrites the *first*
 `url`/`sha256` pair in the formula, i.e. the package's own source. The resource
-pins (pyyaml, pycountry) sit after the first `resource "` line and are left
-untouched.
+pins (packaging, PyYAML, pycountry) sit after the first `resource "` line and
+are left untouched.
 
 Run it against a version only after that version exists on PyPI:
 

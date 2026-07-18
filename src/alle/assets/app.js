@@ -76,10 +76,10 @@ $("logout").addEventListener("click", async () => {
   location.href = "/"; // back to the sign-in page
 });
 
-// Version badge = on-demand update check. PyPI is contacted only on this
-// click, never on a timer; the upgrade itself delegates to the install
-// channel server-side, and the daemon's restart surfaces as the usual
-// offline banner until the status poll reconnects on the new version.
+// Version badge = on-demand update check. The owning source (Homebrew tap or
+// PyPI) is contacted only on this click, never on a timer. Upgrade and restart
+// ownership stay server-side; the response tells us whether restart is native,
+// pending under Homebrew, or requires an explicit brew-services command.
 let upgradeBusy = false;
 $("ver").addEventListener("click", async () => {
   if (upgradeBusy) return;
@@ -87,22 +87,35 @@ $("ver").addEventListener("click", async () => {
   try {
     const check = await api.get("/api/v1/upgrade/check");
     if (!check.ok) { toast(check.error, "err"); return; }
+    const source = check.data.channel === "homebrew" ? "the Homebrew tap" : "PyPI";
     if (!check.data.update_available) {
-      toast(`alle ${check.data.current} is the latest release.`);
+      toast(`No newer stable release is available (installed ${check.data.current}; ` +
+        `newest on ${source}: ${check.data.latest}).`);
       return;
     }
     const go = await confirmDialog(
       "Update available",
-      `alle ${check.data.latest} is available (this is ${check.data.current}). ` +
-      "Upgrade now? The daemon restarts when it finishes.",
+      `alle ${check.data.latest} is available on ${source} ` +
+      `(this is ${check.data.current}). Upgrade now?`,
       { confirmText: "Upgrade" },
     );
     if (!go) return;
     const res = await api.post("/api/v1/upgrade");
     if (!res.ok) { toast(res.error, "err"); return; }
-    toast(res.data.changed
-      ? `Upgraded to ${res.data.after} — restarting…`
-      : "Already the latest release.");
+    if (!res.data.changed) {
+      toast(`No newer stable release is available (installed ${res.data.after}; ` +
+        `newest checked: ${res.data.latest}).`);
+    } else if (res.data.restart_required) {
+      toast(`Upgraded to ${res.data.after}. Restart with: ${res.data.restart_command}`);
+    } else if (res.data.restart_pending) {
+      toast(`Upgraded to ${res.data.after} — Homebrew will restart the service shortly…`);
+    } else if (res.data.restart?.restarting) {
+      toast(`Upgraded to ${res.data.after} — restarting…`);
+    } else if (res.data.restart) {
+      toast(`Upgraded to ${res.data.after} — daemon restarted.`);
+    } else {
+      toast(`Upgraded to ${res.data.after}.`);
+    }
   } finally {
     upgradeBusy = false;
   }

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import signal
+import subprocess
+import threading
 
 import pytest
 
@@ -382,6 +384,33 @@ def test_installed_version_is_readable():
     assert isinstance(v, str) and v  # resolves to the installed package version
 
 
+def test_daemon_info_records_homebrew_service_identity(monkeypatch):
+    monkeypatch.setenv("ALLE_SERVICE_OWNER", "homebrew")
+    monkeypatch.setenv("ALLE_SERVICE_PREFIX", "/opt/homebrew/opt/alle")
+
+    daemon._write_info({"singbox": "ok"})
+    info = json.loads(daemon._info_path().read_text())
+
+    assert info["service_owner"] == "homebrew"
+    assert info["service_prefix"] == "/opt/homebrew/opt/alle"
+
+
+def test_homebrew_installed_version_uses_the_stable_opt_shim(monkeypatch):
+    monkeypatch.setenv("ALLE_SERVICE_OWNER", "homebrew")
+    monkeypatch.setenv("ALLE_SERVICE_PREFIX", "/opt/homebrew/opt/alle")
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return subprocess.CompletedProcess(cmd, 0, stdout="0.1.9\n", stderr="")
+
+    monkeypatch.setattr(daemon.subprocess, "run", fake_run)
+
+    assert daemon.installed_version() == "0.1.9"
+    assert calls[0][0] == ["/opt/homebrew/opt/alle/bin/alle", "version"]
+    assert calls[0][1]["timeout"] == daemon.VERSION_PROBE_TIMEOUT
+
+
 # ---- self-restart on upgrade (supervised only) ---------------------------------
 
 
@@ -429,6 +458,47 @@ def test_supervised_daemon_exits_nonzero_on_version_change(monkeypatch):
         _drive_once(monkeypatch)
     assert ei.value.code == daemon.UPGRADE_EXIT_CODE
     assert "package upgraded" in _read_log()
+
+
+def test_supervised_watcher_waits_for_an_upgrade_response_lease(monkeypatch):
+    monkeypatch.setenv("ALLE_SERVICE", "1")
+    monkeypatch.setattr(daemon, "installed_version", lambda: "99.0.0")
+
+    # A manager has replaced the package, but the concurrent API handler still
+    # owns the old process until its JSON response is flushed. The watcher must
+    # keep the process alive for that request.
+    with daemon.defer_upgrade_restart_until_response():
+        with pytest.raises(KeyboardInterrupt):
+            _drive_once(monkeypatch)
+
+    # Once the response lease is released, the same mismatch performs the
+    # normal supervised handoff to the newly installed code.
+    with pytest.raises(SystemExit) as ei:
+        _drive_once(monkeypatch)
+    assert ei.value.code == daemon.UPGRADE_EXIT_CODE
+
+
+def test_upgrade_lifecycle_queue_is_scoped_to_its_handler_thread(monkeypatch):
+    spawned = []
+    monkeypatch.setattr(
+        daemon,
+        "_spawn_lifecycle",
+        lambda action, delay: spawned.append((action, delay)),
+    )
+
+    with daemon.defer_upgrade_restart_until_response():
+        daemon.schedule_lifecycle("restart", delay=1.0)
+        # An unrelated lifecycle handler has no lease in its own thread. It
+        # runs independently instead of overwriting the upgrade's queued work.
+        other = threading.Thread(
+            target=lambda: daemon.schedule_lifecycle("stop", delay=2.0)
+        )
+        other.start()
+        other.join(timeout=1)
+        assert not other.is_alive()
+        assert spawned == [("stop", 2.0)]
+
+    assert spawned == [("stop", 2.0), ("restart", 1.0)]
 
 
 def test_unsupervised_daemon_ignores_version_change(monkeypatch):

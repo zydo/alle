@@ -118,3 +118,35 @@ def test_served_resources_match_the_spec():
         f"only in spec: { {k: v for k, v in spec_methods.items() if served.get(k) != v} }; "
         f"only served: { {k: v for k, v in served.items() if spec_methods.get(k) != v} }"
     )
+
+
+def test_upgrade_response_schemas_cover_channel_target_and_restart_modes():
+    """The version/restart fields are user-visible protocol, not incidental JSON."""
+    check = SPEC["paths"]["/api/v1/upgrade/check"]["get"]["responses"]["200"]
+    check_schema = check["content"]["application/json"]["schema"]
+    assert set(check_schema["required"]) == {
+        "channel",
+        "current",
+        "latest",
+        "update_available",
+    }
+
+    run = SPEC["paths"]["/api/v1/upgrade"]["post"]["responses"]["200"]
+    run_schema = run["content"]["application/json"]["schema"]
+    assert set(run_schema["required"]) == {
+        "channel",
+        "before",
+        "after",
+        "latest",
+        "changed",
+    }
+    properties = run_schema["properties"]
+    assert properties["command"]["type"] == ["array", "null"]
+    assert properties["command"]["items"] == {"type": "string"}
+    assert {
+        "restart",
+        "restart_pending",
+        "restart_owner",
+        "restart_required",
+        "restart_command",
+    } <= properties.keys()

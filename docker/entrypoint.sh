@@ -32,8 +32,9 @@ run_as() {
 # directory, and system prefixes are configuration errors, not state dirs.
 case "$STATE" in
 /) fail "ALLE_HOME=/ is not a state directory" ;;
-/bin | /bin/* | /dev | /dev/* | /etc | /etc/* | /lib | /lib/* | /proc | /proc/* | /sbin | /sbin/* | /sys | /sys/* | /usr | /usr/*) \
-	fail "ALLE_HOME=$STATE points into a system prefix — mount state elsewhere (default /var/lib/alle)" ;;
+/bin | /bin/* | /dev | /dev/* | /etc | /etc/* | /lib | /lib/* | /proc | /proc/* | /sbin | /sbin/* | /sys | /sys/* | /usr | /usr/*)
+	fail "ALLE_HOME=$STATE points into a system prefix — mount state elsewhere (default /var/lib/alle)"
+	;;
 /*) ;;
 *) fail "ALLE_HOME=$STATE must be an absolute path" ;;
 esac

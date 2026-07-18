@@ -250,10 +250,12 @@ paths:
   /api/v1/upgrade/check:
     get:
       tags: [system]
-      summary: Check PyPI for the latest release (on demand only)
+      summary: Check the owning channel for the latest stable release
       description: >-
-        Contacts PyPI only when this endpoint is called — alle never checks
-        for updates in the background.
+        Contacts the Homebrew tap for a brew-owned install, or PyPI for uv,
+        pipx, and pip, only when this endpoint is called. Alle never checks for
+        updates in the background. Container, checkout, and unknown channels
+        refuse; explicit prerelease opt-in is CLI-only.
       operationId: upgradeCheck
       responses:
         "200":
@@ -262,8 +264,9 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [current, latest, update_available]
+                required: [channel, current, latest, update_available]
                 properties:
+                  channel: { type: string }
                   current: { type: string }
                   latest: { type: string }
                   update_available: { type: boolean }
@@ -273,12 +276,13 @@ paths:
   /api/v1/upgrade:
     post:
       tags: [system]
-      summary: Upgrade alle via its install channel and restart the daemon
+      summary: Upgrade alle via its install channel and report restart disposition
       description: >-
-        Delegates to the tool that installed alle (uv tool / pipx / pip) —
-        alle never replaces its own files. Refuses (400) in a container image
-        (pull a new tag instead) and in a git checkout; 503 while another
-        upgrade is running.
+        Delegates a newer stable release to the tool that installed alle
+        (Homebrew / uv tool / pipx / pip) — alle never replaces its own files.
+        Refuses (400) in a container image (pull a new tag instead), a git
+        checkout, or an unknown channel; 503 while another upgrade is running.
+        Explicit prerelease opt-in is CLI-only.
       operationId: upgradeRun
       requestBody: { $ref: "#/components/requestBodies/EmptyObject" }
       responses:
@@ -288,15 +292,44 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [channel, before, after, changed]
+                required: [channel, before, after, latest, changed]
                 properties:
                   channel: { type: string }
+                  command:
+                    type: [array, "null"]
+                    items: { type: string }
+                    description: >-
+                      Owning-manager argv, or null when the version gate found
+                      nothing to change.
                   before: { type: string }
                   after: { type: string }
+                  latest:
+                    type: string
+                    description: Release selected before delegating
                   changed: { type: boolean }
                   restart:
                     type: object
-                    description: Present when the daemon was restarted
+                    description: >-
+                      Present when alle restarted the daemon or scheduled its
+                      native service restart.
+                    properties:
+                      reconnect_cleared:
+                        type: integer
+                        minimum: 0
+                      restarting: { type: boolean }
+                  restart_pending:
+                    type: boolean
+                    description: Homebrew supervision will respawn the daemon
+                  restart_owner:
+                    type: string
+                    enum: [homebrew]
+                    description: Supervisor responsible for a pending restart
+                  restart_required:
+                    type: boolean
+                    description: The user must restart a non-supervised daemon
+                  restart_command:
+                    type: string
+                    description: Command to run when restart_required is true
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/Busy" }

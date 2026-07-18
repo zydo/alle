@@ -53,8 +53,8 @@ Set at most one of the two variables; setting both, an unreadable file, or a
 value shorter than 16 characters makes the server **refuse to start** (logged
 as `api: refusing to start`) rather than serve with a secret the operator did
 not intend. The injected value must be set for the daemon *and* for any local
-CLI/tray usage on the same machine (in a container, image-level env covers
-both).
+CLI or other API-client usage on the same machine (in a container, image-level
+env covers both).
 
 Cookie sessions, one-time login tokens, `POST /api/v1/login`, and
 `POST /api/v1/logout` exist for the browser UI only and are **out of
@@ -143,16 +143,23 @@ liveness probe.
 
 ## Probes, lifecycle, bundles
 
-| Endpoint                         | Body                     | Effect                                                                                                                                                                                                                                                                                  |
-| -------------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /api/v1/test`              | `{"speed"?, "channel"?}` | Probe channels now. `speed: false` (default) returns one JSON result. `speed: true` streams `application/x-ndjson`: `{"type":"row","data":…}` per channel as it finishes, then exactly one `{"type":"done"…}` or `{"type":"error"…}` terminal record; 503 if a test is already running. |
-| `POST /api/v1/lifecycle/start`   | `{}`                     | Start the runtime.                                                                                                                                                                                                                                                                      |
-| `POST /api/v1/lifecycle/stop`    | `{}`                     | Stop it (channels kept).                                                                                                                                                                                                                                                                |
-| `POST /api/v1/lifecycle/restart` | `{}`                     | Restart.                                                                                                                                                                                                                                                                                |
-| `GET /api/v1/upgrade/check`      | —                        | Ask PyPI for the latest release: `{"current", "latest", "update_available"}`. Contacts PyPI only when called — alle never checks in the background.                                                                                                                                     |
-| `POST /api/v1/upgrade`           | `{}`                     | Upgrade alle via the tool that installed it (uv tool/pipx/pip) and restart the daemon on the new version. Refuses with a 400 in a container (pull a new image tag) or a git checkout; 503 while another upgrade runs.                                                                    |
-| `POST /api/v1/validate`          | `{"text"}`               | Validate a setup bundle; blockers come back in the 400 message.                                                                                                                                                                                                                         |
-| `POST /api/v1/import`            | `{"text", "replace"}`    | Apply a bundle: `replace: false` = idempotent merge, `true` = destructive whole-setup replace. 503 while another import runs.                                                                                                                                                           |
+| Endpoint                         | Body                     | Effect                                                                                                                                                                                                                                                                                                                                    |
+| -------------------------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /api/v1/test`              | `{"speed"?, "channel"?}` | Probe channels now. `speed: false` (default) returns one JSON result. `speed: true` streams `application/x-ndjson`: `{"type":"row","data":…}` per channel as it finishes, then exactly one `{"type":"done"…}` or `{"type":"error"…}` terminal record; 503 if a test is already running.                                                   |
+| `POST /api/v1/lifecycle/start`   | `{}`                     | Start the runtime.                                                                                                                                                                                                                                                                                                                        |
+| `POST /api/v1/lifecycle/stop`    | `{}`                     | Stop it (channels kept).                                                                                                                                                                                                                                                                                                                  |
+| `POST /api/v1/lifecycle/restart` | `{}`                     | Restart.                                                                                                                                                                                                                                                                                                                                  |
+| `GET /api/v1/upgrade/check`      | —                        | Ask the owning channel for the latest stable release: the Homebrew tap for brew, or PyPI for uv tool/pipx/pip. Returns `{"channel", "current", "latest", "update_available"}` and never checks in the background. Refuses a container, checkout, or unknown channel; prerelease opt-in is CLI-only.                                       |
+| `POST /api/v1/upgrade`           | `{}`                     | Upgrade alle to a newer stable release via its owning manager (Homebrew/uv tool/pipx/pip). Returns the checked `latest`, the delegated `command` when one ran, before/after versions, and restart disposition. Refuses a container, checkout, or unknown channel with 400; 503 while another upgrade runs. Prerelease opt-in is CLI-only. |
+| `POST /api/v1/validate`          | `{"text"}`               | Validate a setup bundle; blockers come back in the 400 message.                                                                                                                                                                                                                                                                           |
+| `POST /api/v1/import`            | `{"text", "replace"}`    | Apply a bundle: `replace: false` = idempotent merge, `true` = destructive whole-setup replace. 503 while another import runs.                                                                                                                                                                                                             |
+
+An upgrade response may contain `restart` when alle restarted or scheduled its
+own service restart. A brew-supervised daemon instead reports
+`restart_pending: true` with `restart_owner: "homebrew"`; a running brew-owned
+daemon that is not supervised by Homebrew reports `restart_required: true` and
+the explicit `restart_command`. No restart field is present when the daemon was
+not running or no package change was needed.
 
 ## Security model
 

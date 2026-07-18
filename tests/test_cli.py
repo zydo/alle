@@ -67,6 +67,97 @@ def test_version_command(capsys):
     assert run_cli(["version"], capsys) == __version__
 
 
+def test_upgrade_prerelease_flag_is_explicitly_forwarded(capsys, monkeypatch):
+    calls = []
+
+    def check(*, prerelease=False):
+        calls.append(prerelease)
+        return {
+            "channel": "uv-tool",
+            "current": "0.1.9rc1",
+            "latest": "0.1.9rc2",
+            "update_available": True,
+        }
+
+    monkeypatch.setattr(service, "upgrade_check", check)
+    result = json.loads(
+        run_cli(["upgrade", "--check", "--prerelease", "--json"], capsys)
+    )
+    assert calls == [True]
+    assert result["latest"] == "0.1.9rc2"
+
+
+def test_prerelease_check_recommends_the_matching_upgrade_flag(capsys, monkeypatch):
+    monkeypatch.setattr(
+        service,
+        "upgrade_check",
+        lambda **kwargs: {
+            "channel": "uv-tool",
+            "current": "0.1.8",
+            "latest": "0.1.9rc1",
+            "update_available": True,
+        },
+    )
+
+    output = run_cli(["upgrade", "--check", "--prerelease"], capsys)
+
+    assert "Run: alle upgrade --prerelease" in output
+
+
+def test_stable_check_does_not_call_an_ahead_prerelease_latest(capsys, monkeypatch):
+    monkeypatch.setattr(
+        service,
+        "upgrade_check",
+        lambda **kwargs: {
+            "channel": "uv-tool",
+            "current": "0.2.0rc1",
+            "latest": "0.1.9",
+            "update_available": False,
+        },
+    )
+
+    output = run_cli(["upgrade", "--check"], capsys)
+
+    assert output == (
+        "No newer stable release is available "
+        "(installed 0.2.0rc1; newest checked 0.1.9)."
+    )
+
+
+@pytest.mark.parametrize(
+    ("restart_fields", "expected"),
+    [
+        (
+            {"restart_pending": True, "restart_owner": "homebrew"},
+            "Homebrew will restart the supervised daemon onto the new keg shortly.",
+        ),
+        (
+            {
+                "restart_required": True,
+                "restart_command": "brew services restart alle",
+            },
+            "Restart required. Run: brew services restart alle",
+        ),
+    ],
+)
+def test_homebrew_upgrade_renders_restart_ownership(
+    restart_fields, expected, capsys, monkeypatch
+):
+    monkeypatch.setattr(
+        service,
+        "upgrade_run",
+        lambda **kwargs: {
+            "channel": "homebrew",
+            "before": "0.1.8",
+            "after": "0.1.9",
+            "changed": True,
+            **restart_fields,
+        },
+    )
+
+    assert expected in run_cli(["upgrade"], capsys)
+
+
 def test_channel_commands_share_identity_columns(capsys, no_singbox):
     """Every channel-listing command exposes the same identity fields
     (provider, name, label, port, country, city) and renders the same leading

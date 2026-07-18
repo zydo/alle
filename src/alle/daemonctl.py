@@ -10,11 +10,12 @@ version-matched to the installed alle). Two backends:
 
 Both **exec the stable console-script shim** ``alle applier`` (e.g.
 ``~/.local/bin/alle``), not a path inside the versioned venv: uv/pipx keep that
-shim stable across upgrades, so the unit survives ``uv tool upgrade`` untouched.
-``alle applier`` also already matches the daemon's PID-identity markers, so the
-supervised process is recognised by the same liveness checks as a hand-spawned
-one. The unit sets ``ALLE_SERVICE=1`` so the daemon knows it is supervised (arms
-self-restart-on-upgrade), and carries ``ALLE_HOME`` when the user overrode it.
+shim stable across upgrades, so the unit survives package replacement untouched.
+The shim's directory leads a sanitized copy of the install-time ``PATH`` so the
+daemon can find the same uv/pipx owner when a Web UI upgrade delegates to it.
+``alle applier`` also matches the daemon's PID-identity markers. The unit sets
+``ALLE_SERVICE=1`` so the daemon knows it is supervised and carries ``ALLE_HOME``
+when the user overrode it.
 
 Login persistence: LaunchAgent / ``systemd --user`` both mean *auto-start at
 login, run for the login session*. A macOS LaunchAgent cannot survive logout
@@ -56,14 +57,28 @@ def _service_exec() -> list[str]:
     """
     shim = shutil.which("alle")
     if shim:
-        return [shim, "applier"]
+        # Make a relative PATH lookup absolute without resolving symlinks: pipx
+        # may expose a stable symlink whose versioned target changes on upgrade.
+        return [os.path.abspath(shim), "applier"]
     return [sys.executable, "-m", "alle", "applier"]
 
 
-def _service_env() -> dict[str, str]:
+def _service_env(command: list[str] | None = None) -> dict[str, str]:
     """Environment the unit must carry: the supervised marker, and ALLE_HOME
-    when the user overrode it (so the service uses the same state dir)."""
-    env = {"ALLE_SERVICE": "1"}
+    when overridden, plus a safe PATH that preserves package-manager ownership.
+
+    launchd and user systemd do not reliably inherit the interactive PATH. The
+    install flow supplies uv's bin directory in that PATH; retaining absolute
+    entries lets the Web UI find uv/pipx later without adding ambient current-
+    directory lookup through empty or relative components.
+    """
+    command = command or _service_exec()
+    shim_dir = os.path.dirname(os.path.abspath(command[0]))
+    entries = [shim_dir]
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if entry and os.path.isabs(entry) and entry not in entries:
+            entries.append(entry)
+    env = {"ALLE_SERVICE": "1", "PATH": os.pathsep.join(entries)}
     if os.environ.get("ALLE_HOME"):
         env["ALLE_HOME"] = str(paths.state_dir())
     return env
@@ -108,10 +123,11 @@ class LaunchdManager(_Manager):
 
     def _plist_bytes(self) -> bytes:
         log = str(paths.state_dir() / "applier.log")
-        env = _service_env()
+        command = _service_exec()
+        env = _service_env(command)
         plist = {
             "Label": LAUNCHD_LABEL,
-            "ProgramArguments": _service_exec(),
+            "ProgramArguments": command,
             "EnvironmentVariables": env,
             "RunAtLoad": True,
             "KeepAlive": True,  # supervisor: respawn on crash / self-restart-on-upgrade
@@ -226,10 +242,11 @@ class SystemdManager(_Manager):
         return Path.home() / ".config" / "systemd" / "user" / SYSTEMD_UNIT
 
     def _unit_text(self) -> str:
-        exec_line = " ".join(_systemd_quote(arg) for arg in _service_exec())
+        command = _service_exec()
+        exec_line = " ".join(_systemd_quote(arg) for arg in command)
         env_lines = "\n".join(
             f"Environment={_systemd_quote(f'{k}={v}')}"
-            for k, v in _service_env().items()
+            for k, v in _service_env(command).items()
         )
         return (
             "[Unit]\n"

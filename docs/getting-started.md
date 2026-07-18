@@ -9,42 +9,76 @@ flag; this page is the walkthrough.
 Choose a native user-level install or the scoped Docker deployment. Native
 TUN can capture the host; Docker never does.
 
-| Choice           | Supervisor                 | Traffic captured                          | Host-wide VPN |
-| ---------------- | -------------------------- | ----------------------------------------- | ------------- |
-| `uv`             | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
-| `pipx`           | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
-| Homebrew         | `brew services`            | Host apps or host TUN                     | Yes           |
-| Docker proxy hub | Docker restart policy      | Proxy-aware containers/apps               | No            |
-| Docker gateway   | Docker restart policy      | alle netns + explicitly joined containers | No            |
+| Choice                | Supervisor                 | Traffic captured                          | Host-wide VPN |
+| --------------------- | -------------------------- | ----------------------------------------- | ------------- |
+| One-command uv script | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
+| Homebrew              | `brew services`            | Host apps or host TUN                     | Yes           |
+| Manual uv install     | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
+| Manual pipx install   | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
+| Docker proxy hub      | Docker restart policy      | Proxy-aware containers/apps               | No            |
+| Docker gateway        | Docker restart policy      | alle netns + explicitly joined containers | No            |
 
-**With [`uv`](https://docs.astral.sh/uv/getting-started/installation/):**
+### One-command script (macOS + Linux)
 
 ```bash
-# 1. install uv (see its docs for other methods)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-# 2. install the alle CLI
+curl -LsSf \
+  https://github.com/zydo/alle/releases/latest/download/install.sh | sh
+```
+
+The release-pinned bootstrap supports normal, non-root macOS and systemd Linux
+hosts on arm64/aarch64 and x86_64. It verifies and installs a pinned uv when
+needed, installs that release's exact `alle-proxy` version, registers the
+user-level login service, and verifies readiness. It refuses containers, WSL,
+non-systemd Linux sessions, and installs already owned by another package
+manager; it never invokes `sudo` or a system package manager. On Linux, opt
+into running after logout explicitly by replacing the final `sh` with
+`sh -s -- --linger`.
+
+The command works from bash, zsh, ash, and other interactive shells because
+they only feed the asset to its declared POSIX `sh` interpreter; the installer
+does not depend on the caller's shell syntax.
+
+If the uv tool directory was not already on `PATH`, the installer updates the
+appropriate shell profile and prints both the exact temporary `export` command
+and the absolute `alle` path. Restart the shell before relying on bare `alle`,
+or run that printed export to use it immediately in the current shell.
+
+The one-liner trusts HTTPS and GitHub for the first downloaded byte, and its
+`latest` URL moves to each new stable release. To inspect an immutable,
+explicitly tagged asset and verify that release's published digest before
+executing it:
+
+```bash
+version=v0.1.9
+base="https://github.com/zydo/alle/releases/download/$version"
+curl -LsSf -O "$base/install.sh"
+curl -LsSf -O "$base/install.sh.sha256"
+sha256sum -c install.sh.sha256             # Linux
+# or: shasum -a 256 -c install.sh.sha256   # macOS
+less install.sh
+sh install.sh                              # add --linger on Linux if desired
+```
+
+### Manual install with [`uv`](https://docs.astral.sh/uv/)
+
+```bash
+# Install uv first using its official instructions, then install alle.
 uv tool install alle-proxy
-# 3. (optional) run the background daemon at login, so channels survive a reboot
-alle daemon install
+# If uv reports that its tool directory is not on PATH:
+uv tool update-shell
 ```
 
-**With [`pipx`](https://pipx.pypa.io/stable/):**
+Restart the shell after `uv tool update-shell` before using bare `alle`. To run
+the background daemon at login, optionally register it in that new shell:
 
 ```bash
-# 1. install pipx (e.g. `brew install pipx` or your distro's package)
-# 2. install the alle CLI
-pipx install alle-proxy
-# 3. (optional) run the background daemon at login
 alle daemon install
 ```
 
-Step 3 is optional: without it the runtime auto-starts on first use
-(`alle start` or the first channel you add) and runs for the session.
-`alle daemon install` registers it as a user-level login service (macOS
-LaunchAgent / `systemd --user`) so it starts at login and is supervised — see
-the [CLI reference](cli-reference.md#alle-daemon).
+Without the service step, the runtime auto-starts on first use and runs for the
+session.
 
-**With [Homebrew](https://brew.sh) (macOS + Linux):**
+### Install with [Homebrew](https://brew.sh) (macOS + Linux)
 
 ```bash
 # 1. add the tap and install the headless CLI + Web UI
@@ -58,6 +92,22 @@ bundled Web UI, with no menu-bar/tray app. On this channel let `brew services`
 own the daemon rather than `alle daemon install` (they would register competing
 launchd/`systemd --user` units for the same user). `alle upgrade` recognizes a
 brew-owned install and delegates to `brew upgrade`.
+
+### Manual install with [`pipx`](https://pipx.pypa.io/stable/)
+
+```bash
+# 1. install pipx (e.g. `brew install pipx` or your distro's package)
+# 2. install the alle CLI
+pipx install alle-proxy
+# 3. (optional) run the background daemon at login
+alle daemon install
+```
+
+The pipx service step is optional: without it the runtime auto-starts on first
+use (`alle start` or the first channel you add) and runs for the session.
+`alle daemon install` registers it as a user-level login service (macOS
+LaunchAgent / `systemd --user`) so it starts at login and is supervised — see
+the [CLI reference](cli-reference.md#alle-daemon).
 
 Also works: `python -m pip install alle-proxy` into an environment you manage,
 or one-off runs with `uvx --from alle-proxy alle --help`.
@@ -89,11 +139,62 @@ alle version
 alle --help
 ```
 
-**Uninstall** with the same tool that installed it — `uv tool uninstall
-alle-proxy` or `pipx uninstall alle-proxy` (run `alle stop` first). `~/.alle`
-is left behind since it holds your provider credentials and WireGuard keys; a
-reinstall picks up where you left off. Remove it with `rm -rf ~/.alle` if you
-want everything gone.
+**Uninstall** according to the channel that owns alle:
+
+```bash
+# macOS only: do this first if you installed the optional root helper
+sudo alle helper uninstall
+
+# One-command script: remove service, uv-owned alle tool, and all alle state
+curl -LsSf \
+  https://github.com/zydo/alle/releases/latest/download/install.sh | \
+  sh -s -- --uninstall
+
+# Manual uv
+alle stop
+alle daemon uninstall
+uv tool uninstall alle-proxy
+
+# Manual pipx
+alle stop
+alle daemon uninstall
+pipx uninstall alle-proxy
+
+# pip, from the same managed Python environment used to install alle
+alle stop
+alle daemon uninstall
+python -m pip uninstall alle-proxy
+
+# Homebrew
+brew services stop alle
+alle stop
+brew uninstall alle
+```
+
+The script uninstaller acts only when its bootstrap receipt proves ownership.
+It removes only the uv-owned alle tool recorded or adopted by the bootstrap,
+never uv itself or a pipx, pip, or Homebrew installation. It refuses while the
+optional macOS root helper is still installed because a user-level script
+cannot safely remove its root LaunchDaemon. It deletes the dedicated state
+directory recorded during bootstrap, including provider credentials and
+WireGuard keys, and restores Linux login lingering only when the bootstrap
+enabled it. It retains uv itself because uv may now be used independently.
+If uninstall is interrupted after teardown starts, rerun the same command; the
+receipt-backed cleanup resumes without claiming an unrelated installation.
+Manual package-manager uninstalls leave `~/.alle` behind; remove it separately
+if you want their state gone. If you set `ALLE_HOME` for the bootstrap, make it
+a dedicated alle state directory: successful script uninstall removes that
+recorded directory in full. The explicit `alle stop` in the manual recipes
+also covers a session runtime that was started without a login service.
+
+Upgrades track stable releases by default. A uv, pipx, or pip installation can
+explicitly inspect or install a future prerelease with `alle upgrade --check
+--prerelease` or `alle upgrade --prerelease`. Homebrew, the one-command
+bootstrap's `latest` asset, Docker `latest`, and GitHub's stable `latest` stay
+on numeric stable releases. Version ordering follows
+[PEP 440](https://packaging.python.org/en/latest/specifications/version-specifiers/)
+(`0.1.8` < `0.1.9rc1` < `0.1.9`) while remaining fully compatible with
+numeric-only versions.
 
 ## Quick start
 

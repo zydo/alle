@@ -8,8 +8,9 @@ on:
 # Release is gated on the full test/lint/format/package suite run on the exact
 # tag checkout. PyPI and Docker Hub publishing remain in this top-level workflow
 # so Trusted Publishing binds to this exact filename; the GitHub release is
-# created only after both publishers succeed. Every third-party Action is pinned
-# to an immutable commit SHA; the trailing comment records its resolved tag.
+# created only after PyPI, Docker, Homebrew, and both bootstrap gates succeed.
+# Every third-party Action is pinned to an immutable commit SHA; the trailing
+# comment records its resolved tag.
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -52,7 +53,11 @@ jobs:
           fi
 
       - name: Lint
-        run: uv run ruff check
+        run: |
+          uv run ruff check
+          shellcheck scripts/install.sh scripts/install-systemd-smoke.sh
+          sh -n scripts/install.sh
+          bash -n scripts/install-systemd-smoke.sh
 
       - name: Format check
         run: uv run ruff format --check
@@ -117,7 +122,10 @@ jobs:
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
 
   publish-docker:
-    needs: build
+    needs:
+      - build
+      - bootstrap-smoke-macos
+      - bootstrap-smoke-systemd
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -160,9 +168,13 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ vars.DOCKERHUB_USERNAME }}/alle
+          # PEP 440 accepts today's numeric X.Y.Z tags and a future vX.Y.ZrcN.
+          # Disable the action's implicit latest tag: the explicit raw entry
+          # below is the one stable-release gate for that mutable name.
+          flavor: latest=false
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=pep440,pattern={{version}}
+            type=pep440,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ steps.artifact.outputs.stable == 'true' }}
 
       - name: Boot-test amd64 release shape
@@ -197,7 +209,7 @@ jobs:
 
       - name: Assert the published manifest architectures
         run: |
-          image=${{ vars.DOCKERHUB_USERNAME }}/alle:${GITHUB_REF_NAME#v}
+          image="${{ vars.DOCKERHUB_USERNAME }}/alle:${{ steps.meta.outputs.version }}"
           docker buildx imagetools inspect "$image" --format '{{json .Manifest}}' > /tmp/manifest.json
           python3 - <<'PY'
           import json
@@ -217,7 +229,10 @@ jobs:
           enable-url-completion: true
 
   publish-homebrew:
-    needs: publish-pypi
+    needs:
+      - publish-pypi
+      - bootstrap-smoke-macos
+      - bootstrap-smoke-systemd
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -293,21 +308,157 @@ jobs:
           git commit -am "alle ${GITHUB_REF_NAME#v}"
           git push origin HEAD:main
 
+  bootstrap-smoke-macos:
+    needs: publish-pypi
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Gate on a stable tag
+        id: tag
+        run: |
+          if echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "stable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Exercise the exact staged installer on a clean macOS user
+        if: steps.tag.outputs.stable == 'true'
+        run: |
+          sh scripts/install.sh | tee "$RUNNER_TEMP/first-install.log"
+          sh scripts/install.sh | tee "$RUNNER_TEMP/second-install.log"
+          grep -q "leaving the tool unchanged" "$RUNNER_TEMP/second-install.log"
+          "$HOME/.local/bin/alle" daemon status --json | grep -q '"active"[[:space:]]*:[[:space:]]*true'
+          "$HOME/.local/bin/alle" health
+          sh scripts/install.sh --uninstall
+          test ! -e "$HOME/.alle"
+          test ! -e "$HOME/.local/bin/alle"
+
+  bootstrap-smoke-systemd:
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Gate on a stable tag
+        id: tag
+        run: |
+          if echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "stable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Exercise the staged installer with real logind and systemd --user
+        if: steps.tag.outputs.stable == 'true'
+        run: scripts/install-systemd-smoke.sh
+
   github-release:
-    needs: [publish-pypi, publish-docker]
+    needs:
+      - publish-pypi
+      - publish-docker
+      - publish-homebrew
+      - bootstrap-smoke-macos
+      - bootstrap-smoke-systemd
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dist
           path: dist/
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
-        with:
-          files: dist/*
-          generate_release_notes: true
+      - name: Stage exact release assets
+        id: stage
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          package_version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          test "$version" = "$package_version"
+          mkdir release-assets
+          cp dist/* release-assets/
+          if echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            grep -qx "ALLE_VERSION=\"$version\"" scripts/install.sh
+            sh -n scripts/install.sh
+            install -m 755 scripts/install.sh release-assets/install.sh
+            (cd release-assets && sha256sum install.sh > install.sh.sha256)
+            echo "stable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create a draft release and upload the staged bytes
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft > "$RUNNER_TEMP/is-draft" 2>/dev/null; then
+            : # idempotent rerun: verify the release already associated with the tag
+          else
+            prerelease=()
+            if [ "${{ steps.stage.outputs.stable }}" != true ]; then prerelease=(--prerelease); fi
+            gh release create "$GITHUB_REF_NAME" --draft --generate-notes "${prerelease[@]}"
+            echo true > "$RUNNER_TEMP/is-draft"
+          fi
+          if [ "$(cat "$RUNNER_TEMP/is-draft")" = true ]; then
+            gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+          fi
+          echo "draft=$(cat "$RUNNER_TEMP/is-draft")" >> "$GITHUB_OUTPUT"
+
+      - name: Download uploaded assets through the GitHub API and verify bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir "$RUNNER_TEMP/uploaded-assets"
+          gh release download "$GITHUB_REF_NAME" --dir "$RUNNER_TEMP/uploaded-assets"
+          for asset in release-assets/*; do
+            cmp "$asset" "$RUNNER_TEMP/uploaded-assets/$(basename "$asset")"
+          done
+
+      - name: Publish the verified draft
+        if: steps.release.outputs.draft == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
+
+      - name: Verify stable public installer URLs
+        if: steps.stage.outputs.stable == 'true'
+        run: |
+          expected=$(awk '{print $1}' release-assets/install.sh.sha256)
+          verify_installer() {
+            name=$1
+            url=$2
+            for attempt in 1 2 3 4 5; do
+              if curl -LsSf "$url" -o "$RUNNER_TEMP/$name-install.sh" && \
+                [ "$(sha256sum "$RUNNER_TEMP/$name-install.sh" | awk '{print $1}')" = "$expected" ]; then
+                break
+              elif [ "$attempt" = 5 ]; then
+                echo "::error::$url did not resolve to the staged installer"
+                exit 1
+              fi
+              sleep 10
+            done
+          }
+          verify_installer exact \
+            "https://github.com/zydo/alle/releases/download/$GITHUB_REF_NAME/install.sh"
+          verify_installer latest \
+            "https://github.com/zydo/alle/releases/latest/download/install.sh"
+          cmp release-assets/install.sh "$RUNNER_TEMP/exact-install.sh"
+          cmp "$RUNNER_TEMP/exact-install.sh" "$RUNNER_TEMP/latest-install.sh"

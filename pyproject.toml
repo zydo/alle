@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "alle-proxy"
-version = "0.1.8"
+version = "0.1.9"
 description = "A universal VPN client that manages multiple VPN connections with rule-based routing."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -19,14 +19,7 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Topic :: System :: Networking",
 ]
-dependencies = ["pyyaml>=6.0", "pycountry>=23.12"]
-
-# The menu-bar companion is an optional extra: the base package stays CLI-only
-# (no GUI deps). `pip install alle-proxy[tray]` adds the v1 rumps tray, macOS
-# only. The thin-client core (alle.companion) has no third-party deps and ships
-# in the base package so it is always importable/testable.
-[project.optional-dependencies]
-tray = ["rumps>=0.4; sys_platform == 'darwin'"]
+dependencies = ["packaging>=23.2", "pyyaml>=6.0", "pycountry>=23.12"]
 
 [project.urls]
 Homepage = "https://github.com/zydo/alle"
@@ -34,9 +27,6 @@ Issues = "https://github.com/zydo/alle/issues"
 
 [project.scripts]
 alle = "alle.cli:main"
-
-[project.gui-scripts]
-alle-tray = "alle.tray:main"
 
 [tool.hatch.build]
 # Keep local-only notes (roadmaps, scratch) out of every release artifact
@@ -46,10 +36,14 @@ exclude = [".localonly"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/alle"]
-# The README references the dashboard screenshot via an absolute URL, so PyPI
-# renders it without needing the file shipped in the distribution. The Web UI
-# never serves it, so keep it out of the installed wheel.
-exclude = ["src/alle/assets/webui.png"]
+# Distribution channels are deliberately headless. Keep the future desktop
+# companion sources available to the in-tree test suite and sdist, but never
+# put them (or the README-only screenshot) in an installed wheel.
+exclude = [
+    "src/alle/assets/webui.png",
+    "src/alle/companion.py",
+    "src/alle/tray.py",
+]
 
 [tool.ruff]
 line-length = 88
@@ -71,11 +65,11 @@ ignore = ["S603"]
 
 [dependency-groups]
 dev = [
-  "ruff>=0.6",
-  "pytest>=8.0",
-  "pytest-cov>=5.0",
-  "hatchling==1.31.0",
-  "mypy>=1.11",
+    "ruff>=0.6",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "hatchling==1.31.0",
+    "mypy>=1.11",
 ]
 
 [tool.mypy]

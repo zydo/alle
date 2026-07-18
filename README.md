@@ -92,20 +92,30 @@ the [runbook](docs/tun-runbook.md).
 | REST API          | Everything the CLI does over `/api/v1` (Bearer auth) — for scripts and compose siblings                          |
 | Docker            | Container profile: proxy hub for compose networks, VPN gateway container (tun), declarative boot config          |
 | Desktop companion | Planned                                                                                                          |
-| Distribution      | PyPI CLI package and Docker Hub image; native installers planned                                                 |
+| Distribution      | PyPI, one-command uv bootstrap, Homebrew, and Docker Hub                                                         |
 
 ## Install or deploy
 
-| Choice              | Supervisor                 | Traffic captured                          | Host-wide VPN |
-| ------------------- | -------------------------- | ----------------------------------------- | ------------- |
-| `uv` host install   | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
-| `pipx` host install | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
-| Docker proxy hub    | Docker restart policy      | Proxy-aware containers/apps               | No            |
-| Docker gateway      | Docker restart policy      | alle netns + explicitly joined containers | No            |
+| Choice                | Supervisor                 | Traffic captured                          | Host-wide VPN |
+| --------------------- | -------------------------- | ----------------------------------------- | ------------- |
+| One-command uv script | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
+| Homebrew              | `brew services`            | Host apps or host TUN                     | Yes           |
+| Manual `uv` install   | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
+| Manual `pipx` install | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
+| Docker proxy hub      | Docker restart policy      | Proxy-aware containers/apps               | No            |
+| Docker gateway        | Docker restart policy      | alle netns + explicitly joined containers | No            |
 
 ```bash
-# Host, with uv
+# Host, one-command uv bootstrap (installs + verifies the login service)
+curl -LsSf \
+  https://github.com/zydo/alle/releases/latest/download/install.sh | sh
+
+# Host, with an existing uv installation
 uv tool install alle-proxy
+
+# Host, with Homebrew (install + start at login)
+brew install zydo/tap/alle
+brew services start alle
 
 # Host, with pipx
 pipx install alle-proxy
@@ -117,14 +127,36 @@ docker run -d --name alle --restart unless-stopped \
 docker exec alle alle status
 ```
 
-Host installs may add `alle daemon install` to start at login, and later
-upgrade with `alle upgrade` (it delegates to whichever of uv/pipx installed
-alle, then restarts the daemon; `alle upgrade --check` just asks PyPI for the
-latest version). Containers use `alle run` as PID 1 and Docker's restart
-policy instead; those lifecycle commands are intentionally inapplicable there,
-and a container upgrades by pulling a new image tag. See
-[Getting started](docs/getting-started.md) for all three choices and
+After the script, restart your shell if it reports that the uv tool directory
+was added to `PATH` (or use the exact temporary `export` command it prints).
+For a first manual uv install, run `uv tool update-shell` if uv prompts, then
+restart the shell. Bare `alle` commands then work in the new shell.
+
+The script installs and verifies alle's own user-level login service. Homebrew
+uses `brew services` instead—do not also run `alle daemon install` for that
+channel. Manual uv/pipx installs may add `alle daemon install` when login
+startup is wanted. `alle upgrade` delegates to the owning package manager;
+containers instead upgrade by pulling a new image tag. See
+[Getting started](docs/getting-started.md) for every installation choice and
 [Docker](docs/docker.md) for bundles and gateway scope.
+
+To completely remove a script installation (service, tool, and `~/.alle`
+state) without needing to know uv commands, first remove the optional macOS
+root helper if you previously installed it:
+
+```bash
+# macOS only, and only if you ran `sudo alle helper install`
+sudo alle helper uninstall
+
+curl -LsSf \
+  https://github.com/zydo/alle/releases/latest/download/install.sh | \
+  sh -s -- --uninstall
+```
+
+The uninstaller acts only on an installation recorded by this bootstrap. It
+removes only the recorded uv-owned alle tool, never uv itself or a pipx, pip,
+or Homebrew installation. On Linux it disables login lingering only when the
+bootstrap enabled it.
 
 ## Quick start
 
@@ -205,8 +237,6 @@ Planned next steps:
 
 - More WireGuard-capable VPN providers. See
   [VPN Provider Research](docs/vpn-provider-research.md).
-- Homebrew distribution of the CLI and bundled Web UI on macOS and Linux.
-- A one-command uv-based CLI/Web UI installation on macOS and Linux.
 - Desktop companion with OS-level VPN integration.
 - Windows support and broader distribution.
 

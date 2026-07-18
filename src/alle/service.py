@@ -67,6 +67,10 @@ class ServiceError(RuntimeError):
     web_message: str | None = None
 
 
+class ServiceBusyError(ServiceError):
+    """A retryable operation is already owned by another process/request."""
+
+
 def _blockers_error(
     blockers: dict[str, list[dict]], verb: str = "remove"
 ) -> ServiceError:
@@ -2385,11 +2389,25 @@ def daemon_install(linger: bool = False) -> dict:
 
 
 def daemon_uninstall() -> dict:
-    """Remove the login service (state under ~/.alle is left intact)."""
+    """Remove the login service and its supervised data plane.
+
+    A supervised daemon deliberately leaves sing-box alive when it exits for
+    an upgrade handoff. Service-manager removal uses the same signal path but
+    has no replacement daemon, so explicitly stop/reap sing-box after the unit
+    was successfully removed. State under ``~/.alle`` is left intact.
+    """
     try:
-        return daemonctl.uninstall()
+        result = daemonctl.uninstall()
     except daemonctl.DaemonCtlError as e:
         raise ServiceError(str(e)) from e
+    if result.get("removed"):
+        try:
+            singbox.Runner().stop()
+        except Exception as e:  # noqa: BLE001 — unit removal already committed
+            raise ServiceError(
+                f"the login service was removed, but sing-box could not be stopped: {e}"
+            ) from e
+    return result
 
 
 def daemon_status() -> dict:
@@ -2400,29 +2418,52 @@ def daemon_status() -> dict:
 # ---- upgrade (delegated to the owning install channel) -----------------------
 
 
-def upgrade_run() -> dict:
-    """Upgrade alle via its install channel, then bounce the daemon onto the
-    new code. Refusal channels (container, checkout, unknown) surface as
-    :class:`ServiceError` with the instruction for that channel."""
+def upgrade_run(*, prerelease: bool = False) -> dict:
+    """Upgrade through the owning channel and hand restart to the right owner.
+
+    Refusal channels (container, checkout, unknown) surface as
+    :class:`ServiceError`. Homebrew is deliberately distinct: its versioned
+    old keg must never spawn a replacement itself. A brew-supervised daemon
+    observes the new opt shim and self-exits; an older/unsupervised brew daemon
+    reports the explicit ``brew services`` restart the user must run.
+    """
     from alle import upgrade
 
     try:
-        result = upgrade.run()
+        result = upgrade.run(prerelease=prerelease)
+    except upgrade.UpgradeBusyError as e:
+        raise ServiceBusyError(str(e)) from e
     except upgrade.UpgradeError as e:
         raise ServiceError(str(e)) from e
     if result["changed"] and (daemon.in_daemon_process() or daemon.is_running()):
-        # From the Web UI this schedules the restart after the response is
-        # flushed; from the CLI it restarts through whatever owns the daemon.
-        result["restart"] = restart()
+        if result["channel"] == "homebrew":
+            info = daemon.daemon_info() or {}
+            if info.get("service_owner") == "homebrew":
+                # The daemon's bounded version watcher will see the new opt shim
+                # and exit only after this response has been flushed. brew's
+                # KeepAlive/Restart policy then launches the new keg.
+                result["restart_pending"] = True
+                result["restart_owner"] = "homebrew"
+            else:
+                # Never call the generic restart from an old versioned keg: its
+                # sys.executable would relaunch old code. This also gives users
+                # upgrading from a pre-owner-marker formula a safe migration.
+                result["restart_required"] = True
+                result["restart_command"] = "brew services restart alle"
+        else:
+            # From the Web UI this schedules the restart after the response is
+            # flushed; from the CLI it restarts through alle's login service or
+            # stable uv/pipx/pip shim.
+            result["restart"] = restart()
     return result
 
 
-def upgrade_check() -> dict:
-    """current vs latest-on-PyPI — runs only when explicitly invoked."""
+def upgrade_check(*, prerelease: bool = False) -> dict:
+    """Current vs latest in the owning channel, only when explicitly invoked."""
     from alle import upgrade
 
     try:
-        return upgrade.check_latest()
+        return upgrade.check_latest(prerelease=prerelease)
     except upgrade.UpgradeError as e:
         raise ServiceError(str(e)) from e
 

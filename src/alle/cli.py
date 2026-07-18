@@ -1068,29 +1068,40 @@ def cmd_upgrade(args):
     import json as json_mod
 
     if args.check:
-        result = service.upgrade_check()
+        result = service.upgrade_check(prerelease=args.prerelease)
         if args.json:
             print(json_mod.dumps(result))
         elif result["update_available"]:
+            source = "the Homebrew tap" if result["channel"] == "homebrew" else "PyPI"
+            command = "alle upgrade --prerelease" if args.prerelease else "alle upgrade"
             print(
                 f"alle {result['current']} — {result['latest']} is available "
-                "on PyPI. Run: alle upgrade"
+                f"on {source}. Run: {command}"
             )
         else:
-            print(f"alle {result['current']} is the latest release.")
+            kind = "release" if args.prerelease else "stable release"
+            print(
+                f"No newer {kind} is available (installed {result['current']}; "
+                f"newest checked {result['latest']})."
+            )
         return
-    result = service.upgrade_run()
+    result = service.upgrade_run(prerelease=args.prerelease)
     if args.json:
         print(json_mod.dumps(result))
         return
     if not result["changed"]:
+        kind = "release" if args.prerelease else "stable release"
         print(
-            f"Already the latest ({result['after']}); nothing to do "
-            f"(via {result['channel']})."
+            f"No newer {kind} is available (installed {result['after']}; "
+            f"checked via {result['channel']})."
         )
         return
     line = f"Upgraded {result['before']} → {result['after']} via {result['channel']}."
-    if result.get("restart"):
+    if result.get("restart_pending"):
+        line += " Homebrew will restart the supervised daemon onto the new keg shortly."
+    elif result.get("restart_required"):
+        line += f" Restart required. Run: {result['restart_command']}"
+    elif result.get("restart"):
         line += " Daemon restarted on the new version."
     print(line)
 
@@ -1555,13 +1566,19 @@ def build_parser() -> argparse.ArgumentParser:
     ).set_defaults(func=cmd_restart)
     up = sub.add_parser(
         "upgrade",
-        help="upgrade alle via the tool that installed it (uv tool/pipx/pip), "
-        "then restart the daemon on the new version",
+        help="upgrade alle via the tool that installed it (Homebrew/uv tool/pipx/pip), "
+        "then coordinate or report restart disposition with its owning supervisor",
     )
     up.add_argument(
         "--check",
         action="store_true",
-        help="only ask PyPI for the latest version and report; change nothing",
+        help="check the owning channel for the latest version and report; "
+        "change nothing",
+    )
+    up.add_argument(
+        "--prerelease",
+        action="store_true",
+        help="include PyPI prereleases (Homebrew remains stable-only)",
     )
     up.add_argument("--json", action="store_true", help="print machine-readable JSON")
     up.set_defaults(func=cmd_upgrade)

@@ -35,6 +35,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from alle import __version__, applog, paths, proc
@@ -44,6 +45,7 @@ PROBE_INTERVAL = 30.0  # how often each channel is probed
 METRICS_INTERVAL = 2.0  # how often traffic counters are sampled from the Clash API
 RECONCILE_RETRY = 60.0  # retry a *failed* reconcile this often, sans state change
 VERSION_CHECK = 30.0  # how often a supervised daemon checks for an upgraded package
+VERSION_PROBE_TIMEOUT = 5.0  # bounded Homebrew opt-shim version discovery
 SUPERVISE_INTERVAL = 2.0  # how often sing-box liveness is checked (sans probes)
 CRASH_BACKOFF_MAX = 60.0  # cap between supervised restart attempts
 CRASH_RESET = 60.0  # this long alive after a crash forgets the crash history
@@ -60,6 +62,57 @@ UPGRADE_EXIT_CODE = 3
 # ``.../bin/alle run``. Used to reject recycled PIDs.
 _MARKERS = ("-m alle", "alle applier", "alle run")
 
+# A Web API upgrade replaces the package before its handler can serialize and
+# flush the success response. The main daemon loop runs concurrently with that
+# handler; without this lease its version watcher can see the replacement and
+# terminate the whole process mid-response (Homebrew's opt shim makes this
+# especially deterministic). A count keeps the primitive correct even if a
+# future caller permits distinct upgrade request kinds concurrently.
+_upgrade_response_lock = threading.Lock()
+_upgrade_responses = 0
+
+
+class _UpgradeResponseState(threading.local):
+    """Lifecycle work owned by one upgrade-handler thread."""
+
+    depth: int = 0
+    lifecycle: tuple[str, float] | None = None
+
+
+_upgrade_response_state = _UpgradeResponseState()
+
+
+@contextmanager
+def defer_upgrade_restart_until_response():
+    """Prevent the package watcher from exiting until a response is flushed."""
+    global _upgrade_responses
+
+    state = _upgrade_response_state
+    state.depth += 1
+    with _upgrade_response_lock:
+        _upgrade_responses += 1
+    try:
+        yield
+    finally:
+        pending = None
+        state.depth = max(0, state.depth - 1)
+        if state.depth == 0:
+            pending = state.lifecycle
+            state.lifecycle = None
+        with _upgrade_response_lock:
+            _upgrade_responses = max(0, _upgrade_responses - 1)
+        # Native uv/pipx/pip upgrades request a lifecycle restart while this
+        # lease is active. Spawn it only after the handler's explicit flush;
+        # a fixed child-side sleep cannot prove a slow client received bytes.
+        if pending is not None:
+            _spawn_lifecycle(*pending)
+
+
+def upgrade_restart_deferred() -> bool:
+    """Whether an in-flight upgrade response still owns the daemon process."""
+    with _upgrade_response_lock:
+        return _upgrade_responses > 0
+
 
 def _pid_path() -> Path:
     return paths.state_dir() / "applier.pid"
@@ -70,7 +123,7 @@ def _info_path() -> Path:
 
 
 def _write_info(runtime: dict | None = None) -> None:
-    """Record the running daemon's pid + version alongside the pidfile.
+    """Record the running daemon's pid, version, and supervisor identity.
 
     Additive to the pidfile (old/new CLI↔daemon combos still parse each other):
     ``alle status`` reads the version here to warn about CLI↔daemon skew after
@@ -78,6 +131,12 @@ def _write_info(runtime: dict | None = None) -> None:
     degraded sing-box (``{"singbox": <status>, "detail": …}``).
     """
     info = {"pid": os.getpid(), "version": __version__, "at": int(time.time())}
+    service_owner = os.environ.get("ALLE_SERVICE_OWNER")
+    service_prefix = os.environ.get("ALLE_SERVICE_PREFIX")
+    if service_owner:
+        info["service_owner"] = service_owner
+    if service_prefix:
+        info["service_prefix"] = service_prefix
     if runtime is not None:
         info["runtime"] = runtime
     try:
@@ -87,7 +146,7 @@ def _write_info(runtime: dict | None = None) -> None:
 
 
 def daemon_info() -> dict | None:
-    """The running daemon's ``{pid, version, at}`` info, or None if not running.
+    """The running daemon's version/runtime/supervisor info, or None if stopped.
 
     Only trusts the file when its pid is the live daemon, so a stale info file
     from a crashed daemon never reports a phantom version.
@@ -105,14 +164,32 @@ def daemon_info() -> dict | None:
 
 
 def installed_version() -> str:
-    """The alle version currently on disk (re-read fresh, unlike the import-time
-    ``__version__``) — differs from ``__version__`` after an in-place upgrade.
+    """The alle version currently on disk, including a moved Homebrew keg.
 
-    The canonical version accessor: the single source of truth is
-    ``pyproject.toml``, surfaced at runtime via ``importlib.metadata``. The
-    Web UI masthead reads this so the badge tracks the installed package
-    rather than the daemon's startup snapshot.
+    Native uv/pipx/pip environments retain a stable site-packages path, so a
+    fresh metadata read differs from the import-time ``__version__`` after an
+    in-place upgrade. Homebrew changes the versioned Cellar path underneath a
+    running daemon; its service records the stable opt prefix, whose new shim
+    is the only reliable view of the active keg.
     """
+    if os.environ.get("ALLE_SERVICE_OWNER") == "homebrew":
+        prefix = os.environ.get("ALLE_SERVICE_PREFIX", "")
+        shim = Path(prefix) / "bin" / "alle" if prefix else None
+        if shim is not None and shim.is_absolute():
+            try:
+                result = subprocess.run(
+                    [str(shim), "version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=VERSION_PROBE_TIMEOUT,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass  # retry on the next supervised version-check interval
+            else:
+                value = result.stdout.strip()
+                if result.returncode == 0 and value:
+                    return value
+
     from importlib.metadata import PackageNotFoundError, version
 
     try:
@@ -163,6 +240,8 @@ def spawn_detached(code: str) -> None:
     env = dict(os.environ)
     env.pop("ALLE_APPLIER", None)
     env.pop("ALLE_SERVICE", None)
+    env.pop("ALLE_SERVICE_OWNER", None)
+    env.pop("ALLE_SERVICE_PREFIX", None)
     log = paths.state_dir() / "applier.log"
     applog.rotate_if_needed(log, applog.MAX_LOG_BYTES)
     with open(log, "ab") as lf:
@@ -176,16 +255,28 @@ def spawn_detached(code: str) -> None:
         )
 
 
-def schedule_lifecycle(action: str, delay: float = 0.35) -> None:
-    """Run stop/restart shortly after the Web UI response has been flushed."""
-    if action not in {"stop", "restart"}:
-        raise ValueError(f"unsupported lifecycle action {action!r}")
+def _spawn_lifecycle(action: str, delay: float) -> None:
+    """Spawn one delayed lifecycle action outside response bookkeeping."""
     spawn_detached(
         "import time\n"
         f"time.sleep({delay!r})\n"
         "from alle import service\n"
         f"service.{action}()\n"
     )
+
+
+def schedule_lifecycle(action: str, delay: float = 0.35) -> None:
+    """Run stop/restart after the current Web upgrade response is flushed."""
+    if action not in {"stop", "restart"}:
+        raise ValueError(f"unsupported lifecycle action {action!r}")
+    state = _upgrade_response_state
+    if state.depth > 0:
+        # Scope the queued action to the handler that owns this response lease.
+        # A concurrent ordinary lifecycle request is independent and must not
+        # overwrite—or become hostage to—the upgrade handler's pending work.
+        state.lifecycle = (action, delay)
+        return
+    _spawn_lifecycle(action, delay)
 
 
 def ensure_running() -> None:
@@ -442,15 +533,27 @@ def run_applier(own_children: bool = False) -> None:
             # the daemon down until the next CLI call.
             if supervised and now - last_version_check >= VERSION_CHECK:
                 last_version_check = now
-                if installed_version() != __version__:
-                    applog.log(
-                        f"applier: package upgraded {__version__} -> "
-                        f"{installed_version()}; exiting for supervisor respawn"
-                    )
-                    # non-zero so even a Restart=on-failure unit (pre-
-                    # Restart=always installs) respawns onto the new code;
-                    # the finally block below still cleans up the pidfile
-                    raise SystemExit(UPGRADE_EXIT_CODE)
+                on_disk_version = installed_version()
+                if on_disk_version != __version__:
+                    # The API handler acquires this lease before it delegates
+                    # the manager command and releases it only after flushing
+                    # the JSON response. Re-check after the potentially slow
+                    # Homebrew opt-shim probe so the watcher cannot terminate
+                    # in the command-complete / response-pending window.
+                    if upgrade_restart_deferred():
+                        # Retry promptly after the handler releases its lease,
+                        # rather than delaying supervisor handoff for another
+                        # full VERSION_CHECK interval.
+                        last_version_check = now - VERSION_CHECK + POLL_SECONDS
+                    else:
+                        applog.log(
+                            f"applier: package upgraded {__version__} -> "
+                            f"{on_disk_version}; exiting for supervisor respawn"
+                        )
+                        # non-zero so even a Restart=on-failure unit (pre-
+                        # Restart=always installs) respawns onto the new code;
+                        # the finally block below still cleans up the pidfile
+                        raise SystemExit(UPGRADE_EXIT_CODE)
             stamp = _state_stamp()
             if stamp != last_stamp:
                 # An unreadable state file must not kill the loop (or be

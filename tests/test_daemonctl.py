@@ -52,6 +52,9 @@ def test_launchd_plist_execs_the_stable_shim(fake_home):
     assert plist["Label"] == "com.github.zydo.alle"
     assert plist["ProgramArguments"][-1] == "applier"  # `<alle> applier`
     assert plist["EnvironmentVariables"]["ALLE_SERVICE"] == "1"
+    assert plist["EnvironmentVariables"]["PATH"].split(daemonctl.os.pathsep)[0] == str(
+        daemonctl.Path(plist["ProgramArguments"][0]).parent
+    )
     assert plist["KeepAlive"] is True  # supervisor respawns on crash / upgrade-exit
     assert plist["RunAtLoad"] is True
 
@@ -90,6 +93,7 @@ def test_systemd_unit_execs_shim_with_service_env_and_restart(fake_home):
     text = daemonctl.SystemdManager()._unit_text()
     assert "ExecStart=" in text and "applier" in text
     assert 'Environment="ALLE_SERVICE=1"' in text
+    assert 'Environment="PATH=' in text
     # always, not on-failure: the self-restart-on-upgrade exit must respawn
     assert "Restart=always" in text
     assert "WantedBy=default.target" in text
@@ -243,6 +247,23 @@ def test_service_env_carries_overridden_alle_home(monkeypatch, tmp_path):
 def test_service_env_omits_alle_home_when_default(monkeypatch):
     monkeypatch.delenv("ALLE_HOME", raising=False)
     assert "ALLE_HOME" not in daemonctl._service_env()
+
+
+def test_service_env_leads_with_shim_dir_and_drops_unsafe_path_entries(monkeypatch):
+    monkeypatch.setenv(
+        "PATH",
+        daemonctl.os.pathsep.join(
+            ["/usr/bin", "", "relative", "/home/user/.local/bin", "/usr/bin"]
+        ),
+    )
+    command = ["/home/user/.local/bin/alle", "applier"]
+
+    env = daemonctl._service_env(command)
+
+    assert env["PATH"].split(daemonctl.os.pathsep) == [
+        "/home/user/.local/bin",
+        "/usr/bin",
+    ]
 
 
 # ---- platform dispatch ---------------------------------------------------------

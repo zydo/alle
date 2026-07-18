@@ -3,10 +3,10 @@
 Complete reference for the `alle` command-line interface — the primary, complete
 surface for managing providers, channels, and the local runtime.
 
-From a checkout, prefix everything with `uv run` (e.g. `uv run alle status`). An
-installed build (`uv tool install alle-proxy` / `pipx install alle-proxy` —
-see the README's Install section) exposes `alle` directly. The examples below
-omit the prefix.
+From a checkout, prefix everything with `uv run` (e.g. `uv run alle status`). A
+native installation (one-command bootstrap, Homebrew, uv, pipx, or managed pip)
+exposes `alle` directly; see the README's Install section. The examples below
+omit the checkout prefix.
 
 ## Contents
 
@@ -37,7 +37,7 @@ omit the prefix.
   - [`alle locations`](#alle-locations)
   - [`alle status`](#alle-status)
   - [`alle start` / `stop` / `restart`](#alle-start--stop--restart)
-  - [`alle upgrade [--check]`](#alle-upgrade---check)
+  - [`alle upgrade [--check] [--prerelease]`](#alle-upgrade---check---prerelease)
   - [`alle run`](#alle-run)
   - [`alle health [--json]`](#alle-health---json)
   - [`alle tun [on|off]`](#alle-tun-onoff)
@@ -66,7 +66,7 @@ omit the prefix.
 - **Help** — run `alle`, `alle <group>`, or any command with `-h/--help` to see usage.
   A group or command invoked with no action prints its help instead of erroring.
 - **`--json`** — read commands (`providers ls`, `channels ls`, `routes ls`,
-  `locations`, `status`, `test`) accept `--json` for a stable,
+  `locations`, `status`, `upgrade --check`, `test`) accept `--json` for a stable,
   machine-readable projection of the same data. This is the scripting/cross-language interface (pipe to `jq`, etc.).
   It is **not** the programmatic API for `alle`'s own components — those call the core
   (`alle.service`) directly rather than shelling out. Human table output is for
@@ -603,24 +603,36 @@ alle stop
 
 ---
 
-## `alle upgrade [--check]`
+## `alle upgrade [--check] [--prerelease]`
 
 Upgrade alle through the tool that installed it — alle never replaces its own
-files. The install channel (uv tool, pipx, or pip) is detected and the upgrade
-delegated to it; the daemon then restarts on the new version (or, when a
-service unit owns it, self-exits for the supervisor to respawn).
+files. The install channel is detected, its authoritative source is checked
+(the Homebrew tap for brew, PyPI for uv tool/pipx/pip), and the upgrade is
+delegated only when a newer version exists. If the daemon is running, restart
+is handed to its actual owner: alle's native service restarts directly, a
+brew-supervised daemon self-exits for Homebrew to respawn, and an older or
+unsupervised brew daemon reports the explicit command the user must run.
 
 ```bash
-alle upgrade --check   # ask PyPI for the latest version; changes nothing
-alle upgrade           # delegate to uv tool/pipx/pip, then restart the daemon
+alle upgrade --check   # ask the owning channel for latest; changes nothing
+alle upgrade           # delegate to brew/uv tool/pipx/pip; report restart status
+alle upgrade --check --prerelease  # explicitly include PyPI prereleases
+alle upgrade --prerelease          # include PyPI prereleases in selection
 ```
 
-- `--check` contacts PyPI **only when you run it** — alle never checks for
-  updates in the background. The Web UI's version badge does the same check on
-  click.
-- A **git checkout** refuses (upgrade it with git), a **container** refuses
-  (the image is immutable — pull a new tag and recreate the container), and an
-  undetectable channel refuses rather than guess.
+- `--check` contacts the Homebrew tap or PyPI **only when you run it** — alle
+  never checks for updates in the background. The Web UI's version badge does
+  the same check on click.
+- Stable releases are the default. `--prerelease` is an explicit, per-command
+  opt-in for uv tool, pipx, and pip installations. Homebrew, the bootstrap
+  `latest` asset, Docker `latest`, and GitHub's stable `latest` remain
+  stable-only. Versions follow
+  [PEP 440](https://packaging.python.org/en/latest/specifications/version-specifiers/),
+  so `0.1.9rc1` is newer than `0.1.8` but older than the final `0.1.9`;
+  numeric-only versions behave as before.
+- Both checking and upgrading refuse a **git checkout** (upgrade it with git),
+  a **container** (pull a new image tag and recreate it), or an undetectable
+  channel. There is no owning package source or safe mutation command to guess.
 - `--json` prints the machine-readable result.
 
 ---
@@ -681,8 +693,8 @@ alle tun off
     ```
 
     This registers a root LaunchDaemon that owns sing-box while tun mode is on.
-    After this single install, `alle tun on` (and the Web UI / companion
-    toggle) works as your normal user with **no password, ever** — it
+    After this single install, `alle tun on` (and the Web UI toggle) works as
+    your normal user with **no password, ever** — it
     survives reboots (launchd starts the helper at boot). Remove it with
     `sudo alle helper uninstall`; check it with `alle helper status`. See
     `docs/security.md` for the helper's hard scope.
@@ -1079,8 +1091,8 @@ registration instead of `alle daemon install`: `brew services start alle`.
 
 ### `alle daemon uninstall`
 
-Remove the login service. Your `~/.alle` state (providers, channels, keys) is
-left untouched.
+Remove the login service and stop its supervised runtime. Your `~/.alle` state
+(providers, channels, keys) is left untouched.
 
 ### `alle daemon status [--json]`
 
@@ -1093,11 +1105,11 @@ Login service: active (launchd).
 Daemon: running, version 0.1.3.
 ```
 
-**Upgrades:** the service unit execs a stable shim, so `uv tool upgrade
-alle-proxy` (or `pipx upgrade`, or `brew upgrade alle`) never needs to touch it,
-and a supervised daemon notices the new version and restarts itself onto it
-within ~30s. For an unsupervised daemon, `alle status` prints a one-line warning
-when the running daemon is older than the CLI (`run alle restart to pick up the upgrade`).
+**Upgrades:** the service unit execs a stable shim, so `alle upgrade` (or an
+equivalent owning-manager command) never needs to touch it, and a supervised
+daemon notices the new version and restarts itself onto it within ~30s. For an
+unsupervised daemon, `alle status` prints a one-line warning when the running
+daemon is older than the CLI (`run alle restart to pick up the upgrade`).
 
 ---
 
@@ -1242,14 +1254,16 @@ What alle does when things break, and what is yours to do:
 
 ### Upgrade checklist
 
-`alle upgrade` handles the mechanics (delegate to the owning tool, restart the
-daemon). Around a meaningful version jump:
+`alle upgrade` handles the mechanics (delegate to the owning tool and hand
+restart to the right owner, or print the required command). Around a meaningful
+version jump:
 
 1. **Back up first**: `alle export` — the bundle is the full setup (it contains
    secrets; store it accordingly). You have now rehearsed restore-from-bundle
    the day you need it.
-2. **Upgrade**: `alle upgrade` (or your tool's own `uv tool upgrade alle-proxy` /
-   `pipx upgrade alle-proxy`; container: pull the new image tag).
+2. **Upgrade**: `alle upgrade` (or your tool's own `uv tool install --force
+   alle-proxy` / `pipx upgrade alle-proxy` / `python -m pip install --upgrade
+   alle-proxy` / `brew upgrade alle`; container: pull the new image tag).
 3. **Verify**: `alle status` (no skew warning), `alle health`, and
    `alle test --fail` if channels should be up. State schema migrations are
    automatic and forward-only; an older alle refuses a newer state file rather

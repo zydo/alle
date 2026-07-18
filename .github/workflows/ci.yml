@@ -33,7 +33,11 @@ jobs:
           uv export --locked --no-dev --no-emit-project --format requirements-txt --output-file docker/requirements.lock
           git diff --exit-code -- docker/requirements.lock
       - name: Check lint (incl. flake8-bandit security rules)
-        run: uv run ruff check
+        run: |
+          uv run ruff check
+          shellcheck scripts/install.sh scripts/install-systemd-smoke.sh
+          sh -n scripts/install.sh
+          bash -n scripts/install-systemd-smoke.sh
       - name: Check format
         run: uv run ruff format --check
       - name: Check types (mypy, zero-error baseline)
@@ -191,7 +195,7 @@ jobs:
             alle:ci
       - name: Wait for health
         run: |
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if docker exec alle-ci alle health; then exit 0; fi
             sleep 5
           done
@@ -220,7 +224,7 @@ jobs:
       - name: Assert restart idempotency (startup sync)
         run: |
           docker restart alle-ci
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if docker exec alle-ci alle health; then break; fi
             sleep 5
           done
@@ -280,7 +284,7 @@ jobs:
             alle:ci
           # gateway health stays deliberately red here (no viable channel),
           # so wait only for process liveness before asserting the contract
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             docker exec alle-ci-gw alle health --json 2>/dev/null \
               | grep -q '"singbox": true' && break
             sleep 5

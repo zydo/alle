@@ -13,6 +13,13 @@ involved when you run it:
 
 ## Python dependencies
 
+### packaging
+
+- Project: https://github.com/pypa/packaging
+- License: **Apache License 2.0 or BSD 2-Clause License**
+- Role in alle: standards-compliant PEP 440 release parsing and ordering for
+  channel-aware upgrades.
+
 ### PyYAML
 
 - Project: https://github.com/yaml/pyyaml

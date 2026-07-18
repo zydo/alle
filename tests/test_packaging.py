@@ -120,6 +120,18 @@ def test_only_safe_daemon_entrypoint_is_shipped(built):
     assert "alled" not in text
 
 
+def test_base_wheel_is_headless(built):
+    """Every native package-manager channel consumes the same headless wheel."""
+    _, wheel = built
+    names = _wheel_names(wheel)
+    assert not any(n.endswith(("alle/tray.py", "alle/companion.py")) for n in names)
+    with zipfile.ZipFile(wheel) as archive:
+        entry_points = archive.read(
+            next(n for n in names if n.endswith("entry_points.txt"))
+        ).decode()
+    assert "alle-tray" not in entry_points
+
+
 def test_readme_images_render_on_pypi():
     """PyPI renders README images from absolute URLs (raw.githubusercontent); a
     relative src would not render, now that screenshots aren't shipped in the
