@@ -17,7 +17,8 @@ from alle import daemon, paths, proc, singbox
 def test_command_of_reads_a_live_process():
     cmd = proc.command_of(os.getpid())
     assert cmd is not None
-    assert sys.executable.rsplit("/", 1)[-1].split(".")[0] in cmd  # e.g. "python"
+    executable = sys.executable.rsplit("/", 1)[-1].split(".")[0]
+    assert executable.casefold() in cmd.casefold()  # e.g. "python" / "Python"
 
 
 def test_marker_fallback_requires_a_marker_hit():
