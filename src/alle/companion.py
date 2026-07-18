@@ -158,7 +158,7 @@ class CompanionClient:
         }
         if data is not None:
             headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, method=method, data=data, headers=headers)
+        req = urllib.request.Request(url, method=method, data=data, headers=headers)  # noqa: S310 — fixed https/loopback URL, no user-supplied scheme
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:  # noqa: S310
                 return json.loads(r.read())

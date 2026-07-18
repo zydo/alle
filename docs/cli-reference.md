@@ -759,7 +759,7 @@ alle tun off
 
 ## `alle test`
 
-`alle test [--channel <id>] [--speed] [--json]`
+`alle test [--channel <id>] [--speed] [--fail] [--json]`
 
 **The** per-channel table: probe channels **now** (rather than waiting for the
 next background cycle) and print each channel's fresh connectivity plus its
@@ -782,6 +782,11 @@ Test runner   nordvpn/japan_1         :53124  Japan          (Any City)  Healthy
 seattle_1     nordvpn/seattle_1       :53125  United States  Seattle     Disabled  -        -              12.5 MB   88.0 MB
 wg_us_ca_842  protonvpn/wg_us_ca_842  :53126  United States  California  Timeout   -        -              28.1 MB   141.8 MB
 ```
+
+Add `--fail` for monitoring use: exit code 1 when any probed channel is
+unhealthy — or when nothing was probed at all (a monitor that watched nothing
+must not report success). Without it, `alle test` is informational and always
+exits 0. The daemon-liveness counterpart is [`alle health`](#alle-health---json).
 
 Add `--speed` to run the slower download/upload test after the fresh
 connectivity probe; it appends `DOWNLOAD` and `UPLOAD` columns. Speed tests run

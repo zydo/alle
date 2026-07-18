@@ -55,8 +55,36 @@ exclude = ["src/alle/assets/webui.png"]
 line-length = 88
 target-version = "py310"
 
+[tool.ruff.lint]
+# flake8-bandit (S) is the in-repo Python security scan (dependency scanning
+# lives in supply-chain.yml: OSV/Trivy/gitleaks). Existing accepted patterns
+# carry per-line noqa with a reason; new code meets the rules or explains.
+extend-select = ["S"]
+# S603 flags every list-form subprocess call unconditionally — that IS the
+# safe (no-shell) form, and alle builds argv from constants/resolved paths.
+ignore = ["S603"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert (S101) and embed dummy credentials/temp paths by design.
+"tests/*" = ["S"]
+"scripts/*" = ["S"]
+
 [dependency-groups]
-dev = ["ruff>=0.6", "pytest>=8.0", "pytest-cov>=5.0", "hatchling==1.27.0"]
+dev = [
+  "ruff>=0.6",
+  "pytest>=8.0",
+  "pytest-cov>=5.0",
+  "hatchling==1.27.0",
+  "mypy>=1.11",
+]
+
+[tool.mypy]
+# Permissive baseline, enforced at zero errors in CI; strictness is ratcheted
+# per-module as annotations grow (decided 2026-07-17).
+files = ["src/alle"]
+ignore_missing_imports = true
+check_untyped_defs = false
+disable_error_code = ["import-untyped"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

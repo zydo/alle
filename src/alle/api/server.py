@@ -106,6 +106,12 @@ _SECURITY_HEADERS = {
 }
 
 
+def _query_first(path: str, key: str) -> str | None:
+    """The first value of a query parameter, or None when absent."""
+    values = parse_qs(urlparse(path).query).get(key)
+    return values[0] if values else None
+
+
 # The HTTP methods each top-level /api/v1/<resource> accepts. A request whose
 # path names one of these resources but whose method isn't listed is a 405
 # (with an Allow header); a path whose first segment isn't here is a 404.
@@ -395,7 +401,7 @@ def _listen_config(api: dict) -> dict:
     if port is None:
         port = int(api["address"].rsplit(":", 1)[1])
     loopback = host in ("localhost", "::1") or host.startswith("127.")
-    client_host = "127.0.0.1" if host == "0.0.0.0" else host
+    client_host = "127.0.0.1" if host == "0.0.0.0" else host  # noqa: S104 — ALLE_API_LISTEN opt-in
     return {
         "bind": f"{host}:{port}",
         "client": f"{client_host}:{port}",
@@ -710,6 +716,8 @@ def _asset(name: str) -> bytes | None:
 
 
 class _Handler(BaseHTTPRequestHandler):
+    # A rolling-session cookie staged for the next response, if any.
+    _refresh_cookie: str | None = None
     server_version = "alle-api"
     secret = ""
     address = ""
@@ -775,7 +783,7 @@ class _Handler(BaseHTTPRequestHandler):
         """The ``?dry_run=`` query flag on destructive endpoints — strict: an
         unrecognized value is a 400, never "false" (a typo must not turn a
         preview into the real removal)."""
-        raw = (parse_qs(urlparse(self.path).query).get("dry_run") or [None])[0]
+        raw = _query_first(self.path, "dry_run")
         if raw is None:
             return False
         if raw in ("1", "true"):
@@ -862,7 +870,7 @@ class _Handler(BaseHTTPRequestHandler):
                 500,
                 {"error": "internal server error", "request_id": request_id},
             )
-        except Exception:  # noqa: BLE001 — the socket itself may be unusable
+        except Exception:  # noqa: BLE001, S110 — the socket itself may be unusable
             pass
 
     def _cookie_header_value(self, cookie: str) -> str:
@@ -950,7 +958,7 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 self.send_response(500)
                 self.end_headers()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, S110 — best-effort 500 on a dead socket
                 pass
 
     def do_POST(self):
@@ -1559,7 +1567,7 @@ def _locations(path: str) -> dict:
     provider = (query.get("provider") or [""])[0]
     if not provider:
         raise service.ServiceError("a provider query parameter is required.")
-    return service.locations_list(provider, (query.get("country") or [None])[0])
+    return service.locations_list(provider, _query_first(path, "country"))
 
 
 def _add_channel(body: dict) -> dict:
@@ -1585,7 +1593,7 @@ def _add_channel(body: dict) -> dict:
 
 def _channel_query(path: str) -> str | None:
     """The optional ``?channel=`` filter (same ref grammar as ``alle test``)."""
-    return (parse_qs(urlparse(path).query).get("channel") or [None])[0]
+    return _query_first(path, "channel")
 
 
 def _log_lines(path: str) -> int:

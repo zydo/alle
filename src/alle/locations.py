@@ -78,7 +78,7 @@ def write(root: Path, provider: str) -> dict:
             f"unknown provider '{provider}' (known: {', '.join(sorted(PROVIDERS))})"
         )
     countries = _validate_countries(PROVIDERS[provider]["locations"]())
-    out = {
+    out: dict = {
         "_meta": {
             "provider": provider,
             "source": SOURCE,

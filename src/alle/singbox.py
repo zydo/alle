@@ -100,7 +100,7 @@ def bin_path() -> Path:
 
 
 def _download(url: str, dest: Path) -> None:
-    req = urllib.request.Request(url, headers={"User-Agent": "alle/1"})
+    req = urllib.request.Request(url, headers={"User-Agent": "alle/1"})  # noqa: S310 — fixed https/loopback URL, no user-supplied scheme
     with urllib.request.urlopen(req, timeout=120) as r:  # noqa: S310 (pinned https URL)
         length = r.headers.get("Content-Length")
         if length is not None:
@@ -194,7 +194,7 @@ def _repair_cached(target: Path) -> None:
             "user — remove it and rerun so alle re-downloads its own copy."
         )
     if os.stat(target).st_mode & 0o777 != 0o755:
-        os.chmod(target, 0o755)  # noqa: S2612 — the executable must be executable
+        os.chmod(target, 0o755)  # noqa: S103, S2612 — the executable must be executable
 
 
 def _install(key: str, expected: str, target: Path) -> Path:
@@ -247,7 +247,7 @@ def _install(key: str, expected: str, target: Path) -> Path:
                         f"sing-box checksum mismatch (expected {expected}, got {got}); "
                         "refusing to run an unverified binary."
                     )
-                os.chmod(staged, 0o755)  # noqa: S2612
+                os.chmod(staged, 0o755)  # noqa: S103, S2612
                 os.replace(staged, target)
                 fsio._fsync_dir(target.parent)
             finally:

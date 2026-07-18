@@ -129,7 +129,7 @@ def probe_channel(
             last_reason = f"channel deadline ({deadline:g}s) exhausted"
             break
         attempted.append(name)
-        req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+        req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})  # noqa: S310 — fixed https/loopback URL, no user-supplied scheme
         start = time.monotonic()
         try:
             with opener.open(  # noqa: S310 (loopback proxy)

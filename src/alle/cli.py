@@ -635,8 +635,20 @@ def cmd_test(args):
 
     if args.json:
         print(output.json_text(result))
+    else:
+        print(output.test_result(result))
+    _test_strict_exit(args, result)
+
+
+def _test_strict_exit(args, result: dict) -> None:
+    """`--fail`: nonzero exit when any probed channel is unhealthy — the
+    per-channel counterpart of `alle health` (daemon liveness), for monitoring.
+    Nothing probed also fails: a monitor that watched nothing must not report
+    success."""
+    if not getattr(args, "fail", False):
         return
-    print(output.test_result(result))
+    if not result.get("probed") or result.get("failed_count", 0) > 0:
+        sys.exit(1)
 
 
 def _run_streaming_test(args):
@@ -668,11 +680,13 @@ def _run_streaming_test(args):
 
     if not stream:
         print(output.test_result(result))  # "No channels configured." etc.
+        _test_strict_exit(args, result)
         return
     # No trailing summary line: plain `alle test` prints none either, and a
     # failing channel is already visible in its own row (STATE carries the
     # probe's failure reason; its skipped transfers render as "-").
     stream[0].end()
+    _test_strict_exit(args, result)
 
 
 class _SpeedStream:
@@ -1596,6 +1610,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     te.add_argument(
         "--speed", action="store_true", help="also run download/upload tests"
+    )
+    te.add_argument(
+        "--fail",
+        action="store_true",
+        help="exit 1 when any probed channel is unhealthy (or nothing was "
+        "probed) — for monitoring; `alle health` covers daemon liveness",
     )
     te.add_argument(
         "--channel",

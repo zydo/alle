@@ -1328,9 +1328,20 @@ def _singbox_has_net_admin() -> bool:
     path = str(singbox.bin_path())
     if not os.path.exists(path):
         return False
+    getcap = next(
+        (
+            g
+            for g in ("/usr/sbin/getcap", "/sbin/getcap", "/usr/bin/getcap")
+            if os.path.exists(g)
+        ),
+        "getcap",
+    )
     try:
         out = subprocess.run(
-            ["getcap", path], capture_output=True, text=True, timeout=5
+            [getcap, path],  # noqa: S607 — bare name only when no known path exists
+            capture_output=True,
+            text=True,
+            timeout=5,
         ).stdout
         if "cap_net_admin" in out:
             return True

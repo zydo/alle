@@ -32,10 +32,12 @@ jobs:
         run: |
           uv export --locked --no-dev --no-emit-project --format requirements-txt --output-file docker/requirements.lock
           git diff --exit-code -- docker/requirements.lock
-      - name: Check lint
+      - name: Check lint (incl. flake8-bandit security rules)
         run: uv run ruff check
       - name: Check format
         run: uv run ruff format --check
+      - name: Check types (mypy, zero-error baseline)
+        run: uv run mypy
       - name: Check browser modules and stream protocols
         run: npm run check:web
       # The same package smoke publish gates on: catch sdist/wheel/README
@@ -94,6 +96,35 @@ jobs:
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           cache-suffix: test-py${{ matrix.python-version }}
+      - run: uv lock --check
+      - run: uv sync --locked --all-extras
+      # Coverage (with branches) is measured on the newest Python only — the
+      # floor is a ratchet set from the measured number, not an aspiration.
+      - name: Run tests
+        run: |
+          if [ "${{ matrix.python-version }}" = "3.14" ]; then
+            uv run pytest -q --cov=alle --cov-branch --cov-fail-under=84
+          else
+            uv run pytest -q
+          fi
+
+  # macOS is the primary desktop target: launchd daemonctl, the privileged
+  # helper's install machinery, and the `ps` fallbacks only exercise their
+  # real platform branches here. One job on the newest Python — the version
+  # matrix stays on Linux.
+  test-macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          cache-suffix: test-macos-py3.14
       - run: uv lock --check
       - run: uv sync --locked --all-extras
       - run: uv run pytest -q

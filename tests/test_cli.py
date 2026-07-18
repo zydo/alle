@@ -611,3 +611,67 @@ def test_start_never_prompts_in_container_or_supervised(offerable, monkeypatch, 
     monkeypatch.setenv("ALLE_SERVICE", "1")
     cli.main(["start"])
     assert offerable == []
+
+
+# ---- `alle test --fail`: strict exit for monitoring ---------------------------
+
+
+def _fake_test_result(healthy: int, failed: int) -> dict:
+    return {
+        "probed": True,
+        "speed": False,
+        "filter": None,
+        "running": True,
+        "channel_count": healthy + failed,
+        "healthy_count": healthy,
+        "failed_count": failed,
+        "disabled_count": 0,
+        "channels": [],
+    }
+
+
+def test_test_fail_exits_nonzero_when_any_channel_unhealthy(monkeypatch, capsys):
+    monkeypatch.setattr(
+        service, "test", lambda **kw: _fake_test_result(healthy=1, failed=1)
+    )
+    with pytest.raises(SystemExit) as e:
+        cli.main(["test", "--fail"])
+    assert e.value.code == 1
+
+
+def test_test_fail_exits_zero_when_all_healthy(monkeypatch, capsys):
+    monkeypatch.setattr(
+        service, "test", lambda **kw: _fake_test_result(healthy=2, failed=0)
+    )
+    cli.main(["test", "--fail"])  # returns normally: exit code 0
+
+
+def test_test_fail_exits_nonzero_when_nothing_probed(monkeypatch, capsys):
+    # no channels at all: a monitoring probe that watched nothing must not
+    # report success
+    monkeypatch.setattr(
+        service,
+        "test",
+        lambda **kw: {
+            "probed": False,
+            "reason": "no_channels",
+            "speed": False,
+            "filter": None,
+            "running": False,
+            "channel_count": 0,
+            "healthy_count": 0,
+            "failed_count": 0,
+            "disabled_count": 0,
+            "channels": [],
+        },
+    )
+    with pytest.raises(SystemExit) as e:
+        cli.main(["test", "--fail"])
+    assert e.value.code == 1
+
+
+def test_test_without_fail_never_exits_nonzero(monkeypatch, capsys):
+    monkeypatch.setattr(
+        service, "test", lambda **kw: _fake_test_result(healthy=0, failed=3)
+    )
+    cli.main(["test"])  # informational: exit 0 regardless of channel health

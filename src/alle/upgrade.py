@@ -182,7 +182,7 @@ def _version_newer(latest: str, current: str) -> bool:
 def _fetch_pypi_version(timeout: float) -> str:
     import urllib.request
 
-    req = urllib.request.Request(PYPI_JSON_URL, headers={"Accept": "application/json"})
+    req = urllib.request.Request(PYPI_JSON_URL, headers={"Accept": "application/json"})  # noqa: S310 — fixed https/loopback URL, no user-supplied scheme
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — fixed https URL
             data = json.load(resp)

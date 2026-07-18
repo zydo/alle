@@ -147,9 +147,14 @@ def generated_endpoint(
         if cfg is not None:
             return cfg
         fresh = generate()
+
+        def _write(f) -> None:
+            json.dump(fresh, f, indent=2)
+            f.write("\n")
+
         write_durably(
             path,
-            lambda f: (json.dump(fresh, f, indent=2), f.write("\n")),
+            _write,
             prefix=f".{path.stem}-",
             suffix=path.suffix,
             mode=0o600,

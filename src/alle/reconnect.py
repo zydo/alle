@@ -122,7 +122,7 @@ def run_pass(
     costs nothing but this pass's shake-out attempt.
     """
     now = time.time() if now is None else now
-    updates = {}
+    updates: dict = {}
     actions = {}
     messages = {}
     for ch in store.channels():

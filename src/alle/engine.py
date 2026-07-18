@@ -179,7 +179,7 @@ class Engine:
             built.add((ch.provider, ch.id))
         self._router_config(inbounds, rules, built, errors)
         api = singbox.clash_api()
-        config = {
+        config: dict = {
             "log": {"level": "warn", "timestamp": True},
             "experimental": {
                 "clash_api": {

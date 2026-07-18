@@ -84,7 +84,7 @@ def _latency_ms(
             raise Cancelled
         best: float | None = None
         for _ in range(LATENCY_SAMPLES):
-            req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+            req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})  # noqa: S310 — fixed https/loopback URL, no user-supplied scheme
             start = time.monotonic()
             try:
                 with opener.open(req, timeout=timeout) as r:  # noqa: S310 (loopback proxy)
@@ -108,7 +108,7 @@ def _download_bps(
         start = time.monotonic()
         try:
             while time.monotonic() - start < DOWNLOAD_SECONDS:
-                req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+                req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})  # noqa: S310 — fixed https/loopback URL, no user-supplied scheme
                 with opener.open(req, timeout=timeout) as r:  # noqa: S310 (loopback proxy)
                     while time.monotonic() - start < DOWNLOAD_SECONDS:
                         if cancel and cancel():
@@ -136,7 +136,7 @@ def _upload_bps(
     for url in UPLOAD_URLS:
         if cancel and cancel():
             raise Cancelled
-        req = urllib.request.Request(
+        req = urllib.request.Request(  # noqa: S310 — fixed https/loopback URL, no user-supplied scheme
             url,
             data=payload,
             headers={
@@ -148,7 +148,7 @@ def _upload_bps(
         try:
             with opener.open(req, timeout=timeout) as r:  # noqa: S310 (loopback proxy)
                 r.read(_SMALL_READ_CAP)
-        except Exception:  # noqa: BLE001 — endpoint not usable; try the next sink
+        except Exception:  # noqa: S112, BLE001 — endpoint not usable; try the next sink
             continue
         elapsed = time.monotonic() - start
         if elapsed > 0:

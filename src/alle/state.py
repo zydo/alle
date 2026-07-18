@@ -517,7 +517,7 @@ def _quarantine(
             return False
         try:
             validate(current_text)
-        except Exception:  # the store parser defines the accepted exception type
+        except Exception:  # noqa: S110 — the store parser defines the accepted exception type
             pass
         else:
             return False
