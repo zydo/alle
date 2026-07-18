@@ -48,8 +48,16 @@ def rotate_if_needed(p: Path, max_bytes: int) -> None:
 
 
 def log(message: str) -> None:
-    """Append one timestamped line. Best-effort: never raises into the caller."""
-    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {message}\n"
+    """Append one timestamped line. Best-effort: never raises into the caller.
+
+    The message is sanitized (ANSI/control sequences stripped) because the
+    file is replayed raw into terminals by ``alle logs``/``logs -f`` — a
+    hostile provider/user label must not clear the screen there, and an
+    embedded newline must not forge extra log lines.
+    """
+    from alle import output  # function-level: applog is imported by everything
+
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {output.sanitize_text(message)}\n"
     if echo_stderr:
         try:
             sys.stderr.write(line)

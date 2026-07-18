@@ -7,9 +7,30 @@ text or JSON for the command-line adapter.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from alle import routes
+
+# Escape/control-sequence hygiene for anything echoed to a terminal. Labels,
+# cities, filenames, and provider diagnostics are user- or network-supplied:
+# rendered raw, an embedded CSI/OSC sequence could clear the screen, move the
+# cursor over earlier output, or retitle the window. Strip well-formed ANSI
+# sequences first, then every remaining C0 (except tab) and C1 control byte.
+_ANSI_SEQ = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"  # CSI:  ESC [ params final
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?"  # OSC:  ESC ] ... BEL/ST
+    r"|\x9b[0-?]*[ -/]*[@-~]"  # 8-bit CSI
+    r"|\x1b."  # any other two-byte escape
+)
+
+
+def sanitize_text(value: Any) -> str:
+    """``value`` as text with ANSI sequences and control characters removed."""
+    text = _ANSI_SEQ.sub("", str(value))
+    return "".join(
+        ch for ch in text if (ch >= " " or ch == "\t") and not ("\x7f" <= ch <= "\x9f")
+    )
 
 
 def json_text(data: Any) -> str:
@@ -75,10 +96,13 @@ def _table(headers: list[str], rows: list[list[str]]) -> list[str]:
     the ``header`` / ``------`` / ``rows`` layout shared by every alle table.
     """
     n = len(headers)
+    # Sanitize once, up front: widths must be measured on what is printed, or
+    # a stripped escape sequence would leave its column misaligned.
+    rows = [[sanitize_text(r[i]) for i in range(n)] for r in rows]
     widths = [len(headers[i]) for i in range(n)]
     for r in rows:
         for i in range(n):
-            widths[i] = max(widths[i], len(str(r[i])))
+            widths[i] = max(widths[i], len(r[i]))
 
     def line(cells) -> str:
         return "  ".join(str(cells[i]).ljust(widths[i]) for i in range(n)).rstrip()

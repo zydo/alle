@@ -271,7 +271,9 @@ def test_systemd_unit_escapes_percent_and_quotes_values(fake_home, monkeypatch):
     # "/tmp/my %state dir" must round-trip through the unit file literally.
     home = str(fake_home / "my %state dir")
     monkeypatch.setenv("ALLE_HOME", home)
-    monkeypatch.setattr(daemonctl, "_service_exec", lambda: ["/usr/bin/alle", "applier"])
+    monkeypatch.setattr(
+        daemonctl, "_service_exec", lambda: ["/usr/bin/alle", "applier"]
+    )
     text = daemonctl.SystemdManager()._unit_text()
     assert 'Environment="ALLE_HOME=' in text
     assert home.replace("%", "%%") in text

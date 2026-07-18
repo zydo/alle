@@ -534,6 +534,7 @@ def test_start_offers_once_and_remembers_declination(offerable, monkeypatch, cap
     cli.main(["start"])
     assert offerable == []  # declined: no install
     assert Store.load().service_offer_recorded() is True
+
     # the second start must not ask again (input would raise if called)
     def boom(prompt=""):
         raise AssertionError("asked twice")

@@ -286,7 +286,12 @@ def test_runner_never_adopts_without_a_matching_home(monkeypatch, tmp_path):
     monkeypatch.setattr(
         helper,
         "request",
-        lambda cmd, **kw: {"ok": True, "running": True, "pid": 4242, "home": str(tmp_path)},
+        lambda cmd, **kw: {
+            "ok": True,
+            "running": True,
+            "pid": 4242,
+            "home": str(tmp_path),
+        },
     )
     assert r._helper_owned_pid() == 4242
 
@@ -298,7 +303,9 @@ def test_tun_privilege_gate_names_foreign_and_stale_helpers(monkeypatch):
     monkeypatch.setattr(service.daemon, "daemon_info", lambda: None)
     monkeypatch.setattr(os, "geteuid", lambda: 501)
     monkeypatch.setattr(
-        helper, "probe", lambda: {"state": "foreign", "home": FOREIGN_HOME, "version": 2}
+        helper,
+        "probe",
+        lambda: {"state": "foreign", "home": FOREIGN_HOME, "version": 2},
     )
     with pytest.raises(service.ServiceError, match="different ALLE_HOME"):
         service._require_tun_privileges()

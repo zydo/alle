@@ -1089,8 +1089,12 @@ def test_upgrade_post_calls_service_and_surfaces_refusals(live, monkeypatch):
     monkeypatch.setattr(
         service,
         "upgrade_run",
-        lambda: {"channel": "uv-tool", "before": "0.1.8", "after": "0.1.9",
-                 "changed": True},
+        lambda: {
+            "channel": "uv-tool",
+            "before": "0.1.8",
+            "after": "0.1.9",
+            "changed": True,
+        },
     )
     st, body, _ = _req(base + "/api/v1/upgrade", method="POST", headers=origin, data={})
     assert st == 200 and json.loads(body)["changed"] is True

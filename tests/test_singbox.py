@@ -632,3 +632,45 @@ def test_prune_is_a_noop_with_only_the_current_binary(tmp_path):
     current.write_bytes(b"x")
     singbox._prune_old_binaries(current)
     assert [p.name for p in bindir.iterdir()] == ["sing-box@1.12.0"]
+
+
+# ---- cached-binary permission repair -----------------------------------------
+
+
+def test_ensure_binary_repairs_mode_on_a_valid_cached_binary(monkeypatch):
+    import hashlib
+
+    content = b"#!/bin/sh\nexit 0\n"
+    key = singbox.host_platform()
+    monkeypatch.setitem(
+        singbox.SINGBOX_SHA256, key, hashlib.sha256(content).hexdigest()
+    )
+    target = singbox.bin_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+    os.chmod(target, 0o600)  # checksum-valid but not executable
+    got = singbox.ensure_binary()
+    assert got == target
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o755  # repaired, not just accepted
+
+
+def test_ensure_binary_rejects_a_foreign_owned_cached_binary(monkeypatch):
+    import hashlib
+
+    content = b"binary"
+    key = singbox.host_platform()
+    monkeypatch.setitem(
+        singbox.SINGBOX_SHA256, key, hashlib.sha256(content).hexdigest()
+    )
+    target = singbox.bin_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+    monkeypatch.setattr(singbox, "_owner_uid", lambda p: os.geteuid() + 1)
+    with pytest.raises(singbox.SingBoxError, match="owned"):
+        singbox.ensure_binary()
+
+
+def test_ps_command_is_an_absolute_path():
+    from alle import proc
+
+    assert proc.PS.startswith("/")

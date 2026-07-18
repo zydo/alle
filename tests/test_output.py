@@ -261,3 +261,42 @@ def test_router_mode_always_shows_the_lan_state():
     # pre-toggle JSON carries no lan_direct key: the default is on
     legacy = {"rule_count": 1, "killswitch": False, "unmatched": "direct"}
     assert "LAN bypasses VPN" in output._router_mode(legacy)
+
+
+# ---- terminal sanitization: labels can't smuggle ANSI/control sequences -------
+
+
+def test_sanitize_text_strips_ansi_and_control_characters():
+    from alle import output
+
+    s = output.sanitize_text("ok\x1b[31mred\x1b[0m \x07bell \x9b2Jcsi")
+    assert "\x1b" not in s and "\x07" not in s and "\x9b" not in s
+    assert "red" in s and "bell" in s  # visible text survives
+
+
+def test_sanitize_text_keeps_plain_unicode():
+    from alle import output
+
+    assert output.sanitize_text("Zürich ✓ 東京") == "Zürich ✓ 東京"
+
+
+def test_channel_table_sanitizes_hostile_labels():
+    from alle import output
+
+    data = {
+        "providers": {"nordvpn": {}},
+        "channels": [
+            {
+                "provider": "nordvpn",
+                "name": "us1",
+                "label": "evil\x1b[2J\x1b[1;1Hwipe",
+                "country": "US",
+                "city": "NYC\x07",
+                "port": ":1080",
+                "enabled": True,
+            }
+        ],
+    }
+    text = output.channels_list(data)
+    assert "\x1b" not in text and "\x07" not in text
+    assert "wipe" in text  # content kept, escapes gone

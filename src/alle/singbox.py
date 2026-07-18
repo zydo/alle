@@ -155,11 +155,13 @@ def ensure_binary() -> Path:
             )
         return target
     if target.exists() and _sha256_file(target) == expected:
+        _repair_cached(target)
         return target
     with fsio.locked(target.with_name(target.name + ".lock")):
         # Another process may have completed the installation while this
         # caller waited.  Re-verify under the lock before touching the cache.
         if target.exists() and _sha256_file(target) == expected:
+            _repair_cached(target)
             return target
         if target.exists():
             print(
@@ -169,6 +171,30 @@ def ensure_binary() -> Path:
             )
             target.unlink()
         return _install(key, expected, target)
+
+
+def _owner_uid(path: Path) -> int:
+    return os.stat(path).st_uid
+
+
+def _repair_cached(target: Path) -> None:
+    """Restore the expected mode/ownership of an already-checksum-valid cache.
+
+    The checksum is re-verified on every call, but a binary whose mode was
+    changed out from under alle (chmod'd non-executable, or made group/world
+    writable) would otherwise stay wrong until the next re-download. Ownership
+    is validated rather than repaired: a foreign-owned file at our cache path
+    cannot be trusted to *stay* the bytes that were just hashed, and we could
+    not chmod it anyway.
+    """
+    uid = _owner_uid(target)
+    if uid != os.geteuid() and os.geteuid() != 0:
+        raise SingBoxError(
+            f"cached sing-box at {target} is owned by uid {uid}, not this "
+            "user — remove it and rerun so alle re-downloads its own copy."
+        )
+    if os.stat(target).st_mode & 0o777 != 0o755:
+        os.chmod(target, 0o755)  # noqa: S2612 — the executable must be executable
 
 
 def _install(key: str, expected: str, target: Path) -> Path:
@@ -535,8 +561,7 @@ class Runner:
         if old is not None:
             try:
                 old_had_tun = any(
-                    i.get("type") == "tun"
-                    for i in json.loads(old).get("inbounds", [])
+                    i.get("type") == "tun" for i in json.loads(old).get("inbounds", [])
                 )
             except (ValueError, AttributeError):
                 pass

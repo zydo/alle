@@ -36,29 +36,32 @@ from alle.probe import proxy_opener
 # 50 MB per fetch — Cloudflare rejects much larger single requests, so the
 # download test loops fetches until DOWNLOAD_SECONDS is up rather than asking
 # for one huge object. Backups are large static objects on independent
-# infrastructure (OVH, Tele2).
+# infrastructure. HTTPS ONLY (decided 2026-07-17): advisory speed numbers are
+# not worth plain-HTTP egress from a VPN product, so the former tele2/Firefox
+# plain-HTTP fallbacks are gone rather than noqa'd.
 DOWNLOAD_URLS = [
     "https://speed.cloudflare.com/__down?bytes=50000000",
     "https://proof.ovh.net/files/100Mb.dat",
-    "http://speedtest.tele2.net/100MB.zip",  # noqa: S5332
 ]
 # Endpoints that accept and discard a POST body.
 UPLOAD_URLS = [
-    "http://speedtest.tele2.net/upload.php",  # noqa: S5332
     "https://librespeed.org/backend/empty.php",
     "https://speed.cloudflare.com/__up",  # throttles proxied POSTs; last resort
 ]
-# Tiny objects on independent infrastructure (Cloudflare, Google, Mozilla).
+# Tiny objects on independent infrastructure (Cloudflare, Google).
 LATENCY_URLS = [
     "https://speed.cloudflare.com/__down?bytes=1",
     "https://www.gstatic.com/generate_204",
-    "http://detectportal.firefox.com/success.txt",  # noqa: S5332
 ]
 
 DOWNLOAD_SECONDS = 5.0  # read the download stream for at most this long
 UPLOAD_BYTES = 8 * 1024 * 1024  # payload pushed for the upload test
 LATENCY_SAMPLES = 5  # tiny requests; the fastest one wins
+# The whole run (all phases, all fallbacks) is bounded by one monotonic
+# deadline — a hung endpoint can stall one phase, never the entire command.
+OVERALL_SECONDS = 60.0
 _CHUNK = 65536
+_SMALL_READ_CAP = 1 * 1024 * 1024  # latency/upload replies are tiny; cap reads
 _USER_AGENT = "alle-speedtest/1"
 
 
@@ -85,7 +88,7 @@ def _latency_ms(
             start = time.monotonic()
             try:
                 with opener.open(req, timeout=timeout) as r:  # noqa: S310 (loopback proxy)
-                    r.read()
+                    r.read(_SMALL_READ_CAP)
             except Exception:  # noqa: BLE001 — endpoint not usable; try the next source
                 break
             ms = (time.monotonic() - start) * 1000
@@ -144,7 +147,7 @@ def _upload_bps(
         start = time.monotonic()
         try:
             with opener.open(req, timeout=timeout) as r:  # noqa: S310 (loopback proxy)
-                r.read()
+                r.read(_SMALL_READ_CAP)
         except Exception:  # noqa: BLE001 — endpoint not usable; try the next sink
             continue
         elapsed = time.monotonic() - start
@@ -177,8 +180,17 @@ def run(
     ``cancel`` is an optional predicate polled between and within phases; when it
     returns true the run aborts (a streaming client that disconnected should not
     keep driving transfers). A cancelled phase yields ``None`` for that metric.
+
+    The whole run is additionally bounded by one monotonic deadline
+    (``OVERALL_SECONDS``): per-request timeouts bound a single connection, but
+    endpoint fallbacks multiply them — the deadline caps the sum, and phases it
+    cuts off return ``None`` while completed ones keep their numbers.
     """
     opener = proxy_opener(port)
+    deadline = time.monotonic() + OVERALL_SECONDS
+
+    def _expired() -> bool:
+        return (cancel is not None and cancel()) or time.monotonic() >= deadline
 
     def _phase(name: str) -> None:
         if progress is not None:
@@ -188,11 +200,11 @@ def run(
     try:
         if measure_latency:
             _phase("latency")
-            latency = _latency_ms(opener, timeout, cancel)
+            latency = _latency_ms(opener, timeout, _expired)
         _phase("download")
-        download = _download_bps(opener, timeout, cancel)
+        download = _download_bps(opener, timeout, _expired)
         _phase("upload")
-        upload = _upload_bps(opener, timeout, cancel)
+        upload = _upload_bps(opener, timeout, _expired)
     except Cancelled:
-        pass  # return whatever phases completed before the cancel
+        pass  # return whatever phases completed before the cancel/deadline
     return {"latency_ms": latency, "download_bps": download, "upload_bps": upload}

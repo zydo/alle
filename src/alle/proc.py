@@ -24,6 +24,12 @@ import os
 import subprocess
 from pathlib import Path
 
+# `ps` by resolved absolute path: process-identity checks feed kill/stop
+# decisions, so they must not exec whatever a mutated PATH puts first. Both
+# locations are standard (macOS/BSD: /bin/ps; most Linux: /usr/bin/ps); the
+# bare name remains only as a last resort for exotic layouts.
+PS = next((p for p in ("/bin/ps", "/usr/bin/ps") if os.path.exists(p)), "ps")
+
 
 def process_state_of(pid: int) -> str | None:
     """Kernel process state, or ``None`` when it cannot be determined."""
@@ -36,7 +42,7 @@ def process_state_of(pid: int) -> str | None:
         pass
     try:
         out = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "state="],
+            [PS, "-p", str(pid), "-o", "state="],
             capture_output=True,
             text=True,
             timeout=5,
@@ -62,7 +68,7 @@ def command_of(pid: int) -> str | None:
         pass
     try:
         out = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
+            [PS, "-p", str(pid), "-o", "command="],
             capture_output=True,
             text=True,
             timeout=5,
@@ -93,7 +99,7 @@ def start_time_of(pid: int) -> str | None:
         pass
     try:
         out = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "lstart="],
+            [PS, "-p", str(pid), "-o", "lstart="],
             capture_output=True,
             text=True,
             timeout=5,

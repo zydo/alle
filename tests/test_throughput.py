@@ -120,3 +120,67 @@ def test_cancel_aborts_the_download_loop_early():
         throughput._download_bps(endless, timeout=2, cancel=cancel)
     assert time.monotonic() - start < throughput.DOWNLOAD_SECONDS  # bailed early
     assert calls["n"] >= 2  # cancel was actually polled
+
+
+# ---- HTTPS-only endpoints + the overall deadline ------------------------------
+
+
+def test_every_endpoint_is_https():
+    # decided 2026-07-17: no plain-HTTP fallbacks — advisory numbers are not
+    # worth an unencrypted egress from a VPN product
+    for url in (
+        throughput.DOWNLOAD_URLS + throughput.UPLOAD_URLS + throughput.LATENCY_URLS
+    ):
+        assert url.startswith("https://"), url
+
+
+class _EndlessResp(_Resp):
+    """A stream that never ends — only a deadline can stop it."""
+
+    def __init__(self):
+        super().__init__(b"")
+
+    def read(self, n=None):
+        return b"\0" * (n or 65536)
+
+
+class _EndlessOpener:
+    def open(self, req, timeout=None):
+        return _EndlessResp()
+
+
+def test_overall_deadline_bounds_the_whole_run(monkeypatch):
+    import time as time_mod
+
+    monkeypatch.setattr(throughput, "DOWNLOAD_SECONDS", 60.0)  # would run a minute
+    monkeypatch.setattr(throughput, "OVERALL_SECONDS", 0.2)  # the deadline wins
+    monkeypatch.setattr(throughput, "proxy_opener", lambda port: _EndlessOpener())
+    start = time_mod.monotonic()
+    res = throughput.run(1080, measure_latency=False)
+    assert time_mod.monotonic() - start < 5  # bounded by the deadline, not phases
+    assert set(res) == {"latency_ms", "download_bps", "upload_bps"}
+
+
+def test_deadline_returns_partial_results(monkeypatch):
+    # download completes inside the deadline; upload is cut off by it — the
+    # completed metric is kept rather than discarded
+    monkeypatch.setattr(throughput, "OVERALL_SECONDS", 0.15)
+    monkeypatch.setattr(throughput, "DOWNLOAD_SECONDS", 0.01)
+    body = b"\0" * 4096
+    routes = {url: body for url in throughput.DOWNLOAD_URLS}
+
+    class _SlowUploadOpener(_Opener):
+        def open(self, req, timeout=None):
+            if req.full_url in throughput.UPLOAD_URLS:
+                import time as time_mod
+
+                time_mod.sleep(0.3)  # past the deadline
+                raise OSError("too late anyway")
+            return super().open(req, timeout)
+
+    monkeypatch.setattr(
+        throughput, "proxy_opener", lambda port: _SlowUploadOpener(routes)
+    )
+    res = throughput.run(1080, measure_latency=False)
+    assert res["download_bps"] is not None
+    assert res["upload_bps"] is None

@@ -1227,6 +1227,8 @@ def _process_uid(pid: int) -> int | None:
     """
     import subprocess
 
+    from alle import proc
+
     try:
         with open(f"/proc/{pid}/status") as f:
             for line in f:
@@ -1237,7 +1239,7 @@ def _process_uid(pid: int) -> int | None:
         pass
     try:
         out = subprocess.run(
-            ["ps", "-o", "uid=", "-p", str(pid)],
+            [proc.PS, "-o", "uid=", "-p", str(pid)],
             capture_output=True,
             text=True,
             timeout=5,

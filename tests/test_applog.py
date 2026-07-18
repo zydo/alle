@@ -115,3 +115,15 @@ def test_follow_prints_existing_tail_and_closes(monkeypatch, capsys):
         applog.follow(1)
 
     assert capsys.readouterr().out.splitlines() == ["two"]
+
+
+def test_log_lines_are_sanitized(tmp_path, monkeypatch):
+    """A hostile provider/user string must not smuggle ANSI into the log —
+    `alle logs -f` replays the file raw into a terminal."""
+    from alle import applog
+
+    monkeypatch.setenv("ALLE_HOME", str(tmp_path))
+    applog.log("channel \x1b[2J\x9bHed label\x07 added")
+    text = (tmp_path / "alle.log").read_text()
+    assert "\x1b" not in text and "\x9b" not in text and "\x07" not in text
+    assert "label" in text
