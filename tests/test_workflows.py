@@ -113,7 +113,8 @@ def test_ci_gates_match_the_publish_gate():
         "twine check",
     ):
         assert needle in runs, f"ci missing gate step: {needle!r}"
-    assert "shellcheck scripts/install.sh" in runs
+    assert "xargs -0 uv run shellcheck" in runs
+    assert "xargs -0 uv run shfmt -d" in runs
     assert "sh -n scripts/install.sh" in runs
 
 
