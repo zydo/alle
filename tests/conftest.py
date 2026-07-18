@@ -45,6 +45,7 @@ def runtime_guard(monkeypatch, runtime_session, shared_singbox):
         "ALLE_APPLIER",
         "ALLE_SERVICE",
         "ALLE_GATEWAY",
+        "_ALLE_INSTALL_TEST_ROOT",
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("ALLE_SINGBOX", str(shared_singbox))

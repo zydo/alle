@@ -423,6 +423,21 @@ def test_in_container_env_flag(monkeypatch):
     assert runtime.in_container()
 
 
+def test_in_container_marker_file(monkeypatch, tmp_path):
+    (tmp_path / ".dockerenv").touch()
+    monkeypatch.setattr(runtime, "_MARKER_FILES", ("/.dockerenv",))
+    monkeypatch.setenv("_ALLE_INSTALL_TEST_ROOT", str(tmp_path))
+    assert runtime.in_container()
+
+
+def test_in_container_test_root_masks_real_markers(monkeypatch, tmp_path):
+    """The installer smoke seam lets the login-service path run inside the
+    Docker harness: with a marker-free fake root, /.dockerenv is not seen."""
+    monkeypatch.setattr(runtime, "_MARKER_FILES", ("/.dockerenv",))
+    monkeypatch.setenv("_ALLE_INSTALL_TEST_ROOT", str(tmp_path))
+    assert not runtime.in_container()
+
+
 def test_daemon_install_refuses_in_container(monkeypatch):
     monkeypatch.setenv("ALLE_CONTAINER", "1")
     with pytest.raises(daemonctl.DaemonCtlError, match="container"):

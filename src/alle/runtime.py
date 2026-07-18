@@ -21,4 +21,9 @@ def in_container() -> bool:
     """True when running inside a container (env flag or marker file)."""
     if os.environ.get("ALLE_CONTAINER"):
         return True
-    return any(os.path.exists(p) for p in _MARKER_FILES)
+    # Resolve the marker files through the installer's fake-root seam the same
+    # way install.sh's root_path() does, so the login-service install path can
+    # be exercised against a real systemd --user session inside the Docker
+    # smoke harness. Unset in production, so real markers are read verbatim.
+    root = os.environ.get("_ALLE_INSTALL_TEST_ROOT", "")
+    return any(os.path.exists(root + p) for p in _MARKER_FILES)
