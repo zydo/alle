@@ -2,7 +2,7 @@
 # namespace where sing-box tun configs run for real — route seizure, DNS
 # hijack, kill-switch — with zero risk to the host's network. Run via
 # scripts/tun-sandbox/run.sh, never in CI (needs NET_ADMIN + /dev/net/tun).
-FROM debian@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
+FROM debian@sha256:fac46bff2e02f51425b6e33b0e1169f55dfb053d83511ca28aa50c09fd5ed7a4
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
