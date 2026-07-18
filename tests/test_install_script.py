@@ -124,7 +124,7 @@ exit 93
         bin_dir / "alle-fixture",
         """
 case "$1 ${2:-}" in
-  "version ") echo 0.1.9 ;;
+  "version ") echo 0.1.10 ;;
   "daemon install")
     mkdir -p "${ALLE_HOME:-$HOME/.alle}"
     echo service >> "$MUTATION_LOG"

@@ -49,7 +49,7 @@ explicitly tagged asset and verify that release's published digest before
 executing it:
 
 ```bash
-version=v0.1.9
+version=v0.1.10
 base="https://github.com/zydo/alle/releases/download/$version"
 curl -LsSf -O "$base/install.sh"
 curl -LsSf -O "$base/install.sh.sha256"
