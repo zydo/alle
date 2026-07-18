@@ -1,0 +1,94 @@
+name: Dependabot automerge
+
+on:
+  workflow_run:
+    workflows: [CI, Supply Chain]
+    types: [completed]
+
+# CI and Supply Chain complete independently. Serialize their completion
+# events so only one privileged run can approve and merge a given head.
+concurrency:
+  group: dependabot-automerge-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # `workflow_run` has a write-capable token, so never check out or run
+      # code from the PR. Trust only GitHub API data and exact immutable SHAs.
+      - name: Verify Dependabot identity and required workflows
+        id: verify
+        env:
+          BASE_REF: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$PR_NUMBER" ]]; then
+            echo "No pull request is associated with this workflow run"
+            exit 0
+          fi
+
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
+          if [[ $(jq -r .state <<<"$pr") != open ]] ||
+             [[ $(jq -r .user.login <<<"$pr") != 'dependabot[bot]' ]] ||
+             [[ $(jq -r .base.ref <<<"$pr") != "$BASE_REF" ]] ||
+             [[ $(jq -r .head.repo.full_name <<<"$pr") != "$GITHUB_REPOSITORY" ]] ||
+             [[ $(jq -r .head.sha <<<"$pr") != "$HEAD_SHA" ]]; then
+            echo "PR identity or immutable head no longer matches"
+            exit 0
+          fi
+
+          commits=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/commits?per_page=100")
+          if ! jq -e 'length == 1 and .[0].author.login == "dependabot[bot]"' \
+              <<<"$commits" >/dev/null; then
+            echo "PR contains a commit not authored by Dependabot"
+            exit 0
+          fi
+
+          runs=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=100")
+          for workflow in CI 'Supply Chain'; do
+            result=$(jq -r --arg workflow "$workflow" '
+              [.workflow_runs[] | select(.name == $workflow)]
+              | sort_by(.id) | last
+              | "\(.status):\(.conclusion)"
+            ' <<<"$runs")
+            if [[ "$result" != 'completed:success' ]]; then
+              echo "$workflow is not green for $HEAD_SHA ($result)"
+              exit 0
+            fi
+          done
+
+          echo "merge=true" >>"$GITHUB_OUTPUT"
+
+      - name: Approve the verified update
+        if: steps.verify.outputs.merge == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+        run: |
+          gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --approve \
+            --body "Dependabot identity and all repository gates verified."
+
+      - name: Squash-merge the verified head
+        if: steps.verify.outputs.merge == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+        run: |
+          gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --squash \
+            --delete-branch --match-head-commit "$HEAD_SHA"
