@@ -441,7 +441,75 @@ class RuntimeHandle:
                 ):
                     return entry
             time.sleep(0.05)
-        raise AssertionError(f"{kind} did not start for test home {self.home}")
+        raise AssertionError(
+            f"{kind} did not start for test home <test-home>\n"
+            f"{self._timeout_diagnostics()}"
+        )
+
+    def _sanitize(self, text: str) -> str:
+        replacements = (
+            (self.session.token, "<session-token>"),
+            (str(self.home), "<test-home>"),
+            (str(self.session.root), "<test-session>"),
+        )
+        for value, replacement in replacements:
+            text = text.replace(value, replacement)
+        return "".join(
+            char if char.isprintable() or char == "\t" else "?" for char in text
+        )
+
+    def _pid_diagnostic(self, kind: str) -> str:
+        path = self.home / f"{kind}.pid"
+        if not path.exists():
+            return f"{kind}.pid=absent"
+        record = _pidfile_record(path)
+        if record is None:
+            return f"{kind}.pid=invalid"
+        if not record_is_live(record):
+            return f"{kind}.pid={record['pid']} live=false"
+        command = proc.command_of(record["pid"])
+        if kind == "applier":
+            shape = command is not None and any(
+                marker in command for marker in ("-m alle applier", "alle applier")
+            )
+        else:
+            shape = command is not None and (
+                "sing-box" in command and str(self.home / "singbox.json") in command
+            )
+        identity = _process_has_test_identity(
+            record["pid"], self.session.token, self.home
+        )
+        return (
+            f"{kind}.pid={record['pid']} live=true "
+            f"command_shape={shape} session_identity={identity}"
+        )
+
+    def _log_diagnostic(self, name: str) -> str:
+        path = self.home / name
+        try:
+            lines = path.read_text(errors="replace").splitlines()[-10:]
+        except OSError:
+            return f"{name}=absent"
+        excerpt = self._sanitize("\n".join(lines))[-2000:]
+        return f"{name}=\n{excerpt or '(empty)'}"
+
+    def _timeout_diagnostics(self) -> str:
+        parts = [self._pid_diagnostic(kind) for kind in ("applier", "singbox")]
+        info = _read_json(self.home / "applier.info.json")
+        if isinstance(info, dict):
+            status = info.get("singbox")
+            detail = info.get("detail")
+            if isinstance(status, str):
+                summary = f"applier.info.singbox={self._sanitize(status)}"
+                if isinstance(detail, str) and detail:
+                    summary += f" detail={self._sanitize(detail)[:500]}"
+                parts.append(summary)
+        else:
+            parts.append("applier.info=absent")
+        parts.extend(
+            self._log_diagnostic(name) for name in ("applier.log", "singbox.log")
+        )
+        return "\n".join(parts)
 
     def stop(self) -> None:
         if self.cleaned:

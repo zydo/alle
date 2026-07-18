@@ -18,6 +18,10 @@ ROOT = Path(__file__).resolve().parents[1]
 _FAILED_RUNTIME: dict = {}
 
 
+class _ExpectedLifecycleFailure(Exception):
+    """The one failure the teardown regression is allowed to expect."""
+
+
 def test_background_start_is_inert_without_the_capability(runtime_guard):
     daemon.ensure_running()
     assert runtime_guard.blocked_calls == 1
@@ -44,7 +48,11 @@ def test_real_runtime_is_reaped_before_its_home(real_background_runtime):
     assert not parent.exists(), "a detached child recreated its deleted test home"
 
 
-@pytest.mark.xfail(strict=True, reason="exercise fixture cleanup after a test failure")
+@pytest.mark.xfail(
+    strict=True,
+    raises=_ExpectedLifecycleFailure,
+    reason="exercise fixture cleanup after a test failure",
+)
 def test_failing_test_still_reaps_its_runtime(real_background_runtime):
     handle = real_background_runtime
     handle.start()
@@ -53,7 +61,9 @@ def test_failing_test_still_reaps_its_runtime(real_background_runtime):
         applier=handle.wait_for("applier")["record"],
         singbox=handle.wait_for("singbox", timeout=20)["record"],
     )
-    pytest.fail("intentional failure after starting the opted-in runtime")
+    raise _ExpectedLifecycleFailure(
+        "intentional failure after starting the opted-in runtime"
+    )
 
 
 def test_failed_test_left_no_runtime_or_home():
@@ -61,6 +71,23 @@ def test_failed_test_left_no_runtime_or_home():
     assert not record_is_live(_FAILED_RUNTIME["applier"])
     assert not record_is_live(_FAILED_RUNTIME["singbox"])
     assert not _FAILED_RUNTIME["parent"].exists()
+
+
+def test_runtime_timeout_reports_sanitized_process_and_log_state(runtime_guard):
+    home = runtime_guard.home
+    home.mkdir(parents=True)
+    (home / "applier.log").write_text(f"startup failed below {home}\n")
+
+    with pytest.raises(AssertionError) as error:
+        runtime_guard.wait_for("singbox", timeout=0)
+
+    diagnostic = str(error.value)
+    assert "applier.pid=absent" in diagnostic
+    assert "singbox.pid=absent" in diagnostic
+    assert "applier.info=absent" in diagnostic
+    assert "startup failed below <test-home>" in diagnostic
+    assert str(home) not in diagnostic
+    assert runtime_guard.session.token not in diagnostic
 
 
 def test_recovery_stops_a_hard_killed_session_and_preserves_unmarked_paths(
