@@ -24,7 +24,7 @@
 # CI Actions; the trailing comment records the tag each digest was resolved
 # from (2026-07-16). The digests are the multi-arch manifest lists.
 # python 3.14-slim
-FROM python@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015
+FROM python@sha256:311ea5bb79f1a238ee9e38f8d5f09cb3b4b244575cf49e27cf365ea7e60f11d4
 ARG ALLE_WHEEL_SHA256
 LABEL org.opencontainers.image.alle-wheel-sha256=$ALLE_WHEEL_SHA256
 RUN useradd --uid 1000 --user-group --home-dir /var/lib/alle --create-home \
