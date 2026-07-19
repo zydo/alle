@@ -1643,6 +1643,11 @@ input.relabel {
   background: var(--panel);
   box-shadow: var(--shadow-modal);
   animation: modalIn .34s cubic-bezier(.2, .8, .2, 1);
+  /* never taller than the viewport: the body scrolls internally, so the
+     submit button stays reachable on short windows */
+  max-height: calc(100dvh - 48px);
+  display: flex;
+  flex-direction: column;
 }
 
 /* dismiss along the mirrored path — scrim fades, surface settles back */
@@ -1693,6 +1698,7 @@ input.relabel {
 
 .modal-body {
   padding: 16px 20px 22px;
+  overflow-y: auto;
 }
 
 /* ---- forms ---- */
@@ -2283,6 +2289,12 @@ select option {
 .loc-card:hover {
   border-color: var(--brand);
   background: var(--panel-2);
+}
+
+/* the search filter hides cards via the hidden attribute; the class's
+   explicit display: grid would otherwise override the UA's [hidden] rule */
+.loc-card[hidden] {
+  display: none;
 }
 
 .loc-card small {

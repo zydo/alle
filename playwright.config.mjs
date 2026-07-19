@@ -14,5 +14,9 @@ export default defineConfig({
   timeout: 30_000,
   use: {
     trace: "retain-on-failure",
+    // The stylesheet honors prefers-reduced-motion with animation: none —
+    // emulating it makes every element instantly stable for click actions
+    // (the modal's entrance animation otherwise starves actionability).
+    reducedMotion: "reduce",
   },
 });

@@ -55,6 +55,7 @@ let pendingIds = null;
 let refreshStatus = () => { };
 let lifetime = null;
 let configRevision = null;
+let lastLabelsSig = null;
 
 export function mount(view, ctx) {
   refreshStatus = ctx?.refresh || (() => { });
@@ -84,7 +85,7 @@ export function mount(view, ctx) {
   refreshRoutes();
 }
 
-export function unmount() { el = {}; status = null; rulesets = []; router = null; measured = new Map(); busy = new Set(); dragRuleId = null; paused = false; pendingIds = null; lifetime = null; configRevision = null; }
+export function unmount() { el = {}; status = null; rulesets = []; router = null; measured = new Map(); busy = new Set(); dragRuleId = null; paused = false; pendingIds = null; lifetime = null; configRevision = null; lastLabelsSig = null; }
 
 function activateOnKey(event) {
   if ((event.key === "Enter" || event.key === " ") && event.target.matches('[role="button"]')) {
@@ -129,6 +130,19 @@ export function onStatus(s) {
   router = { ...router, ...s.router };
   if (configRevision !== null && s.config_revision !== configRevision && !dragRuleId) refreshRoutes();
   configRevision = s.config_revision ?? configRevision;
+  // The "via <channel>" chips resolve labels from status, so a label edit —
+  // or the very first status after a page load, when the routes fetch may
+  // have rendered raw provider/id refs — must re-render the panel. Label
+  // changes don't move config_revision (labels aren't config-relevant), so
+  // they are tracked by their own signature; a plain re-render, not a
+  // refetch, and never mid-drag.
+  const labelsSig = JSON.stringify(
+    (s.channels || []).map((c) => [c.provider, c.name, c.label || ""]),
+  );
+  if (labelsSig !== lastLabelsSig) {
+    lastLabelsSig = labelsSig;
+    if (!dragRuleId) renderRoutes();
+  }
 }
 
 function renderEntry(s) {
@@ -582,12 +596,18 @@ function startRelabel(rowEl, c, current) {
     }
     done = true;
     paused = false;
+    // The edit mutated this row's DOM behind its render signature, so an
+    // unchanged label (or Escape) would otherwise reuse the row as-is and
+    // leave the input box stuck. Drop the signature: the next render always
+    // rebuilds this row from data, no matter how the edit ended.
+    delete rowEl.dataset.render;
     const active = mountGuard();
     if (save) {
       const res = await api.post(`/api/v1/channels/${c.provider}/${c.name}/label`, { label: input.value.trim() }, { signal: lifetime?.signal });
       if (res.aborted || !active()) return;
       if (res.ok) toast(input.value.trim() ? "Label updated." : "Label cleared."); else toast(res.error, "err");
     }
+    if (active()) renderChannels(); // immediate restore, ahead of the next poll
     refreshStatus();
   };
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); finish(true); } else if (e.key === "Escape") finish(false); });
@@ -641,15 +661,16 @@ function rulesetBar(rs, index) {
   const addrsInner = hasAll
     ? `<span class="ct">All</span>${PEN}`
     : `<span class="ct">${n}</span><span class="lb">${esc(addrLabel)}</span>${PEN}`;
+  // Every ruleset shows its destination: "via <channel>", "Direct", or
+  // "Block" — a blank cell reads as "unset", which none of them are.
   const via = isChannel
     ? `<span class="rule-via"><span class="vw">via</span><span class="vch">${esc(channelLabel)}</span></span>`
-    : "";
+    : `<span class="rule-via ${rs.target}"><span class="vch">${rs.target === "direct" ? "Direct" : "Block"}</span></span>`;
   return `<div class="rule-row" draggable="true" data-id="${esc(rs.id)}">
     <div class="rule-handle" title="Drag to reorder" aria-label="Drag ${esc(name)} to reorder">
       <span class="hh rest">${GRIP} Priority ${index + 1}</span>
       <span class="hh sort">${GRAB} Sort</span>
     </div>
-    <span class="rule-moves"><button class="icon-btn" data-move="up" data-move-id="${esc(rs.id)}" aria-label="Move ${esc(name)} up"${index === 0 ? " disabled" : ""}>↑</button><button class="icon-btn" data-move="down" data-move-id="${esc(rs.id)}" aria-label="Move ${esc(name)} down"${index === orderedRulesets().length - 1 ? " disabled" : ""}>↓</button></span>
     <div class="rule-name" title="${esc(name)}">${esc(name)}</div>
     <button class="rule-addrs" data-id-edit="${esc(rs.id)}" title="Edit matchers">${addrsInner}</button>
     ${via}
@@ -693,8 +714,6 @@ function renderRoutes() {
 }
 
 async function onRouteClick(e) {
-  const move = e.target.closest("[data-move]");
-  if (move) { moveRuleset(move.dataset.moveId, move.dataset.move); return; }
   if (e.target.closest("[data-add-rule]")) { openAddRule(); return; }
   const editId = e.target.closest("[data-id-edit]")?.dataset.idEdit;
   if (editId) { openEditRuleset(editId); return; }
@@ -710,16 +729,6 @@ async function onRouteClick(e) {
     if (res.aborted || !active()) return;
     if (res.ok) { toast(`Removed ${name}.`); refreshRoutes(); refreshStatus(); } else toast(res.error, "err");
   });
-}
-
-function moveRuleset(id, direction) {
-  const ids = orderedRulesets().map((rs) => rs.id);
-  const from = ids.indexOf(id); const to = from + (direction === "up" ? -1 : 1);
-  if (from < 0 || to < 0 || to >= ids.length) return;
-  [ids[from], ids[to]] = [ids[to], ids[from]];
-  pendingIds = ids;
-  renderRoutes();
-  el.routes.querySelector(`[data-move-id="${CSS.escape(id)}"][data-move="${direction}"]`)?.focus();
 }
 
 function onRouteDragStart(e) {
@@ -1172,12 +1181,18 @@ function openEditRuleset(rulesetId) {
   const via = opts.some((o) => o.value === rs.target) ? rs.target : (opts[0]?.value || "direct");
   const curName = rs.name && rs.name !== rs.target ? rs.name : "";
   const hasAll = (rs.rules || []).some((r) => r.type === "all");
-  const curMatchers = (rs.rules || []).filter((r) => r.type !== "all").map((r) => r.value || "").join("\n");
+  // Round-trip matchers in the same spelling the textarea accepts: geo
+  // matchers must keep their "geosite:"/"geoip:" prefix — the bare value
+  // ("jp") would re-infer as a (broken) domain on save.
+  const matcherLine = (r) =>
+    r.type === "geosite" || r.type === "geoip" ? `${r.type}:${r.value}` : (r.value || "");
+  const curMatchers = (rs.rules || []).filter((r) => r.type !== "all").map(matcherLine).join("\n");
   const m = modal("Edit ruleset", `<form id="rf">
     <label class="field"><span>Name</span><input id="name" placeholder="Streaming" spellcheck="false"></label>
     <label class="field"><span>Via channel</span>${customSelectHTML("target", opts, via)}</label>
     ${matcherInputHTML("Save")}
   </form>`);
+  m.root.querySelector(".modal").classList.add("wide");
   wireCustomSelects(m.root);
   m.root.querySelector("#name").value = curName;
   m.root.querySelector("#all-traffic").checked = hasAll;
@@ -1209,6 +1224,7 @@ function openAddRule() {
     <label class="field"><span>Via channel</span>${customSelectHTML("target", routeTargetOptions(), routeTargetOptions()[0]?.value || "direct")}</label>
     ${matcherInputHTML("Create ruleset")}
   </form>`);
+  m.root.querySelector(".modal").classList.add("wide");
   wireCustomSelects(m.root);
   wireMatchers(m.root);
   const err = m.root.querySelector("#err");

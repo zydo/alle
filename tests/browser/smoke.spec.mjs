@@ -96,7 +96,20 @@ test("route reorder stages locally, applies once, survives reload", async ({ app
   const { page } = app;
   const names = page.locator(".rule-row[data-id] .rule-name");
   await expect(names).toHaveText(["Streaming", "Home lab", "Trackers"]);
-  await page.locator('.rule-row[data-id] [data-move="down"]').first().click();
+  // every ruleset shows its destination — never a blank cell
+  await expect(
+    page.locator('.rule-row[data-id]', { hasText: "Home lab" }).locator(".rule-via"),
+  ).toHaveText(/Direct/);
+  await expect(
+    page.locator('.rule-row[data-id]', { hasText: "Trackers" }).locator(".rule-via"),
+  ).toHaveText(/Block/);
+  await expect(
+    page.locator('.rule-row[data-id]', { hasText: "Streaming" }).locator(".rule-via"),
+  ).toContainText("via");
+  // drag Streaming below Home lab (the only reorder control — buttons are gone)
+  const streaming = page.locator('.rule-row[data-id]', { hasText: "Streaming" });
+  const homelab = page.locator('.rule-row[data-id]', { hasText: "Home lab" });
+  await streaming.dragTo(homelab, { targetPosition: { x: 200, y: 30 } });
   // staged only: the apply bar appears, nothing is saved yet
   await expect(page.locator(".apply-bar")).toBeVisible();
   await expect(names).toHaveText(["Home lab", "Streaming", "Trackers"]);
@@ -188,6 +201,111 @@ test("bundle: export round-trips through validate and merge-import", async ({
   // the appended rulesets are visible on the dashboard
   await page.locator('.nav a[data-route=""]').click();
   await expect(page.locator(".rule-row[data-id]")).toHaveCount(6);
+});
+
+test("relabel editor closes even when the name is unchanged", async ({ app }) => {
+  const { page } = app;
+  const row = page.locator(US);
+  // open the inline editor, "change" the label to the same value (the
+  // reported bug: space added then deleted -> identical name -> the row's
+  // render signature matched and the stuck input was reused forever)
+  await row.locator(".name.edit").click();
+  const input = page.locator("input.relabel");
+  await expect(input).toBeVisible();
+  const current = await input.inputValue();
+  await input.fill(current + " ");
+  await input.fill(current);
+  await page.keyboard.press("Enter");
+  await expect(page.locator("input.relabel")).toHaveCount(0, { timeout: 10_000 });
+  await expect(row.locator(".name.edit")).toBeVisible();
+
+  // Escape cancels and also restores the plain row
+  await row.locator(".name.edit").click();
+  await expect(page.locator("input.relabel")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("input.relabel")).toHaveCount(0, { timeout: 10_000 });
+  await expect(row.locator(".name.edit")).toBeVisible();
+
+  // clicking elsewhere (blur) with an unchanged name closes it too
+  await row.locator(".name.edit").click();
+  await expect(page.locator("input.relabel")).toBeVisible();
+  await page.locator(".table-title").first().click();
+  await expect(page.locator("input.relabel")).toHaveCount(0, { timeout: 10_000 });
+});
+
+test("ruleset via-chips resolve and track channel labels", async ({ app }) => {
+  const { page } = app;
+  const viaChip = page
+    .locator('.rule-row[data-id]', { hasText: "Streaming" })
+    .locator(".rule-via .vch");
+  // resolved to the channel's display name (not the raw provider/id ref),
+  // including on a fresh load where routes may render before the first status
+  await expect(viaChip).toHaveText("united_states_new_york_1");
+  // rename the channel: the via chip must follow without a manual refresh
+  await page
+    .locator('.row.dashchan.body[data-id="united_states_new_york_1"] .name.edit')
+    .click();
+  await page.locator("input.relabel").fill("NYC");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#toasts")).toContainText("Label updated.");
+  await expect(viaChip).toHaveText("NYC", { timeout: 10_000 });
+  // and it survives a reload (no raw-ref flash sticking around)
+  await page.reload();
+  await expect(
+    page.locator('.rule-row[data-id]', { hasText: "Streaming" }).locator(".rule-via .vch"),
+  ).toHaveText("NYC");
+});
+
+test("add-channel wizard: country and city search actually filter", async ({
+  app,
+}) => {
+  const { page } = app;
+  await page.locator("[data-add-channel]").click();
+  await page.locator('.prov-tile[data-provider="nordvpn"]').click();
+  await expect(page.locator("#loc-grid")).toBeVisible();
+  await expect(page.locator("#loc-grid [data-country]")).toHaveCount(3);
+  // typing filters the grid down to matches (the reported bug: nothing hid)
+  await page.locator("#loc-search").fill("jap");
+  await expect(page.locator("#loc-grid [data-country]:visible")).toHaveCount(1);
+  await expect(page.locator("#loc-grid [data-country]:visible")).toContainText(
+    "Japan",
+  );
+  await page.locator("#loc-grid [data-country]:visible").click();
+  // city step: same search behavior ("Any city" + Tokyo/Osaka)
+  await expect(page.locator("#loc-grid [data-city]")).toHaveCount(3);
+  await page.locator("#loc-search").fill("tok");
+  await expect(page.locator("#loc-grid [data-city]:visible")).toHaveCount(1);
+  await expect(page.locator("#loc-grid [data-city]:visible")).toContainText(
+    "Tokyo",
+  );
+  await page.keyboard.press("Escape");
+});
+
+test("geo matchers round-trip through the ruleset editor", async ({ app }) => {
+  const { page } = app;
+  // create a ruleset mixing a domain and a geoip matcher (prefixed spelling)
+  await page.locator("[data-add-rule]").click();
+  await page.locator(".modal #name").fill("Japan");
+  await page.locator(".modal #matchers").fill("example.com\ngeoip:jp");
+  await page.locator('.modal button[type="submit"]').click();
+  await expect(page.locator("#toasts")).toContainText("Created Japan.");
+
+  // reopen the editor: the geo matcher must still read "geoip:jp" — the bare
+  // value "jp" would re-save as a broken domain (the reported bug)
+  const row = page.locator('.rule-row[data-id]', { hasText: "Japan" });
+  await row.locator("[data-id-edit]").click();
+  await expect(page.locator(".modal #matchers")).toHaveValue(
+    "example.com\ngeoip:jp",
+  );
+
+  // and an untouched save round-trips cleanly
+  await page.locator('.modal button[type="submit"]').click();
+  await expect(page.locator("#toasts")).toContainText("Saved Japan.");
+  await row.locator("[data-id-edit]").click();
+  await expect(page.locator(".modal #matchers")).toHaveValue(
+    "example.com\ngeoip:jp",
+  );
+  await page.keyboard.press("Escape");
 });
 
 test("speed test streams rows incrementally, then completes", async ({ app }) => {

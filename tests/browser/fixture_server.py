@@ -51,7 +51,7 @@ os.environ.pop("ALLE_API_LISTEN", None)
 os.environ.pop("ALLE_API_SECRET", None)
 os.environ.pop("ALLE_API_SECRET_FILE", None)
 
-from alle import credentials, daemon, service  # noqa: E402
+from alle import credentials, daemon, geodata, service  # noqa: E402
 from alle.api import server as api_server  # noqa: E402
 from alle.state import Store  # noqa: E402
 
@@ -59,6 +59,49 @@ daemon.ensure_running = lambda: None  # the fixture never spawns a runtime
 # Bundle validation may consult a provider's location list; that is a network
 # call in real life, so the fixture validates without location checks.
 service._bundle_location_lookup = lambda: (None, [])
+
+
+def _fake_geo_http(url: str, *, accept: str | None = None) -> bytes:
+    """Canned geo upstream: branch API -> fixed commit, trees -> tiny
+    manifest, raw file -> a minimal valid .srs. No network, deterministic."""
+    if "/branches/" in url:
+        return json.dumps({"commit": {"sha": "f" * 40}}).encode()
+    if "/git/trees/" in url:
+        return json.dumps(
+            {
+                "tree": [
+                    {"path": "geosite-netflix.srs", "sha": "x"},
+                    {"path": "geosite-google.srs", "sha": "x"},
+                    {"path": "geoip-jp.srs", "sha": "x"},
+                    {"path": "geoip-us.srs", "sha": "x"},
+                ]
+            }
+        ).encode()
+    return b"SRS\x01x\x9c\x03\x00\x00\x00\x00\x01"  # header + empty zlib body
+
+
+geodata._http_get = _fake_geo_http
+
+
+def _fake_locations(provider: str, country: str | None = None, refresh: bool = False):
+    """Canned location catalog: enough countries/cities to exercise the add-
+    channel wizard's search boxes without any provider API."""
+    countries = [
+        {"country": "Germany", "cities": ["Berlin", "Frankfurt"]},
+        {"country": "Japan", "cities": ["Tokyo", "Osaka"]},
+        {"country": "United States", "cities": ["New York", "Seattle", "Dallas"]},
+    ]
+    return {
+        "provider": provider,
+        "display_name": "NordVPN",
+        "available": True,
+        "countries": countries,
+        "country_count": len(countries),
+        "city_count": sum(len(c["cities"]) for c in countries),
+    }
+
+
+service.locations_list = _fake_locations
 
 
 def _wg(host: str) -> dict:
