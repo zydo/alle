@@ -8,10 +8,10 @@ rule to one. Its port is assigned once and stays stable (`alle status` shows it)
 so apps and future OS-level profiles can point at it permanently.
 
 ```bash
-alle routes ruleset create Streaming --via nordvpn/united_states_1 --domain netflix.com --domain hulu.com
+alle routes ruleset create Streaming --via nordvpn/wg_us_1 --domain netflix.com --domain hulu.com
 alle routes ruleset create LocalDirect --via direct --cidr 192.168.0.0/16
 alle routes ruleset create BlockTrackers --via block --domain tracker.example.com
-alle routes ruleset create DefaultVPN --via nordvpn/japan_1 --all
+alle routes ruleset create DefaultVPN --via nordvpn/wg_jp_1 --all
 alle routes ls
 ```
 
@@ -111,7 +111,7 @@ user-added entries.
 
 ```bash
 # Route Netflix through a US channel
-alle routes ruleset create Streaming --via nordvpn/us_1 --geosite netflix
+alle routes ruleset create Streaming --via nordvpn/wg_us_1 --geosite netflix
 
 # Block known ad/tracker domains
 alle routes ruleset create "Ad block" --via block --geosite category-ads-all

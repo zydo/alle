@@ -12,7 +12,7 @@ applier daemon (writes probe results) — so every mutation goes through
 read-modify-write. Plain ``load()`` reads are lock-free snapshots.
 
 Identity: a channel is unique *within* its provider by ``id`` (e.g.
-``united_states_1``); the same id may exist under two providers. The globally
+``wg_us_1``); the same id may exist under two providers. The globally
 unique handle is therefore ``(provider, id)``, which also names the sing-box tags
 (``in-<provider>-<id>`` / ``out-<provider>-<id>``) and so must stay free of the
 ``-`` separator — provider keys are bare lowercase words and ids are
@@ -131,7 +131,15 @@ def _next_free_port(data: dict) -> int:
 
 
 def _next_id(taken: set, country: str, city: str, id_hint: str | None = None) -> str:
-    """Auto-name like ``united_states_1`` / ``united_states_san_francisco_2``.
+    """Auto-name like ``wg_us_san_francisco_1`` / ``wg_ch_1``.
+
+    The channel-id standard (all providers): ``<protocol>_<country-code>_
+    [<city>_]<n>`` — ``wg`` (the only protocol alle speaks), the lowercase
+    ISO 3166-1 alpha-2 code for the country, the city slug when one was
+    picked, and a numeric suffix purely for uniqueness. This matches the
+    shape config imports already produce (ProtonVPN's ``wg-JP-351.conf`` →
+    ``wg_jp_351``), so both archetypes read the same. The full country name
+    is the fallback when no ISO code resolves.
 
     API channels name themselves from country/city; imported config channels
     pass an explicit ``id_hint`` (the .conf file name) since they have no
@@ -139,10 +147,13 @@ def _next_id(taken: set, country: str, city: str, id_hint: str | None = None) ->
     This id is the channel's permanent handle — distinct from the optional
     display ``label`` (see :class:`Channel`), which is presentation-only.
     """
+    from alle import geo
+
     if id_hint:
         base = _slug(id_hint)
     elif country or city:
-        base = _slug(f"{country} {city}".strip())
+        cc = geo.country_code(country) or _slug(country)
+        base = "_".join(p for p in ("wg", cc, _slug(city) if city else "") if p)
     else:
         base = "channel"
     n = 1

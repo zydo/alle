@@ -4,7 +4,7 @@
 // touching torn-down DOM fails here even without an explicit assertion.
 import { test, expect } from "./support/fixtures.mjs";
 
-const DE = '.row.dashchan.body[data-id="germany_1"]';
+const DE = '.row.dashchan.body[data-id="wg_de_1"]';
 
 // Delay matching requests by `ms` without changing their result.
 async function delay(page, urlPart, ms, { method } = {}) {

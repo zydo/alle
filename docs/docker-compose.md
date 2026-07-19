@@ -52,10 +52,10 @@ providers:
       token_env: NORDVPN_TOKEN       # resolved from the container env at boot;
                                      # the token never lives in this file
     channels:
-      united_states_1:
+      wg_us_1:
         country: United States
         port: 20010                  # declared → stable → publishable
-      japan_1:
+      wg_jp_1:
         country: Japan
         port: 20011
 router:
@@ -64,7 +64,7 @@ router:
   lan_direct: true
   rulesets:
     - name: US streaming
-      target: nordvpn/united_states_1
+      target: nordvpn/wg_us_1
       matchers: [netflix.com, hulu.com]
     - name: Everything else direct
       target: direct

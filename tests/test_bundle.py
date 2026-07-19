@@ -247,14 +247,14 @@ def test_restore_prunes_metrics_of_channels_dropped_from_retained_providers():
     from alle import metrics
 
     store, ch = seed()
-    text = bundle.dumps(bundle.export_bundle())  # does NOT contain japan_1
+    text = bundle.dumps(bundle.export_bundle())  # does NOT contain wg_jp_1
     extra = store.add_channel("nordvpn", "Japan", "", wg("8.8.8.8"))
     metrics.add_delta("nordvpn", ch.id, 10, 10)
     metrics.add_delta("nordvpn", extra.id, 20, 20)
 
     bundle.apply_restore(text)
 
-    # nordvpn is retained but japan_1 was dropped: its totals go, ch's stay
+    # nordvpn is retained but wg_jp_1 was dropped: its totals go, ch's stay
     assert ("nordvpn", extra.id) not in metrics.totals()
     assert ("nordvpn", ch.id) in metrics.totals()
     # …and a late daemon sample cannot resurrect the deleted row
@@ -412,7 +412,7 @@ def test_import_into_empty_state_creates_providers(monkeypatch):
     assert summary["credentials"]["added"] == ["nordvpn"]
     assert len(summary["channels"]["created"]) == 2
     # new token identity + unreachable API -> restored from the snapshot
-    assert summary["wg_fallback"] == ["nordvpn/united_states_1"]
+    assert summary["wg_fallback"] == ["nordvpn/wg_us_1"]
     assert Store.load().router["killswitch"] is True
 
 
@@ -478,9 +478,9 @@ def test_token_resolve_failure_falls_back_to_snapshot(monkeypatch):
     monkeypatch.setattr(bundle, "provider_resolver", _factory_down)
     summary = bundle.apply_restore(text)
 
-    nord = channel(Store.load(), "nordvpn", "united_states_1")
+    nord = channel(Store.load(), "nordvpn", "wg_us_1")
     assert nord.wg["peer"]["endpoint_host"] == "1.2.3.4"  # the snapshot
-    assert summary["wg_fallback"] == ["nordvpn/united_states_1"]
+    assert summary["wg_fallback"] == ["nordvpn/wg_us_1"]
     assert summary["wg_resolved"] == []
 
 

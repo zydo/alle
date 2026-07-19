@@ -213,7 +213,7 @@ alle channels ls
 ```text
 LABEL            ID                       PORT    COUNTRY        CITY
 ---------------  -----------------------  ------  -------------  ----------
-united_states_1  nordvpn/united_states_1  :53124  United States  (Any City)
+wg_us_1          nordvpn/wg_us_1          :53124  United States  (Any City)
 ```
 
 Use that port from any tool or app that supports an HTTP or SOCKS proxy:
@@ -265,15 +265,15 @@ nothing and tells you the channel already exists.
 ## Friendly names
 
 Channels are identified by a globally-unique, provider-qualified id
-(`nordvpn/united_states_1`) — the handle every command takes, shown in the `ID`
+(`nordvpn/wg_us_1`) — the handle every command takes, shown in the `ID`
 column. You can also give one a display label for readability (the `LABEL`
 column in `channels ls` and `test`). The id never changes,
 so relabelling is always safe:
 
 ```bash
 alle channels add nordvpn --country "United States" --label "Streaming - US"
-alle channels setlabel united_states_1 "Streaming - US"   # or set it later
-alle channels setlabel united_states_1                    # omit text to clear
+alle channels setlabel wg_us_1 "Streaming - US"   # or set it later
+alle channels setlabel wg_us_1                    # omit text to clear
 ```
 
 ## Common commands
@@ -301,9 +301,9 @@ alle test --json
 Channel and provider removals accept multiple targets:
 
 ```bash
-alle channels rm japan_1 united_states_seattle_1
+alle channels rm wg_jp_1 wg_us_seattle_1
 alle channels rm protonvpn/wg_us_ca_842
-alle channels rm 'united_states_*' --dry-run
+alle channels rm 'wg_us_*' --dry-run
 alle providers rm nordvpn protonvpn -y
 ```
 
@@ -316,9 +316,9 @@ provider, so it uses **no connection slot**. Keep a stable of servers on hand
 and flip which ones are live:
 
 ```bash
-alle channels disable japan_1            # free the slot; config + rules stay
-alle channels enable japan_1             # dial it again
-alle channels disable 'united_states_*'  # same ref grammar as rm
+alle channels disable wg_jp_1            # free the slot; config + rules stay
+alle channels enable wg_jp_1             # dial it again
+alle channels disable 'wg_us_*'          # same ref grammar as rm
 ```
 
 Disabled channels stay visible everywhere (`channels ls` grows a STATUS

@@ -40,6 +40,7 @@ file; import uploads one, merge or replace).
     - [Token channels: `wg` is derived state](#token-channels-wg-is-derived-state)
     - [Config channels: `wg` is the config](#config-channels-wg-is-the-config)
   - [What never travels in a bundle](#what-never-travels-in-a-bundle)
+  - [Scheduled backups](#scheduled-backups)
   - [Caveats](#caveats)
     - [Cloning a setup to a second machine](#cloning-a-setup-to-a-second-machine)
     - [Old backups can overwrite newer credentials](#old-backups-can-overwrite-newer-credentials)
@@ -66,7 +67,7 @@ providers:
     credential:                   # REQUIRED for token providers
       token: "nordvpn-access-token"   # or token_env / token_file (see below)
     channels:
-      united_states_1:            # the channel id — its permanent handle (required)
+      wg_us_1:                    # the channel id — its permanent handle (required)
         country: United States    # required for token providers
         city: ""                  # empty = any city
         label: Streaming — US     # optional display label
@@ -168,7 +169,7 @@ router:
   lan_direct: true       # built-in LAN/local direct rules (default: true)
   rulesets:              # priority order — first matching ruleset wins
     - name: Streaming
-      target: nordvpn/united_states_1    # <provider>/<channel>, direct, or block
+      target: nordvpn/wg_us_1    # <provider>/<channel>, direct, or block
       matchers:
         - netflix.com          # bare strings are inferred, exactly like the CLI:
         - api.example.com      #   domains match themselves + all subdomains

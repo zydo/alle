@@ -162,7 +162,7 @@ def test_channel_commands_share_identity_columns(capsys, no_singbox):
     """Every channel-listing command exposes the same identity fields
     (provider, name, label, port, country, city) and renders the same leading
     columns — LABEL, ID — consistently. LABEL is the display name (label or id);
-    ID is the globally-unique provider-qualified ref (``nordvpn/us_1``) commands
+    ID is the globally-unique provider-qualified ref (``nordvpn/wg_us_1``) commands
     take. `status` only renders its table while running, so it is checked via
     JSON only."""
     store = service.Store.load()
@@ -186,7 +186,7 @@ def test_channel_commands_share_identity_columns(capsys, no_singbox):
         header = run_cli(cmd, capsys).splitlines()[0].split()
         assert header[:2] == ["LABEL", "ID"], (cmd, header)
     # ID is the provider-qualified, globally-unique ref
-    assert "nordvpn/united_states_seattle_1" in run_cli(["channels", "ls"], capsys)
+    assert "nordvpn/wg_us_seattle_1" in run_cli(["channels", "ls"], capsys)
 
 
 def test_config_provider_lifecycle_keeps_cli_messages(
@@ -327,7 +327,7 @@ def test_providers_add_token_replace_reresolves(capsys, no_background, monkeypat
         ["providers", "add", "nordvpn", "--token", "second-token", "--yes"], capsys
     )
     assert "Updated NordVPN credential" in out
-    assert "Re-resolved 1 channel(s): japan_1" in out
+    assert "Re-resolved 1 channel(s): wg_jp_1" in out
     assert service.credentials.get("nordvpn") == {"token": "second-token"}
 
 
@@ -389,12 +389,12 @@ def test_channels_ls_ids_and_refs(capsys, no_background):
     )
 
     assert run_cli(["channels", "ls", "--ids"], capsys).splitlines() == [
-        "japan_1",
-        "united_states_seattle_1",
+        "wg_jp_1",
+        "wg_us_seattle_1",
     ]
     assert run_cli(["channels", "ls", "--refs"], capsys).splitlines() == [
-        "nordvpn/japan_1",
-        "nordvpn/united_states_seattle_1",
+        "nordvpn/wg_jp_1",
+        "nordvpn/wg_us_seattle_1",
     ]
 
 
@@ -403,24 +403,24 @@ def test_channels_setlabel_and_ls_columns(capsys, no_background):
     store.add_provider("nordvpn")
     store.add_channel("nordvpn", "Japan", "", {"private_key": "x", "peer": {}})
 
-    out = run_cli(["channels", "setlabel", "japan_1", "Video JP"], capsys)
-    assert 'Labelled nordvpn/japan_1 as "Video JP".' in out
+    out = run_cli(["channels", "setlabel", "wg_jp_1", "Video JP"], capsys)
+    assert 'Labelled nordvpn/wg_jp_1 as "Video JP".' in out
 
     lines = run_cli(["channels", "ls"], capsys).splitlines()
     assert lines[0].split()[:2] == ["LABEL", "ID"]
     row = lines[2]
     # label shown; ID is the qualified ref, still visible as the handle
-    assert "Video JP" in row and "nordvpn/japan_1" in row
+    assert "Video JP" in row and "nordvpn/wg_jp_1" in row
 
     # --ids/--refs are the scripting forms (labels never become handles)
-    assert run_cli(["channels", "ls", "--ids"], capsys).splitlines() == ["japan_1"]
+    assert run_cli(["channels", "ls", "--ids"], capsys).splitlines() == ["wg_jp_1"]
     assert run_cli(["channels", "ls", "--refs"], capsys).splitlines() == (
-        ["nordvpn/japan_1"]
+        ["nordvpn/wg_jp_1"]
     )
 
     # clearing restores the id as the display
-    cleared = run_cli(["channels", "setlabel", "japan_1"], capsys)
-    assert "shows as japan_1 again" in cleared
+    cleared = run_cli(["channels", "setlabel", "wg_jp_1"], capsys)
+    assert "shows as wg_jp_1 again" in cleared
     assert "Video JP" not in run_cli(["channels", "ls"], capsys)
 
 
@@ -454,9 +454,9 @@ def test_channels_rm_accepts_multiple_names(capsys, no_background):
         "nordvpn", "United States", "Seattle", {"private_key": "x", "peer": {}}
     )
 
-    removed = run_cli(["channels", "rm", "japan_1", "united_states_seattle_1"], capsys)
-    assert "Removed channel japan_1 from NordVPN." in removed
-    assert "Removed channel united_states_seattle_1 from NordVPN." in removed
+    removed = run_cli(["channels", "rm", "wg_jp_1", "wg_us_seattle_1"], capsys)
+    assert "Removed channel wg_jp_1 from NordVPN." in removed
+    assert "Removed channel wg_us_seattle_1 from NordVPN." in removed
     assert "Removed 2 channels." in removed
     assert service.Store.load().provider_channels("nordvpn") == []
 
@@ -469,13 +469,13 @@ def test_channels_rm_supports_qualified_refs_for_duplicates(capsys, no_backgroun
     store.add_channel("protonvpn", "Japan", "", {"private_key": "x", "peer": {}})
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["channels", "rm", "japan_1"])
+        cli.main(["channels", "rm", "wg_jp_1"])
     assert "exists under multiple providers" in str(exc.value)
 
-    removed = run_cli(["channels", "rm", "protonvpn/japan_1"], capsys)
-    assert removed == "Removed channel japan_1 from Proton VPN."
-    assert service.Store.load().get_channel("nordvpn", "japan_1") is not None
-    assert service.Store.load().get_channel("protonvpn", "japan_1") is None
+    removed = run_cli(["channels", "rm", "protonvpn/wg_jp_1"], capsys)
+    assert removed == "Removed channel wg_jp_1 from Proton VPN."
+    assert service.Store.load().get_channel("nordvpn", "wg_jp_1") is not None
+    assert service.Store.load().get_channel("protonvpn", "wg_jp_1") is None
 
 
 def test_channels_rm_supports_globs_dry_run_and_scoped_all(capsys, no_background):
@@ -489,16 +489,16 @@ def test_channels_rm_supports_globs_dry_run_and_scoped_all(capsys, no_background
     )
     store.add_channel("nordvpn", "Japan", "", {"private_key": "x", "peer": {}})
 
-    dry = run_cli(["channels", "rm", "united_states_*", "--dry-run"], capsys)
+    dry = run_cli(["channels", "rm", "wg_us_*", "--dry-run"], capsys)
     assert "Would remove 2 channels." in dry
     assert len(service.Store.load().provider_channels("nordvpn")) == 3
 
-    removed = run_cli(["channels", "rm", "united_states_*"], capsys)
+    removed = run_cli(["channels", "rm", "wg_us_*"], capsys)
     assert "Removed 2 channels." in removed
-    assert service.Store.load().get_channel("nordvpn", "japan_1") is not None
+    assert service.Store.load().get_channel("nordvpn", "wg_jp_1") is not None
 
     removed_all = run_cli(["channels", "rm", "--provider", "nordvpn", "--all"], capsys)
-    assert removed_all == "Removed channel japan_1 from NordVPN."
+    assert removed_all == "Removed channel wg_jp_1 from NordVPN."
     assert service.Store.load().provider_channels("nordvpn") == []
 
 

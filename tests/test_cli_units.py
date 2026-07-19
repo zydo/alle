@@ -29,7 +29,7 @@ def test_channels_ls_rejects_conflicting_machine_outputs():
 
 def test_channels_rm_legacy_provider_conflicts_with_provider_flag():
     args = SimpleNamespace(
-        channel=[["japan_1"]],
+        channel=[["wg_jp_1"]],
         provider="nordvpn",
         refs=["protonvpn"],
         dry_run=False,
@@ -44,7 +44,7 @@ def test_channels_rm_legacy_provider_conflicts_with_provider_flag():
 
 def test_channels_rm_legacy_requires_single_provider_ref():
     args = SimpleNamespace(
-        channel=[["japan_1"]],
+        channel=[["wg_jp_1"]],
         provider=None,
         refs=["nordvpn", "protonvpn"],
         dry_run=False,

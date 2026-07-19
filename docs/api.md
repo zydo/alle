@@ -86,7 +86,7 @@ liveness probe.
   `false`; anything else is a 400 (a typo must never turn a preview into the
   real removal). Body `dry_run` fields are plain booleans.
 - Channel *refs* use the CLI grammar: a bare id (`us_1`), a qualified
-  `provider/channel` (`nordvpn/us_1`), or a glob (`us_*`). A bare id matching
+  `provider/channel` (`nordvpn/wg_us_1`), or a glob (`wg_us_*`). A bare id matching
   channels under several providers is refused; a glob may span providers.
 - `/api/v1` is the versioned contract. Additive response fields may appear;
   request schemas, methods, and paths only change with the version.

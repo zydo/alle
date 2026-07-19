@@ -95,7 +95,7 @@ def test_status_inactive_with_channels_and_active_empty():
     inactive = output.status(
         {
             "running": False,
-            "channels": [{"name": "us_1"}],
+            "channels": [{"name": "wg_us_1"}],
             "channel_count": 1,
             "provider_count": 1,
         }
@@ -128,8 +128,8 @@ def test_status_active_is_a_summary_without_a_table():
         {
             "running": True,
             "channels": [
-                {"provider": "nordvpn", "name": "japan_1"},
-                {"provider": "nordvpn", "name": "us_1"},
+                {"provider": "nordvpn", "name": "wg_jp_1"},
+                {"provider": "nordvpn", "name": "wg_us_1"},
                 {"provider": "protonvpn", "name": "wg_us_ca_842"},
             ],
             "channel_count": 3,
@@ -196,7 +196,7 @@ def test_test_result_speed_and_failure_state_cells():
             "channels": [
                 {
                     "provider": "nordvpn",
-                    "name": "us_1",
+                    "name": "wg_us_1",
                     "port": ":53124",
                     "country": "US",
                     "city": "(Any City)",

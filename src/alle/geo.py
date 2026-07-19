@@ -19,6 +19,34 @@ import re
 import pycountry
 
 
+def country_code(name: str) -> str:
+    """Lowercase ISO 3166-1 alpha-2 code for a country display name, or ``""``.
+
+    The reverse of what :func:`from_filename` does: providers' location APIs
+    hand back display names ("United States", "Switzerland"), and channel ids
+    want the compact code (``us``, ``ch``). Exact name/official/common-name
+    matches first, then pycountry's fuzzy search as a safety net ("South
+    Korea" → KR). Anything unresolvable returns ``""`` so the caller can fall
+    back to the full name rather than guess.
+    """
+    label = (name or "").strip()
+    if not label:
+        return ""
+    if len(label) == 2 and label.isalpha():  # already a code
+        found = pycountry.countries.get(alpha_2=label.upper())
+        return found.alpha_2.lower() if found else ""
+    lowered = label.lower()
+    for entry in pycountry.countries:
+        for field in ("name", "common_name", "official_name"):
+            if str(getattr(entry, field, "")).lower() == lowered:
+                return str(entry.alpha_2).lower()
+    try:
+        matches = pycountry.countries.search_fuzzy(label)
+    except LookupError:
+        return ""
+    return str(matches[0].alpha_2).lower() if matches else ""
+
+
 def from_filename(stem: str) -> tuple[str, str]:
     """``("United States", "California")`` from a stem like ``wg-US-CA-842``.
 

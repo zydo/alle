@@ -112,7 +112,7 @@ def test_channel_add_success_uses_provider_wg(monkeypatch):
     result = service.channel_add("nordvpn", "Japan", None)
 
     assert calls == [("nordvpn", "Japan", "")]
-    assert result["channel"].id == "japan_1"
+    assert result["channel"].id == "wg_jp_1"
 
 
 def test_channel_add_config_read_error(monkeypatch, tmp_path):
@@ -151,9 +151,9 @@ def test_test_channel_filter_skips_nonmatching_channels():
     store.add_channel("nordvpn", "Japan", "", dict(WG))
     store.add_channel("nordvpn", "United States", "", dict(WG))
 
-    result = service.test(channel="japan_1")
+    result = service.test(channel="wg_jp_1")
 
-    assert [row["name"] for row in result["channels"]] == ["japan_1"]
+    assert [row["name"] for row in result["channels"]] == ["wg_jp_1"]
 
 
 def test_locations_list_refresh_country_and_full_list(monkeypatch):
@@ -235,11 +235,11 @@ def test_status_snapshot_covers_probe_and_reconnect_states(monkeypatch):
     }
 
     assert states == {
-        "active_1": "Active",
-        "failed_1": "Timeout",
-        "given_up_1": "Reconnect failed",
-        "pending_1": "Pending",
-        "retrying_1": "Reconnecting (2)",
+        "wg_active_1": "Active",
+        "wg_failed_1": "Timeout",
+        "wg_given_up_1": "Reconnect failed",
+        "wg_pending_1": "Pending",
+        "wg_retrying_1": "Reconnecting (2)",
     }
 
 
@@ -367,7 +367,7 @@ def test_channel_set_label_rejects_glob_and_unknown():
     store.add_provider("nordvpn")
     store.add_channel("nordvpn", "US", "", dict(WG))
     with pytest.raises(service.ServiceError, match="glob cannot be used"):
-        service.channel_set_label("us_*", "x")
+        service.channel_set_label("wg_us_*", "x")
     with pytest.raises(service.ServiceError, match="no channel"):
         service.channel_set_label("nope_1", "x")
 
@@ -415,11 +415,11 @@ def test_provider_update_token_replaces_and_reresolves(monkeypatch):
     assert result["updated"] is True
     assert resolved_with["creds"] == {"token": "new-token"}
     assert service.credentials.get("nordvpn") == {"token": "new-token"}
-    assert sorted(result["channels"]["resolved"]) == ["japan_1", "united_states_1"]
+    assert sorted(result["channels"]["resolved"]) == ["wg_jp_1", "wg_us_1"]
     assert result["channels"]["failed"] == []
     # every channel got the freshly-resolved params
     reloaded = service.Store.load()
-    ch = reloaded.get_channel("nordvpn", "japan_1")
+    ch = reloaded.get_channel("nordvpn", "wg_jp_1")
     assert ch is not None
     assert ch.wg["private_key"] == "fresh"
 
@@ -443,7 +443,7 @@ def test_provider_update_token_same_token_is_noop(monkeypatch):
     assert result["unchanged"] is True
     assert result["channels"] == {"resolved": [], "failed": []}
     # the channel's params were left untouched
-    ch = service.Store.load().get_channel("nordvpn", "japan_1")
+    ch = service.Store.load().get_channel("nordvpn", "wg_jp_1")
     assert ch is not None
     assert ch.wg["private_key"] == "keep"
 
@@ -480,9 +480,9 @@ def test_provider_update_token_per_channel_failure_keeps_old_wg(monkeypatch):
 
     result = service.provider_update_token("nordvpn", {"token": "t2"})
 
-    assert result["channels"] == {"resolved": [], "failed": ["japan_1"]}
+    assert result["channels"] == {"resolved": [], "failed": ["wg_jp_1"]}
     # the channel kept its old params (auto-reconnect will refresh it)
-    ch = service.Store.load().get_channel("nordvpn", "japan_1")
+    ch = service.Store.load().get_channel("nordvpn", "wg_jp_1")
     assert ch is not None
     assert ch.wg["private_key"] == "keep"
 
@@ -511,7 +511,7 @@ def test_provider_update_token_rolls_back_credential_when_commit_fails(monkeypat
 
     # nothing half-applied: old token restored, old channel params intact
     assert service.credentials.get("nordvpn") == {"token": "old"}
-    ch = service.Store.load().get_channel("nordvpn", "japan_1")
+    ch = service.Store.load().get_channel("nordvpn", "wg_jp_1")
     assert ch is not None and ch.wg["private_key"] == "keep"
 
 

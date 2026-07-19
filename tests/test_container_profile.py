@@ -32,14 +32,16 @@ def test_explicit_channel_port_is_used():
     store.add_provider("nordvpn")
     ch = store.add_channel("nordvpn", "US", "", dict(WG), port=20001)
     assert ch.port == 20001
-    assert Store.load().get_channel("nordvpn", ch.id).port == 20001
+    ch2 = store.get_channel("nordvpn", ch.id)
+    assert ch2 is not None
+    assert ch2.port == 20001
 
 
 def test_explicit_port_conflict_raises_and_changes_nothing():
     store = Store.load()
     store.add_provider("nordvpn")
     ch = store.add_channel("nordvpn", "US", "", dict(WG), port=20001)
-    with pytest.raises(PortInUseError, match="20001.*nordvpn/us_1"):
+    with pytest.raises(PortInUseError, match="20001.*nordvpn/wg_us_1"):
         store.add_channel("nordvpn", "UK", "", dict(WG), port=20001)
     ids = [c.id for c in Store.load().channels()]
     assert ids == [ch.id]  # the failed add left no half-written channel
@@ -122,7 +124,7 @@ def _engine_store(port=8888):
         "providers": {
             "nordvpn": {
                 "channels": {
-                    "us_1": {
+                    "wg_us_1": {
                         "country": "US",
                         "city": "",
                         "port": port,
@@ -180,14 +182,16 @@ def _proton_bundle(**channel_extra):
     return {
         "kind": "alle-bundle",
         "bundle_version": 1,
-        "providers": {"protonvpn": {"channels": {"us_1": ch}}},
+        "providers": {"protonvpn": {"channels": {"wg_us_1": ch}}},
     }
 
 
 def test_bundle_channel_port_applies_on_import():
     result = bundle.apply_import(bundle.dumps(_proton_bundle(port=23000)))
-    assert result["channels"]["created"] == ["protonvpn/us_1"]
-    assert Store.load().get_channel("protonvpn", "us_1").port == 23000
+    assert result["channels"]["created"] == ["protonvpn/wg_us_1"]
+    ch2 = Store.load().get_channel("protonvpn", "wg_us_1")
+    assert ch2 is not None
+    assert ch2.port == 23000
 
 
 def test_bundle_router_port_applies_on_import():
@@ -200,12 +204,12 @@ def test_bundle_router_port_applies_on_import():
 def test_bundle_reimport_with_same_port_is_unchanged():
     bundle.apply_import(bundle.dumps(_proton_bundle(port=23000)))
     result = bundle.apply_import(bundle.dumps(_proton_bundle(port=23000)))
-    assert result["channels"]["unchanged"] == ["protonvpn/us_1"]
+    assert result["channels"]["unchanged"] == ["protonvpn/wg_us_1"]
 
 
 def test_bundle_duplicate_declared_ports_are_rejected():
     data = _proton_bundle(port=23000)
-    data["providers"]["protonvpn"]["channels"]["us_2"] = {
+    data["providers"]["protonvpn"]["channels"]["wg_us_2"] = {
         "country": "",
         "city": "",
         "wg": dict(BUNDLE_WG),
@@ -233,7 +237,7 @@ def test_bundle_port_clash_with_existing_setup_changes_nothing():
 def test_export_still_omits_ports():
     bundle.apply_import(bundle.dumps(_proton_bundle(port=23000)))
     out = bundle.export_bundle()
-    assert "port" not in out["providers"]["protonvpn"]["channels"]["us_1"]
+    assert "port" not in out["providers"]["protonvpn"]["channels"]["wg_us_1"]
     assert "port" not in out["router"]
 
 
@@ -243,7 +247,7 @@ def test_export_still_omits_ports():
 def test_declared_ports_are_marked_explicit_everywhere():
     # bundle import
     bundle.apply_import(bundle.dumps(_proton_bundle(port=23000)))
-    raw = Store.load().data["providers"]["protonvpn"]["channels"]["us_1"]
+    raw = Store.load().data["providers"]["protonvpn"]["channels"]["wg_us_1"]
     assert raw["port_explicit"] is True
     # direct add / upsert with a declared port
     store = Store.load()
@@ -268,10 +272,14 @@ def test_stolen_explicit_port_is_held_not_moved():
     moved, held = Store.load().reallocate_channel_ports({23000, auto.port})
     # the automatic port recovers by moving; the declaration never moves
     assert [(p, c) for p, c, _old, _new in moved] == [("nordvpn", auto.id)]
-    assert held == [("protonvpn", "us_1", 23000)]
+    assert held == [("protonvpn", "wg_us_1", 23000)]
     after = Store.load()
-    assert after.get_channel("protonvpn", "us_1").port == 23000
-    assert after.get_channel("nordvpn", auto.id).port != auto.port
+    ch1 = after.get_channel("protonvpn", "wg_us_1")
+    ch2 = after.get_channel("nordvpn", auto.id)
+    assert ch1 is not None
+    assert ch1.port == 23000
+    assert ch2 is not None
+    assert ch2.port != auto.port
 
 
 def test_stolen_explicit_router_port_is_held():
@@ -297,7 +305,7 @@ def test_engine_degrades_held_explicit_port_and_keeps_the_rest_alive():
     config, errors = eng._build_config()
     # the held channel is excluded (its port stays a contract, its traffic
     # fails closed) with an actionable error; everything else still builds
-    assert "declared port 23000" in errors["protonvpn/us_1"]
+    assert "declared port 23000" in errors["protonvpn/wg_us_1"]
     tags = {i["tag"] for i in config["inbounds"]}
     assert f"in-nordvpn-{other.id}" in tags
     assert "in-protonvpn-us_1" not in tags
@@ -324,12 +332,12 @@ def test_sync_converges_port_provenance():
     # a bundle that drops its port: declaration demotes the port to automatic
     # (sync converges provenance); the port number itself stays
     bundle.apply_sync(bundle.dumps(_proton_bundle(port=23000)))
-    raw = Store.load().data["providers"]["protonvpn"]["channels"]["us_1"]
+    raw = Store.load().data["providers"]["protonvpn"]["channels"]["wg_us_1"]
     assert raw["port_explicit"] is True
 
     summary = bundle.apply_sync(bundle.dumps(_proton_bundle()))
-    assert summary["channels"]["updated"] == ["protonvpn/us_1"]
-    raw = Store.load().data["providers"]["protonvpn"]["channels"]["us_1"]
+    assert summary["channels"]["updated"] == ["protonvpn/wg_us_1"]
+    raw = Store.load().data["providers"]["protonvpn"]["channels"]["wg_us_1"]
     assert "port_explicit" not in raw
     assert raw["port"] == 23000  # the number is kept; only provenance changed
 

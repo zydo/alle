@@ -31,13 +31,13 @@ def _add(mtype, value, target):
 def test_ruleset_create_returns_decorated_block(channel):
     result = service.routes_ruleset_create(
         "Streaming",
-        "nordvpn/us_1",
+        "nordvpn/wg_us_1",
         [{"value": "Netflix.COM"}, {"value": "api.netflix.com"}],
     )
     rs = result["ruleset"]
     assert rs["id"] == "rs1"
     assert rs["name"] == "Streaming"
-    assert rs["target"] == "nordvpn/us_1"
+    assert rs["target"] == "nordvpn/wg_us_1"
     assert [r["id"] for r in rs["rules"]] == ["r1", "r2"]
     assert [r["match"] for r in rs["rules"]] == [
         "domain_suffix netflix.com",
@@ -48,10 +48,12 @@ def test_ruleset_create_returns_decorated_block(channel):
 
 
 def test_ruleset_create_accepts_brand_name_and_rejects_bad_targets(channel):
-    result = service.routes_ruleset_create("API", "NordVPN/us_1", [{"value": "a.com"}])
-    assert result["ruleset"]["target"] == "nordvpn/us_1"
+    result = service.routes_ruleset_create(
+        "API", "NordVPN/wg_us_1", [{"value": "a.com"}]
+    )
+    assert result["ruleset"]["target"] == "nordvpn/wg_us_1"
     with pytest.raises(service.ServiceError, match="unknown provider 'nope'"):
-        service.routes_ruleset_create("Bad", "nope/us_1", [{"value": "a.com"}])
+        service.routes_ruleset_create("Bad", "nope/wg_us_1", [{"value": "a.com"}])
     with pytest.raises(service.ServiceError, match="no channel 'nordvpn/gone_1'"):
         service.routes_ruleset_create("Bad", "nordvpn/gone_1", [{"value": "a.com"}])
 
@@ -68,7 +70,7 @@ def test_ruleset_create_rejects_bad_values(channel):
 
 
 def test_ruleset_add_inherits_block_priority_and_reports_later_shadow(channel):
-    service.routes_ruleset_create("US", "nordvpn/us_1", [{"value": "google.com"}])
+    service.routes_ruleset_create("US", "nordvpn/wg_us_1", [{"value": "google.com"}])
     service.routes_ruleset_create("Direct", "direct", [{"value": "api.google.com"}])
     result = service.routes_ruleset_add("rs1", [{"value": "api.google.com"}])
     assert [r["id"] for r in result["ruleset"]["rules"]] == ["r1", "r3"]
@@ -78,17 +80,20 @@ def test_ruleset_add_inherits_block_priority_and_reports_later_shadow(channel):
 
 
 def test_ruleset_update_keeps_id_position_name_and_matchers(channel):
-    a = service.routes_ruleset_create("A", "nordvpn/us_1", [{"value": "a.com"}])
+    a = service.routes_ruleset_create("A", "nordvpn/wg_us_1", [{"value": "a.com"}])
     service.routes_ruleset_create("B", "direct", [{"value": "b.com"}])
     rsid = a["ruleset"]["id"]
 
     result = service.routes_ruleset_update(
-        rsid, "Renamed", "nordvpn/us_1", [{"value": "x.com"}, {"value": "10.0.0.0/8"}]
+        rsid,
+        "Renamed",
+        "nordvpn/wg_us_1",
+        [{"value": "x.com"}, {"value": "10.0.0.0/8"}],
     )
     rs = result["ruleset"]
     assert rs["id"] == rsid  # id + position preserved
     assert rs["name"] == "Renamed"
-    assert rs["target"] == "nordvpn/us_1"
+    assert rs["target"] == "nordvpn/wg_us_1"
     assert [r["match"] for r in rs["rules"]] == [
         "domain_suffix x.com",
         "ip_cidr 10.0.0.0/8",
@@ -97,7 +102,7 @@ def test_ruleset_update_keeps_id_position_name_and_matchers(channel):
 
 
 def test_ruleset_update_retargets_and_validates(channel):
-    a = service.routes_ruleset_create("A", "nordvpn/us_1", [{"value": "a.com"}])
+    a = service.routes_ruleset_create("A", "nordvpn/wg_us_1", [{"value": "a.com"}])
     rsid = a["ruleset"]["id"]
     retargeted = service.routes_ruleset_update(
         rsid, "A", "direct", [{"value": "a.com"}]
@@ -115,7 +120,7 @@ def test_ruleset_update_retargets_and_validates(channel):
 
 
 def test_routes_list_annotates_and_filters(channel):
-    service.routes_ruleset_create("US", "nordvpn/us_1", [{"value": "google.com"}])
+    service.routes_ruleset_create("US", "nordvpn/wg_us_1", [{"value": "google.com"}])
     service.routes_ruleset_create("Direct", "direct", [{"value": "api.google.com"}])
     service.routes_ruleset_create(
         "Block local", "block", [{"type": "ip_cidr", "value": "10.0.0.0/8"}]
@@ -136,9 +141,9 @@ def test_routes_list_annotates_and_filters(channel):
     assert data["router"]["rule_count"] == 3
     assert data["router"]["unmatched"] == "direct"
 
-    by_channel = service.routes_list(channel="us_1")  # bare id matches
+    by_channel = service.routes_list(channel="wg_us_1")  # bare id matches
     assert [r["id"] for r in by_channel["rules"]] == ["r1"]
-    qualified = service.routes_list(channel="nordvpn/us_1")
+    qualified = service.routes_list(channel="nordvpn/wg_us_1")
     assert [r["id"] for r in qualified["rules"]] == ["r1"]
 
 
@@ -161,7 +166,7 @@ def test_routes_remove_dry_run_then_real(channel):
 
 def test_routes_move_adopts_target_and_appends_at_destination_end(channel):
     service.routes_ruleset_create(
-        "US", "nordvpn/us_1", [{"value": "a.com"}, {"value": "b.com"}]
+        "US", "nordvpn/wg_us_1", [{"value": "a.com"}, {"value": "b.com"}]
     )
     service.routes_ruleset_create("Direct", "direct", [{"value": "c.com"}])
 
@@ -218,7 +223,9 @@ def test_routes_move_rejects_bad_input_without_mutating(channel):
 
 
 def test_routes_reorder_persists_and_recomputes_shadow_lint(channel):
-    service.routes_ruleset_create("API", "nordvpn/us_1", [{"value": "api.google.com"}])
+    service.routes_ruleset_create(
+        "API", "nordvpn/wg_us_1", [{"value": "api.google.com"}]
+    )
     service.routes_ruleset_create("Google", "direct", [{"value": "google.com"}])
     service.routes_ruleset_create(
         "Block local", "block", [{"type": "ip_cidr", "value": "10.0.0.0/8"}]
@@ -544,40 +551,40 @@ def test_tun_trial_recover_is_a_noop_without_a_marker(rooted):
 
 
 def test_referenced_channel_removal_is_blocked_with_fix_commands(channel):
-    _add("domain_suffix", "netflix.com", "nordvpn/us_1")
-    _add("all", "", "nordvpn/us_1")
+    _add("domain_suffix", "netflix.com", "nordvpn/wg_us_1")
+    _add("all", "", "nordvpn/wg_us_1")
 
     with pytest.raises(service.ServiceError) as exc:
-        service.channel_remove_many(["us_1"])
+        service.channel_remove_many(["wg_us_1"])
     msg = str(exc.value)
-    assert "nordvpn/us_1" in msg
+    assert "nordvpn/wg_us_1" in msg
     assert "r1" in msg and "r2" in msg  # every blocker in one pass
     assert "alle routes rm r1 r2" in msg  # with the exact fix
-    assert Store.load().get_channel("nordvpn", "us_1") is not None
+    assert Store.load().get_channel("nordvpn", "wg_us_1") is not None
 
     # dry-run reports the same conflict instead of pretending it would work
     with pytest.raises(service.ServiceError, match="routing rules"):
-        service.channel_remove_many(["us_1"], dry_run=True)
+        service.channel_remove_many(["wg_us_1"], dry_run=True)
 
 
 def test_referenced_provider_removal_is_blocked(channel):
-    _add("domain_suffix", "a.com", "nordvpn/us_1")
+    _add("domain_suffix", "a.com", "nordvpn/wg_us_1")
     with pytest.raises(service.ServiceError, match="alle routes rm r1"):
         service.provider_remove_many(["nordvpn"])
     assert Store.load().has_provider("nordvpn")
 
 
 def test_unreferenced_removal_works_after_rules_are_gone(channel):
-    _add("domain_suffix", "a.com", "nordvpn/us_1")
+    _add("domain_suffix", "a.com", "nordvpn/wg_us_1")
     service.routes_remove(["r1"])
-    result = service.channel_remove_many(["us_1"])
-    assert result["channels"][0]["channel"] == "us_1"
+    result = service.channel_remove_many(["wg_us_1"])
+    assert result["channels"][0]["channel"] == "wg_us_1"
 
 
 def test_direct_and_block_targets_never_block_removal(channel):
     _add("domain_suffix", "a.com", "direct")
     _add("domain_suffix", "b.com", "block")
-    assert service.channel_remove_many(["us_1"])["channels"]
+    assert service.channel_remove_many(["wg_us_1"])["channels"]
 
 
 # ---- CLI round trip ----------------------------------------------------------------
@@ -596,13 +603,13 @@ def test_cli_routes_round_trip(channel, capsys):
             "create",
             "Streaming",
             "--via",
-            "nordvpn/us_1",
+            "nordvpn/wg_us_1",
             "--domain",
             "netflix.com",
         ],
         capsys,
     )
-    assert "Added ruleset rs1 'Streaming': 1 matcher(s) → nordvpn/us_1." in out
+    assert "Added ruleset rs1 'Streaming': 1 matcher(s) → nordvpn/wg_us_1." in out
 
     out = run_cli(
         [
@@ -680,9 +687,9 @@ def test_cli_tun_trial_round_trip(monkeypatch, capsys):
 
 def test_cli_blocked_channel_rm_shows_blockers(channel, capsys):
     run_cli(
-        ["routes", "ruleset", "create", "Default", "--via", "nordvpn/us_1", "--all"],
+        ["routes", "ruleset", "create", "Default", "--via", "nordvpn/wg_us_1", "--all"],
         capsys,
     )
     with pytest.raises(SystemExit) as exc:
-        cli.main(["channels", "rm", "us_1"])
+        cli.main(["channels", "rm", "wg_us_1"])
     assert "alle routes rm r1" in str(exc.value)

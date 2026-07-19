@@ -74,7 +74,7 @@ BASE_HEADERS = ["LABEL", "ID", "PORT", "COUNTRY", "CITY"]
 
 
 def _channel_ref(c: dict) -> str:
-    """A channel's globally-unique ref, ``<provider>/<id>`` (e.g. ``nordvpn/us_1``)."""
+    """A channel's globally-unique ref, ``<provider>/<id>`` (e.g. ``nordvpn/wg_us_1``)."""
     return f"{c['provider']}/{c['name']}"
 
 

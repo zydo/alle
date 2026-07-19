@@ -483,7 +483,7 @@ def test_replace_token_endpoint_reresolves_and_hides_token(live, monkeypatch):
     assert st == 200
     data = json.loads(body)
     assert data["updated"] is True
-    assert data["channels"]["resolved"] == ["japan_1"]
+    assert data["channels"]["resolved"] == ["wg_jp_1"]
     assert b"SUPER-SECRET-NEW" not in body  # the raw token is never echoed back
     assert service.credentials.get("nordvpn") == {"token": "SUPER-SECRET-NEW"}
 
@@ -763,7 +763,11 @@ def test_routes_api_create_reorder_killswitch_delete(live):
         base + "/api/v1/routes",
         method="POST",
         headers=origin,
-        data={"type": "domain", "value": "api.example.com", "target": "nordvpn/us_1"},
+        data={
+            "type": "domain",
+            "value": "api.example.com",
+            "target": "nordvpn/wg_us_1",
+        },
     )
     assert st == 405  # flat per-rule authoring is gone: /routes is a known
     # resource, but POST /api/v1/routes has no handler (rulesets is the path)
@@ -774,7 +778,7 @@ def test_routes_api_create_reorder_killswitch_delete(live):
         headers=origin,
         data={
             "name": "API",
-            "target": "nordvpn/us_1",
+            "target": "nordvpn/wg_us_1",
             "matchers": [{"value": "api.example.com"}],
         },
     )
@@ -1004,12 +1008,14 @@ def test_metrics_endpoint_reads_totals_and_test_rows_carry_traffic(live):
     data = json.loads(body)
     assert data["channel_count"] == 1 and data["filter"] is None
     mrow = data["channels"][0]
-    assert mrow["name"] == "us_1" and mrow["provider"] == "nordvpn"
+    assert mrow["name"] == "wg_us_1" and mrow["provider"] == "nordvpn"
     assert mrow["sent"] == 0 and mrow["received"] == 0 and mrow["enabled"]
 
     # the ?channel= filter uses the test/CLI ref grammar; an unknown ref is a 400
-    st, body, _ = _req(base + "/api/v1/metrics?channel=us_1", headers=_bearer(secret))
-    assert st == 200 and json.loads(body)["filter"] == "us_1"
+    st, body, _ = _req(
+        base + "/api/v1/metrics?channel=wg_us_1", headers=_bearer(secret)
+    )
+    assert st == 200 and json.loads(body)["filter"] == "wg_us_1"
     st, _, _ = _req(base + "/api/v1/metrics?channel=nope", headers=_bearer(secret))
     assert st == 400
 
@@ -1021,7 +1027,7 @@ def test_metrics_endpoint_reads_totals_and_test_rows_carry_traffic(live):
     )
     assert st == 200
     row = json.loads(body)["channels"][0]
-    assert row["name"] == "us_1"
+    assert row["name"] == "wg_us_1"
     assert row["sent"] == 0 and row["received"] == 0
 
 
@@ -1046,7 +1052,7 @@ def test_test_endpoint_streams_speed_test(live, monkeypatch):
             on_row(
                 {
                     "provider": "nordvpn",
-                    "name": "us_1",
+                    "name": "wg_us_1",
                     "speed_result": {"download_bps": 1e6},
                 }
             )
@@ -1066,16 +1072,16 @@ def test_test_endpoint_streams_speed_test(live, monkeypatch):
         base + "/api/v1/test",
         method="POST",
         headers=origin,
-        data={"speed": True, "channel": "us_1"},
+        data={"speed": True, "channel": "wg_us_1"},
     )
 
     events = [json.loads(line) for line in body.splitlines() if line.strip()]
     assert st == 200
-    assert seen == {"speed": True, "channel": "us_1"}
+    assert seen == {"speed": True, "channel": "wg_us_1"}
     assert [e["type"] for e in events] == ["row", "done"]
-    assert events[0]["data"]["name"] == "us_1"
+    assert events[0]["data"]["name"] == "wg_us_1"
     assert (
-        events[-1]["data"]["filter"] == "us_1"
+        events[-1]["data"]["filter"] == "wg_us_1"
     )  # done carries the summary, not channels
 
 
@@ -1097,10 +1103,10 @@ def test_test_endpoint_probe_returns_json(live, monkeypatch):
         base + "/api/v1/test",
         method="POST",
         headers=origin,
-        data={"speed": False, "channel": "us_1"},
+        data={"speed": False, "channel": "wg_us_1"},
     )
     assert st == 200
-    assert json.loads(body)["filter"] == "us_1"  # one JSON object, not NDJSON
+    assert json.loads(body)["filter"] == "wg_us_1"  # one JSON object, not NDJSON
 
 
 def test_stream_emits_exactly_one_terminal_on_failure(live, monkeypatch):
@@ -1112,7 +1118,7 @@ def test_stream_emits_exactly_one_terminal_on_failure(live, monkeypatch):
 
     def failing_test(*, speed=True, channel=None, on_row=None, cancel=None, **_):
         if on_row:
-            on_row({"provider": "nordvpn", "name": "us_1"})
+            on_row({"provider": "nordvpn", "name": "wg_us_1"})
         raise service.ServiceError("boom mid-stream")
 
     monkeypatch.setattr(service, "test", failing_test)
@@ -1137,7 +1143,7 @@ def test_a_second_concurrent_speed_test_is_refused(live, monkeypatch):
 
     def blocking_test(*, speed=True, channel=None, on_row=None, cancel=None, **_):
         if on_row:
-            on_row({"provider": "nordvpn", "name": "us_1"})
+            on_row({"provider": "nordvpn", "name": "wg_us_1"})
         release.wait(5)  # hold the job open until the test releases it
         return {"probed": True, "channel_count": 1, "channels": []}
 
@@ -1792,12 +1798,12 @@ def test_batch_channel_enabled_with_dry_run(live):
         base + "/api/v1/channels/enabled",
         method="POST",
         headers=_bearer(secret),
-        data={"refs": ["us_1"], "enabled": False, "dry_run": True},
+        data={"refs": ["wg_us_1"], "enabled": False, "dry_run": True},
     )
     assert st == 200
     out = json.loads(body)
     assert out["dry_run"] is True and out["channels"][0]["changed"] is True
-    ch = Store.load().get_channel("nordvpn", "us_1")
+    ch = Store.load().get_channel("nordvpn", "wg_us_1")
     assert ch is not None and ch.enabled is True
 
     # the real toggle, scoped by provider + glob (the CLI grammar)
@@ -1805,11 +1811,11 @@ def test_batch_channel_enabled_with_dry_run(live):
         base + "/api/v1/channels/enabled",
         method="POST",
         headers=_bearer(secret),
-        data={"refs": ["us_*"], "enabled": False, "provider": "nordvpn"},
+        data={"refs": ["wg_us_*"], "enabled": False, "provider": "nordvpn"},
     )
     assert st == 200
-    assert json.loads(body)["changed"] == ["nordvpn/us_1"]
-    ch = Store.load().get_channel("nordvpn", "us_1")
+    assert json.loads(body)["changed"] == ["nordvpn/wg_us_1"]
+    ch = Store.load().get_channel("nordvpn", "wg_us_1")
     assert ch is not None and ch.enabled is False
 
 
@@ -1830,31 +1836,31 @@ def test_batch_channel_remove_and_delete_dry_run_param(live):
 
     # ?dry_run=1 on the single-channel DELETE: plans, does not remove
     st, body, _ = _req(
-        base + "/api/v1/channels/nordvpn/us_1?dry_run=1",
+        base + "/api/v1/channels/nordvpn/wg_us_1?dry_run=1",
         method="DELETE",
         headers=_bearer(secret),
     )
     assert st == 200 and json.loads(body)["dry_run"] is True
-    assert Store.load().get_channel("nordvpn", "us_1") is not None
+    assert Store.load().get_channel("nordvpn", "wg_us_1") is not None
 
     # a garbage dry_run value must 400, never coerce to "actually remove"
     st, _, _ = _req(
-        base + "/api/v1/channels/nordvpn/us_1?dry_run=yes",
+        base + "/api/v1/channels/nordvpn/wg_us_1?dry_run=yes",
         method="DELETE",
         headers=_bearer(secret),
     )
     assert st == 400
-    assert Store.load().get_channel("nordvpn", "us_1") is not None
+    assert Store.load().get_channel("nordvpn", "wg_us_1") is not None
 
     # the batch remove endpoint does the real removal
     st, body, _ = _req(
         base + "/api/v1/channels/remove",
         method="POST",
         headers=_bearer(secret),
-        data={"refs": ["us_1"]},
+        data={"refs": ["wg_us_1"]},
     )
     assert st == 200 and json.loads(body)["dry_run"] is False
-    assert Store.load().get_channel("nordvpn", "us_1") is None
+    assert Store.load().get_channel("nordvpn", "wg_us_1") is None
 
 
 def test_batch_provider_remove_dry_run(live):

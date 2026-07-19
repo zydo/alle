@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import base64
 import json
+from typing import cast
 
 import pytest
 
-from alle import bundle, cli, credentials, reconnect, service
+from alle import bundle, cli, credentials, reconnect, service, singbox
 from alle.engine import Engine
 from alle.providers import ProviderError
 from alle.state import ReferencedError, Store, config_signature
@@ -41,7 +42,9 @@ def raw_channel(provider: str, cid: str) -> dict:
 
 def test_enabled_defaults_true_and_key_is_absent_on_disk():
     store, ch = seed_channel()
-    assert store.get_channel("nordvpn", ch.id).enabled is True
+    ch2 = store.get_channel("nordvpn", ch.id)
+    assert ch2 is not None
+    assert ch2.enabled is True
     assert "enabled" not in raw_channel("nordvpn", ch.id)
 
 
@@ -53,7 +56,9 @@ def test_disable_writes_key_enable_removes_it():
         ("nordvpn", ch.id)
     ]
     assert raw_channel("nordvpn", ch.id)["enabled"] is False
-    assert Store.load().get_channel("nordvpn", ch.id).enabled is False
+    ch2 = Store.load().get_channel("nordvpn", ch.id)
+    assert ch2 is not None
+    assert ch2.enabled is False
 
     assert Store.load().set_channels_enabled([("nordvpn", ch.id)], True) == [
         ("nordvpn", ch.id)
@@ -118,7 +123,9 @@ def test_referenced_channel_cannot_be_disabled_and_batch_is_atomic():
             [("nordvpn", other.id), ("nordvpn", ch.id)], False
         )
     # all-or-nothing: the unreferenced channel stayed enabled too
-    assert Store.load().get_channel("nordvpn", other.id).enabled is True
+    other2 = Store.load().get_channel("nordvpn", other.id)
+    assert other2 is not None
+    assert other2.enabled is True
 
 
 def test_rules_cannot_target_a_disabled_channel():
@@ -173,7 +180,18 @@ def test_reconnect_pass_skips_disabled_channels(monkeypatch):
     def forbidden(provider, country, city=""):
         raise AssertionError("reconnect must not re-resolve a disabled channel")
 
-    reconnect.run_pass(Store.load(), runner=None, now=1e9, resolve=forbidden)
+    class ForbiddenRunner:
+        """Fails on ANY use: a disabled channel must never touch the runner."""
+
+        def __getattr__(self, name):
+            raise AssertionError(f"reconnect must not touch the runner ({name})")
+
+    reconnect.run_pass(
+        Store.load(),
+        runner=cast(singbox.Runner, ForbiddenRunner()),
+        now=1e9,
+        resolve=forbidden,
+    )
     assert "reconnect" not in raw_channel("nordvpn", ch.id)
 
 
@@ -191,7 +209,9 @@ def test_service_toggle_round_trip_and_noop_reporting():
 
     back = service.channel_set_enabled_many([ch.id], True)
     assert back["changed"] == [f"nordvpn/{ch.id}"]
-    assert Store.load().get_channel("nordvpn", ch.id).enabled is True
+    ch2 = Store.load().get_channel("nordvpn", ch.id)
+    assert ch2 is not None
+    assert ch2.enabled is True
 
 
 def test_service_dry_run_plans_without_mutating():
@@ -199,7 +219,9 @@ def test_service_dry_run_plans_without_mutating():
     result = service.channel_set_enabled_many([ch.id], False, dry_run=True)
     assert result["dry_run"] is True
     assert [i["changed"] for i in result["channels"]] == [True]
-    assert Store.load().get_channel("nordvpn", ch.id).enabled is True
+    ch2 = Store.load().get_channel("nordvpn", ch.id)
+    assert ch2 is not None
+    assert ch2.enabled is True
 
 
 def test_service_disable_refused_with_blockers_lists_the_fix():
@@ -211,7 +233,9 @@ def test_service_disable_refused_with_blockers_lists_the_fix():
 
     assert "cannot disable" in str(exc.value)
     assert f"nordvpn/{ch.id}" in str(exc.value)
-    assert Store.load().get_channel("nordvpn", ch.id).enabled is True
+    ch2 = Store.load().get_channel("nordvpn", ch.id)
+    assert ch2 is not None
+    assert ch2.enabled is True
 
 
 def test_enable_resolves_a_wgless_token_channel(monkeypatch):
@@ -232,6 +256,7 @@ def test_enable_resolves_a_wgless_token_channel(monkeypatch):
     assert result["wg_resolved"] == [f"nordvpn/{ch.id}"]
     assert resolved == [("nordvpn", "United States", "")]
     after = Store.load().get_channel("nordvpn", ch.id)
+    assert after is not None
     assert after.enabled is True and after.wg == WG
 
 
@@ -248,7 +273,9 @@ def test_enable_aborts_cleanly_when_resolution_fails(monkeypatch):
     with pytest.raises(service.ServiceError, match="resolving a server failed"):
         service.channel_set_enabled_many([ch.id], True)
 
-    assert Store.load().get_channel("nordvpn", ch.id).enabled is False
+    ch2 = Store.load().get_channel("nordvpn", ch.id)
+    assert ch2 is not None
+    assert ch2.enabled is False
 
 
 def test_test_lists_disabled_as_skipped_rows(monkeypatch):
@@ -331,21 +358,25 @@ def test_cli_disable_enable_round_trip(capsys):
 
     out = run_cli(["channels", "disable", ch.id], capsys)
     assert f"Disabled channel nordvpn/{ch.id}." in out
-    assert Store.load().get_channel("nordvpn", ch.id).enabled is False
+    ch2 = Store.load().get_channel("nordvpn", ch.id)
+    assert ch2 is not None
+    assert ch2.enabled is False
 
     out = run_cli(["channels", "disable", ch.id], capsys)
     assert "already disabled — nothing to do" in out
 
     out = run_cli(["channels", "enable", ch.id], capsys)
     assert f"Enabled channel nordvpn/{ch.id}." in out
-    assert Store.load().get_channel("nordvpn", ch.id).enabled is True
+    ch3 = Store.load().get_channel("nordvpn", ch.id)
+    assert ch3 is not None
+    assert ch3.enabled is True
 
 
 def test_cli_disable_supports_globs_all_and_dry_run(capsys):
     store, _ = seed_channel(city="Seattle")
     seed_channel(city="Chicago")
 
-    dry = run_cli(["channels", "disable", "united_states_*", "--dry-run"], capsys)
+    dry = run_cli(["channels", "disable", "wg_us_*", "--dry-run"], capsys)
     assert dry.count("Would disable") == 2
     assert all(c.enabled for c in Store.load().channels())
 
@@ -439,7 +470,9 @@ def test_merge_with_unstated_enabled_keeps_the_adhoc_state(monkeypatch):
     summary = service.setup_import(text)
 
     assert summary["channels"]["unchanged"] == [f"nordvpn/{ch.id}"]
-    assert Store.load().get_channel("nordvpn", ch.id).enabled is False
+    ch2 = Store.load().get_channel("nordvpn", ch.id)
+    assert ch2 is not None
+    assert ch2.enabled is False
 
     # an explicit `enabled: true` in the bundle IS a re-enable
     text = text.replace(
@@ -448,7 +481,9 @@ def test_merge_with_unstated_enabled_keeps_the_adhoc_state(monkeypatch):
     data = bundle.loads(text)
     assert data["providers"]["nordvpn"]["channels"][ch.id]["enabled"] is True
     service.setup_import(bundle.dumps(data))
-    assert Store.load().get_channel("nordvpn", ch.id).enabled is True
+    ch3 = Store.load().get_channel("nordvpn", ch.id)
+    assert ch3 is not None
+    assert ch3.enabled is True
 
 
 def test_import_never_resolves_or_probes_a_disabled_channel(monkeypatch):
@@ -478,6 +513,7 @@ def test_import_never_resolves_or_probes_a_disabled_channel(monkeypatch):
     assert summary["channels"]["created"] == ["nordvpn/spare_1"]
     assert summary["wg_resolved"] == [] and summary["wg_fallback"] == []
     ch = Store.load().get_channel("nordvpn", "spare_1")
+    assert ch is not None
     assert ch.enabled is False and ch.wg == {}  # wg-less until enabled
     raw = raw_channel("nordvpn", "spare_1")
     assert "probe" not in raw  # nothing to probe, nothing pending
@@ -509,6 +545,7 @@ def test_import_keeps_the_snapshot_of_a_disabled_channel(monkeypatch):
     )
     service.setup_import(text)
     ch = Store.load().get_channel("nordvpn", "spare_1")
+    assert ch is not None
     assert ch.enabled is False
     assert ch.wg["peer"]["endpoint_host"] == "9.9.9.9"
 
@@ -556,12 +593,12 @@ def test_import_enabled_channels_skip_the_catalog_check(monkeypatch):
             "kind": "alle-bundle",
             "bundle_version": 1,
             "providers": {
-                "nordvpn": {"channels": {"us_1": {"country": "United States"}}}
+                "nordvpn": {"channels": {"wg_us_1": {"country": "United States"}}}
             },
         }
     )
     service.setup_import(text)
-    assert Store.load().get_channel("nordvpn", "us_1") is not None
+    assert Store.load().get_channel("nordvpn", "wg_us_1") is not None
 
 
 def test_bundle_ruleset_cannot_target_a_channel_it_disables():
@@ -609,7 +646,9 @@ def test_import_cannot_disable_a_channel_an_existing_rule_targets(monkeypatch):
 
     with pytest.raises(service.ServiceError, match="cannot disable"):
         service.setup_import(bundle.dumps(data))
-    assert Store.load().get_channel("nordvpn", ch.id).enabled is True
+    ch2 = Store.load().get_channel("nordvpn", ch.id)
+    assert ch2 is not None
+    assert ch2.enabled is True
 
 
 def test_restore_round_trips_enabled(monkeypatch):
@@ -631,6 +670,10 @@ def test_restore_round_trips_enabled(monkeypatch):
     service.setup_restore(text)
 
     after = Store.load()
-    assert after.get_channel("nordvpn", on.id).enabled is True
-    assert after.get_channel("nordvpn", off.id).enabled is False
-    assert after.get_channel("nordvpn", off.id).wg["peer"]["endpoint_host"] == "9.9.9.9"
+    on_channel = after.get_channel("nordvpn", on.id)
+    off_channel = after.get_channel("nordvpn", off.id)
+    assert on_channel is not None
+    assert on_channel.enabled is True
+    assert off_channel is not None
+    assert off_channel.enabled is False
+    assert off_channel.wg["peer"]["endpoint_host"] == "9.9.9.9"

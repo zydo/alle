@@ -55,11 +55,11 @@ def test_channel_remove_many_plain_name_requires_disambiguation():
     store.add_channel("protonvpn", "Japan", "", dict(WG))
 
     with pytest.raises(service.ServiceError) as exc:
-        service.channel_remove_many(["japan_1"])
+        service.channel_remove_many(["wg_jp_1"])
 
     assert "exists under multiple providers" in str(exc.value)
-    assert service.Store.load().get_channel("nordvpn", "japan_1") is not None
-    assert service.Store.load().get_channel("protonvpn", "japan_1") is not None
+    assert service.Store.load().get_channel("nordvpn", "wg_jp_1") is not None
+    assert service.Store.load().get_channel("protonvpn", "wg_jp_1") is not None
 
 
 def test_channel_remove_many_supports_qualified_glob_and_dedupes():
@@ -70,19 +70,14 @@ def test_channel_remove_many_supports_qualified_glob_and_dedupes():
     store.add_channel("nordvpn", "United States", "Chicago", dict(WG))
     store.add_channel("protonvpn", "United States", "Seattle", dict(WG))
 
-    result = service.channel_remove_many(
-        ["nordvpn/united_states_*", "nordvpn/united_states_seattle_1"]
-    )
+    result = service.channel_remove_many(["nordvpn/wg_us_*", "nordvpn/wg_us_seattle_1"])
 
     assert [item["ref"] for item in result["channels"]] == [
-        "nordvpn/united_states_chicago_1",
-        "nordvpn/united_states_seattle_1",
+        "nordvpn/wg_us_chicago_1",
+        "nordvpn/wg_us_seattle_1",
     ]
     assert service.Store.load().provider_channels("nordvpn") == []
-    assert (
-        service.Store.load().get_channel("protonvpn", "united_states_seattle_1")
-        is not None
-    )
+    assert service.Store.load().get_channel("protonvpn", "wg_us_seattle_1") is not None
 
 
 @pytest.mark.parametrize(
@@ -91,19 +86,19 @@ def test_channel_remove_many_supports_qualified_glob_and_dedupes():
         ({}, "at least one channel name is required"),
         ({"channel_ids": ["missing"]}, "no channel named 'missing'"),
         (
-            {"channel_ids": ["bad/japan_1"]},
+            {"channel_ids": ["bad/wg_jp_1"]},
             "unknown provider 'bad'",
         ),
         (
-            {"channel_ids": ["japan_1"], "provider": "nordvpn"},
+            {"channel_ids": ["wg_jp_1"], "provider": "nordvpn"},
             "NordVPN is not added",
         ),
         (
-            {"channel_ids": ["japan_1"], "provider": "protonvpn"},
+            {"channel_ids": ["wg_jp_1"], "provider": "protonvpn"},
             "Proton VPN is not added",
         ),
         (
-            {"channel_ids": ["japan_1"], "all_": True},
+            {"channel_ids": ["wg_jp_1"], "all_": True},
             "--all cannot be combined with channel names",
         ),
         (

@@ -84,7 +84,7 @@ def stub_probe_one_failed(monkeypatch):
         channels = self.store.channels() if channels is None else channels
         out = {}
         for ch in channels:
-            ok = ch.id == "japan_1"
+            ok = ch.id == "wg_jp_1"
             result = {
                 "ok": ok,
                 "at": 1,
@@ -103,7 +103,7 @@ def test_test_default_probes_without_speed(two_channels, stub_probe, stub_throug
     data = service.test()
     assert data["speed"] is False
     assert data["healthy_count"] == 2
-    assert [r["name"] for r in data["channels"]] == ["japan_1", "united_states_1"]
+    assert [r["name"] for r in data["channels"]] == ["wg_jp_1", "wg_us_1"]
     assert data["channels"][0]["latency_ms"] == 12.3
     assert stub_throughput == []
 
@@ -114,30 +114,30 @@ def same_id_under_two_providers():
     case a bare id must not silently operate across."""
     store = service.Store.load()
     store.add_provider("nordvpn")
-    store.add_channel("nordvpn", "United States", "", dict(WG))  # united_states_1
+    store.add_channel("nordvpn", "United States", "", dict(WG))  # wg_us_1
     store.add_provider("protonvpn")
-    store.upsert_channel("protonvpn", "united_states_1", "", "", dict(WG))
+    store.upsert_channel("protonvpn", "wg_us_1", "", "", dict(WG))
 
 
 def test_test_rejects_an_ambiguous_bare_channel_id(
     same_id_under_two_providers, stub_probe
 ):
     with pytest.raises(service.ServiceError, match="multiple providers"):
-        service.test(channel="united_states_1")
+        service.test(channel="wg_us_1")
 
 
 def test_test_accepts_a_qualified_provider_channel_ref(
     same_id_under_two_providers, stub_probe, stub_throughput
 ):
-    data = service.test(channel="nordvpn/united_states_1")
-    assert [r["name"] for r in data["channels"]] == ["united_states_1"]
+    data = service.test(channel="nordvpn/wg_us_1")
+    assert [r["name"] for r in data["channels"]] == ["wg_us_1"]
     assert data["channels"][0]["provider"] == "nordvpn"
 
 
 def test_test_unambiguous_bare_id_still_works(two_channels, stub_probe):
-    # only nordvpn carries japan_1 → a bare id is fine
-    data = service.test(channel="japan_1")
-    assert [r["name"] for r in data["channels"]] == ["japan_1"]
+    # only nordvpn carries wg_jp_1 → a bare id is fine
+    data = service.test(channel="wg_jp_1")
+    assert [r["name"] for r in data["channels"]] == ["wg_jp_1"]
 
 
 def test_test_rows_carry_traffic_totals(same_id_under_two_providers, monkeypatch):
@@ -147,16 +147,16 @@ def test_test_rows_carry_traffic_totals(same_id_under_two_providers, monkeypatch
         service.metrics,
         "totals",
         lambda: {
-            ("nordvpn", "united_states_1"): {
+            ("nordvpn", "wg_us_1"): {
                 "sent": 10,
                 "received": 20,
                 "updated_at": 99,
             }
         },
     )
-    data = service.test(channel="nordvpn/united_states_1")
+    data = service.test(channel="nordvpn/wg_us_1")
     names = [r["name"] for r in data["channels"]]
-    assert names == ["united_states_1"]
+    assert names == ["wg_us_1"]
     row = data["channels"][0]
     assert row["provider"] == "nordvpn"
     assert (row["sent"], row["received"], row["traffic_updated_at"]) == (10, 20, 99)
@@ -183,18 +183,18 @@ def test_test_speed_runs_only_healthy_channels(
     assert len(stub_throughput) == 1
     assert stub_throughput[0]["measure_latency"] is False  # latency not re-measured
     tested = {r["name"]: r["speed_result"] for r in data["channels"]}
-    assert tested["japan_1"]["tested"] is True
+    assert tested["wg_jp_1"]["tested"] is True
     assert (
-        tested["japan_1"]["latency_ms"] == 12.3
+        tested["wg_jp_1"]["latency_ms"] == 12.3
     )  # probe latency reused, not re-measured
-    assert tested["united_states_1"]["skip_reason"] == "unhealthy"
+    assert tested["wg_us_1"]["skip_reason"] == "unhealthy"
 
 
 def test_test_speed_filters_to_one_channel(
     two_channels, stub_running, stub_probe, stub_throughput
 ):
-    data = service.test(speed=True, channel="japan_1")
-    assert [r["name"] for r in data["channels"]] == ["japan_1"]
+    data = service.test(speed=True, channel="wg_jp_1")
+    assert [r["name"] for r in data["channels"]] == ["wg_jp_1"]
     assert len(stub_throughput) == 1  # only the one channel's proxy was driven
 
 
@@ -231,7 +231,7 @@ def test_cli_streams_a_row_per_channel(
     assert lines[0].split()[:2] == ["LABEL", "ID"]  # shared channel-table lead
     assert set(lines[1]) <= {"-", " "} and "-" in lines[1]  # dash separator second
     # rows carry the provider-qualified id (globally unique)
-    assert "nordvpn/japan_1" in out and "nordvpn/united_states_1" in out
+    assert "nordvpn/wg_jp_1" in out and "nordvpn/wg_us_1" in out
     assert out.count("150.0 Mbps") == 2
 
 
@@ -283,17 +283,17 @@ def test_test_speed_streams_on_row_and_on_begin(
     # on_begin fires exactly once, before any result, with channel identity.
     assert len(begins) == 1
     began = begins[0]
-    assert [c["name"] for c in began] == ["japan_1", "united_states_1"]
+    assert [c["name"] for c in began] == ["wg_jp_1", "wg_us_1"]
     assert len({c["port_number"] for c in began}) == 2  # distinct ports
     assert all(c["country"] and c["city"] and c["port"] for c in began)
 
     # on_row fires once per healthy channel, each with its speed result filled in.
-    assert [r["name"] for r in rows] == ["japan_1", "united_states_1"]
+    assert [r["name"] for r in rows] == ["wg_jp_1", "wg_us_1"]
     assert all(r["speed_result"]["tested"] for r in rows)
 
     # The final aggregate is unchanged from the non-streaming path.
     assert data["speed"] is True and data["healthy_count"] == 2
-    assert [r["name"] for r in data["channels"]] == ["japan_1", "united_states_1"]
+    assert [r["name"] for r in data["channels"]] == ["wg_jp_1", "wg_us_1"]
 
 
 def test_run_streaming_test_prints_live_table(
@@ -308,10 +308,8 @@ def test_run_streaming_test_prints_live_table(
     assert lines[0].split()[:2] == ["LABEL", "ID"]  # header leads the channel table
     assert set(lines[1]) <= {"-", " "} and "-" in lines[1]  # dash separator
     assert captured.out.count("150.0 Mbps") == 2  # both channels' download column
-    assert (
-        "nordvpn/japan_1" in captured.out and "nordvpn/united_states_1" in captured.out
-    )
+    assert "nordvpn/wg_jp_1" in captured.out and "nordvpn/wg_us_1" in captured.out
     # no trailing summary line: a failing channel marks its own row instead
-    assert lines[-1].split()[:2] == ["united_states_1", "nordvpn/united_states_1"]
+    assert lines[-1].split()[:2] == ["wg_us_1", "nordvpn/wg_us_1"]
     # the animated progress indicator lives on stderr, never polluting the table
     assert "⠋" not in captured.out

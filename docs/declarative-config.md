@@ -69,7 +69,7 @@ providers:
     credential:
       token: "nordvpn-access-token"        # from https://my.nordaccount.com/dashboard/nordvpn/access-tokens (see below)
     channels:
-      united_states_new_york_1:            # id — follow alle's convention (below)
+      wg_us_new_york_1:                    # id — follow alle's convention (below)
         country: United States             # required — the resolver needs it
         city: New York                     # optional — omit for "any city"
         label: Work                        # optional but recommended
@@ -121,7 +121,7 @@ bundle disables.
 
 ```yaml
 channels:
-  united_states_new_york_1:
+  wg_us_new_york_1:
     country: United States
     city: New York
   sweden_1:
@@ -130,12 +130,15 @@ channels:
 ```
 
 **Channel id convention.** Use the same scheme alle applies when it names
-channels itself: **`<country>_<n>`**, or **`<country>_<city>_<n>`** when you
-pin a city — slugged (lowercase, non-alphanumerics → `_`), with `_<n>`
-distinguishing multiple channels in the same location. So `United States` →
-`united_states_1`, `United States` + `New York` → `united_states_new_york_1`,
-a second Sweden channel → `sweden_2`. Any valid slug works, but matching the
-convention keeps hand-written and alle-created channels consistent.
+channels itself: **`<protocol>_<country-code>_<n>`**, or
+**`<protocol>_<country-code>_<city>_<n>`** when you pin a city — `wg` (the
+only protocol alle speaks), the lowercase ISO 3166-1 alpha-2 country code,
+the slugged city, and `_<n>` distinguishing multiple channels in the same
+location. So `United States` → `wg_us_1`, `United States` + `New York` →
+`wg_us_new_york_1`, a second Sweden channel → `wg_se_2`. Config imports
+follow the same shape via their filenames (ProtonVPN's `wg-JP-351.conf` →
+`wg_jp_351`). Any valid slug works, but matching the convention keeps
+hand-written and alle-created channels consistent.
 
 **Finding valid countries and cities.** The `country` and `city` you write
 must match what NordVPN's API knows, so look them up rather than guessing —
@@ -246,7 +249,7 @@ strings (inferred exactly like `alle routes ruleset create`) or explicit
 router:
   rulesets:
     - name: Work traffic
-      target: nordvpn/united_states_new_york_1   # <provider>/<channel-id>, direct, or block
+      target: nordvpn/wg_us_new_york_1   # <provider>/<channel-id>, direct, or block
       matchers:
         - github.com                   # domain -> github.com + *.github.com
         - api.example.com              # domains always cover their subdomains
@@ -275,7 +278,7 @@ providers:
   nordvpn:
     credential: {token: "nordvpn-access-token"}
     channels:
-      united_states_new_york_1: {country: United States, city: New York, label: Work}
+      wg_us_new_york_1: {country: United States, city: New York, label: Work}
       sweden_1: {country: Sweden, label: Default}
   protonvpn:
     channels:
@@ -297,7 +300,7 @@ router:
   killswitch: true
   rulesets:
     - name: Work traffic
-      target: nordvpn/united_states_new_york_1
+      target: nordvpn/wg_us_new_york_1
       matchers: [github.com, api.example.com]
     - name: Streaming via California
       target: protonvpn/wg_us_ca_842

@@ -28,3 +28,21 @@ from alle import geo
 )
 def test_from_filename(stem, expected):
     assert geo.from_filename(stem) == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "code"),
+    [
+        ("United States", "us"),
+        ("Switzerland", "ch"),
+        ("United Kingdom", "gb"),
+        ("South Korea", "kr"),  # via fuzzy search (common short form)
+        ("Czech Republic", "cz"),
+        ("US", "us"),  # already a code
+        ("de", "de"),
+        ("Atlantis", ""),  # unresolvable -> empty, caller falls back
+        ("", ""),
+    ],
+)
+def test_country_code(name, code):
+    assert geo.country_code(name) == code

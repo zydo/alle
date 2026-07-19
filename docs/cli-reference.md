@@ -92,7 +92,7 @@ omit the checkout prefix.
   HTTP+SOCKS proxy on `127.0.0.1:<port>`. Ports are auto-assigned by the OS and
   then stored in `state.json` so they stay stable across restarts and re-imports.
   A channel is identified by its auto-generated **id**, globally unique when
-  provider-qualified (e.g. `nordvpn/united_states_1`) — the permanent handle
+  provider-qualified (e.g. `nordvpn/wg_us_1`) — the permanent handle
   every command, routing rule, and metric uses, and what the `ID` column shows.
   A channel may also carry an optional **label**, a friendly display name
   (`alle channels setlabel`) that is presentation only and never a handle.
@@ -204,7 +204,7 @@ alle channels add nordvpn --country "United States" --city "Seattle"
 
 - `--country` is required; `--city` is optional (omit = any city in the country).
 - Each add resolves a fresh recommended server, so repeating the same location creates
-  a distinct channel: `united_states_1`, `united_states_2`, …
+  a distinct channel: `wg_us_1`, `wg_us_2`, …
 - See selectable locations with [`alle locations`](#alle-locations).
 
 **Config providers** — import a WireGuard `.conf`:
@@ -246,7 +246,7 @@ image; see `docs/docker.md`.)
 List configured channels (static config only — no live status). Columns: `LABEL`,
 `ID`, `PORT`, `COUNTRY`, `CITY`, `STATUS`. `LABEL` is the friendly display name
 (falls back to the id when unset); `ID` is the globally-unique,
-provider-qualified handle (`nordvpn/japan_1`) — the same ref every command
+provider-qualified handle (`nordvpn/wg_jp_1`) — the same ref every command
 accepts, which is why no separate provider column is needed. `STATUS` is the
 administrative `enabled` / `disabled` state (see
 [`alle channels disable`](#alle-channels-enabledisable-channel)), distinct from
@@ -255,7 +255,7 @@ probe liveness — this table stays the same whether alle is up or down.
 ```text
 LABEL           ID                        PORT    COUNTRY        CITY        STATUS
 --------------  ------------------------  ------  -------------  ----------  --------
-Streaming - US  nordvpn/japan_1           :53124  Japan          (Any City)  enabled
+Streaming - US  nordvpn/wg_jp_1           :53124  Japan          (Any City)  enabled
 seattle_1       nordvpn/seattle_1         :53125  United States  Seattle     disabled
 wg_us_ca_842    protonvpn/wg_us_ca_842    :53126  United States  California  enabled
 ```
@@ -278,15 +278,15 @@ relabelling is safe and cascades nowhere. Labels may duplicate and are never
 accepted as a channel ref.
 
 ```bash
-alle channels setlabel united_states_seattle_1 "Streaming - US West"
-alle channels setlabel nordvpn/japan_1 "Test runner"   # qualified ref works too
-alle channels setlabel japan_1                          # omit to clear → shows the id again
+alle channels setlabel wg_us_seattle_1 "Streaming - US West"
+alle channels setlabel nordvpn/wg_jp_1 "Test runner"   # qualified ref works too
+alle channels setlabel wg_jp_1                          # omit to clear → shows the id again
 ```
 
 `<channel>` is a channel id or `provider/id` ref (no globs — a label targets one
 channel). Every channel table (`channels ls`, `test`) shows
 the same `LABEL` + `ID` columns — `LABEL` is the label or the id when unset, `ID`
-is the provider-qualified ref (`nordvpn/japan_1`); `--json` on those carries the
+is the provider-qualified ref (`nordvpn/wg_jp_1`); `--json` on those carries the
 bare `name` (id), `provider`, and `label` separately.
 
 ### `alle channels rm <channel>...`
@@ -294,15 +294,15 @@ bare `name` (id), `provider`, and `label` separately.
 Remove one or more channels (also drops stored metrics).
 
 ```bash
-alle channels rm japan_1 united_states_seattle_1
+alle channels rm wg_jp_1 wg_us_seattle_1
 alle channels rm protonvpn/wg_us_ca_842
-alle channels rm 'united_states_*' --dry-run
-alle channels rm 'united_states_*'
+alle channels rm 'wg_us_*' --dry-run
+alle channels rm 'wg_us_*'
 alle channels rm --provider nordvpn --all
 ```
 
 - Plain channel names are resolved across providers. If the same name exists under
-  multiple providers, use a provider-qualified ref like `nordvpn/japan_1`.
+  multiple providers, use a provider-qualified ref like `nordvpn/wg_jp_1`.
 - Glob patterns (`*`, `?`, `[abc]`) match channel names. Quote patterns in shells so
   the shell does not expand them before `alle` sees them.
 - `--provider <provider>` scopes names, globs, and `--all` to one provider.
@@ -325,11 +325,11 @@ port, no WireGuard endpoint, no handshake or keepalive toward the provider —
 only the ones you want live:
 
 ```bash
-alle channels disable japan_1                    # free its provider slot
-alle channels disable 'united_states_*'          # globs and batches, like rm
+alle channels disable wg_jp_1                    # free its provider slot
+alle channels disable 'wg_us_*'          # globs and batches, like rm
 alle channels disable --provider nordvpn --all
-alle channels enable nordvpn/japan_1             # dial it again
-alle channels disable japan_1 --dry-run          # plan without changing state
+alle channels enable nordvpn/wg_jp_1             # dial it again
+alle channels disable wg_jp_1 --dry-run          # plan without changing state
 ```
 
 - Same ref grammar as `channels rm`: bare ids, `provider/id` refs, globs,
@@ -410,10 +410,10 @@ lands in one transaction and one daemon reconcile:
 | `--all`        | everything — the catch-all for "VPN by default"            |
 
 ```bash
-alle routes ruleset create Streaming --via nordvpn/united_states_1 --domain netflix.com --domain hulu.com
+alle routes ruleset create Streaming --via nordvpn/wg_us_1 --domain netflix.com --domain hulu.com
 alle routes ruleset create LocalDirect --via direct --cidr 192.168.0.0/16
 alle routes ruleset create BlockTrackers --via block --domain tracker.example.com
-alle routes ruleset create DefaultVPN --via nordvpn/japan_1 --all
+alle routes ruleset create DefaultVPN --via nordvpn/wg_jp_1 --all
 ```
 
 Notes:
@@ -454,7 +454,7 @@ against sing-box logs.
 
 ```text
 Router entrypoint 127.0.0.1:54585 — 3 rule(s), LAN bypasses VPN, unmatched → direct
-rs1  Streaming → nordvpn/united_states_1 (2 matcher(s))
+rs1  Streaming → nordvpn/wg_us_1 (2 matcher(s))
   r1  domain_suffix netflix.com
   r2  domain_suffix hulu.com
 rs2  Direct exceptions → direct (1 matcher(s))
@@ -866,7 +866,7 @@ provider-qualified ref commands take.
 ```text
 LABEL         ID                      PORT    COUNTRY        CITY        STATE     LATENCY  IP             SENT      RECV
 ------------  ----------------------  ------  -------------  ----------  --------  -------  -------------  --------  --------
-Test runner   nordvpn/japan_1         :53124  Japan          (Any City)  Healthy   398.0ms  93.118.43.151  104.0 MB  396.7 MB
+Test runner   nordvpn/wg_jp_1         :53124  Japan          (Any City)  Healthy   398.0ms  93.118.43.151  104.0 MB  396.7 MB
 seattle_1     nordvpn/seattle_1       :53125  United States  Seattle     Disabled  -        -              12.5 MB   88.0 MB
 wg_us_ca_842  protonvpn/wg_us_ca_842  :53126  United States  California  Timeout   -        -              28.1 MB   141.8 MB
 ```

@@ -54,7 +54,7 @@ def test_channel_round_trips_through_disk():
     store = Store.load()
     store.add_provider("nordvpn")
     ch = store.add_channel("nordvpn", "United States", "San Francisco", dict(WG))
-    assert ch.id == "united_states_san_francisco_1"
+    assert ch.id == "wg_us_san_francisco_1"
 
     got = Store.load().get_channel("nordvpn", ch.id)
     assert got is not None
@@ -80,16 +80,16 @@ def test_direct_channel_lookups_construct_only_requested_scope(monkeypatch):
 
     monkeypatch.setattr(state, "_channel_view", counted)
     assert [channel.id for channel in store.provider_channels("nordvpn")] == [
-        "ca_1",
-        "us_1",
+        "wg_ca_1",
+        "wg_us_1",
     ]
-    assert constructed == [("nordvpn", "ca_1"), ("nordvpn", "us_1")]
+    assert constructed == [("nordvpn", "wg_ca_1"), ("nordvpn", "wg_us_1")]
     constructed.clear()
-    ch = store.get_channel("nordvpn", "us_1")
+    ch = store.get_channel("nordvpn", "wg_us_1")
     assert ch is not None and ch.provider == "nordvpn"
-    assert constructed == [("nordvpn", "us_1")]
+    assert constructed == [("nordvpn", "wg_us_1")]
     constructed.clear()
-    assert store.get_channel("missing", "us_1") is None
+    assert store.get_channel("missing", "wg_us_1") is None
     assert constructed == []
 
 
@@ -124,7 +124,7 @@ def test_channel_write_returns_the_committed_object_if_removed_before_refresh(
     writer = threading.Thread(target=write)
     writer.start()
     assert entered.wait(2)
-    cid = "fixed" if upsert else "us_1"
+    cid = "fixed" if upsert else "wg_us_1"
     with state.transaction() as data:
         del data["providers"]["nordvpn"]["channels"][cid]
     pause["enabled"] = False
@@ -144,10 +144,10 @@ def test_auto_naming_numbers_within_provider():
     b = store.add_channel("nordvpn", "United States", "San Francisco", dict(WG))
     c = store.add_channel("nordvpn", "United States", "", dict(WG))
     assert [a.id, b.id] == [
-        "united_states_san_francisco_1",
-        "united_states_san_francisco_2",
+        "wg_us_san_francisco_1",
+        "wg_us_san_francisco_2",
     ]
-    assert c.id == "united_states_1"
+    assert c.id == "wg_us_1"
     assert len({a.port, b.port, c.port}) == 3  # each gets its own port
 
 
@@ -157,7 +157,7 @@ def test_same_name_allowed_across_providers():
     store.add_provider("protonvpn")
     n = store.add_channel("nordvpn", "United States", "", dict(WG))
     p = store.add_channel("protonvpn", "United States", "", dict(WG))
-    assert n.id == p.id == "united_states_1"  # ids only need to be unique per provider
+    assert n.id == p.id == "wg_us_1"  # ids only need to be unique per provider
 
 
 def test_remove_channel_keeps_provider():
@@ -282,11 +282,11 @@ def test_tags_are_globally_unique_and_parseable():
     store = Store.load()
     store.add_provider("nordvpn")
     ch = store.add_channel("nordvpn", "United States", "", dict(WG))
-    assert ch.inbound_tag == "in-nordvpn-united_states_1"
-    assert ch.outbound_tag == "out-nordvpn-united_states_1"
+    assert ch.inbound_tag == "in-nordvpn-wg_us_1"
+    assert ch.outbound_tag == "out-nordvpn-wg_us_1"
     from alle.state import tag_to_ref
 
-    assert tag_to_ref(ch.inbound_tag) == ("nordvpn", "united_states_1")
+    assert tag_to_ref(ch.inbound_tag) == ("nordvpn", "wg_us_1")
     assert tag_to_ref("direct") is None
 
 
@@ -334,7 +334,7 @@ def test_malformed_container_schema_is_quarantined():
         {"version": 1, "providers": {"nordvpn": {"channels": None}}},
         {
             "version": 1,
-            "providers": {"nordvpn": {"channels": {"us_1": {"wg": []}}}},
+            "providers": {"nordvpn": {"channels": {"wg_us_1": {"wg": []}}}},
         },
         {"version": 1, "providers": {}, "router": None},
         {"version": 1, "providers": {}, "router": {"rules": None}},
@@ -628,7 +628,7 @@ def test_rules_get_stable_sequential_ids():
     store = Store.load()
     store.add_provider("nordvpn")
     store.add_channel("nordvpn", "US", "", dict(WG))
-    a = _rule(store, "domain_suffix", "netflix.com", "nordvpn/us_1")
+    a = _rule(store, "domain_suffix", "netflix.com", "nordvpn/wg_us_1")
     b = _rule(store, "ip_cidr", "10.0.0.0/8", "direct")
     assert [a["id"], b["id"]] == ["r1", "r2"]
     store.remove_rules(["r1"])
@@ -663,8 +663,8 @@ def test_legacy_exact_domain_rule_reads_as_suffix():
 def test_rule_channel_target_must_exist():
     store = Store.load()
     store.add_provider("nordvpn")
-    with pytest.raises(ValueError, match="no channel 'nordvpn/us_1'"):
-        _rule(store, "domain_suffix", "a.com", "nordvpn/us_1")
+    with pytest.raises(ValueError, match="no channel 'nordvpn/wg_us_1'"):
+        _rule(store, "domain_suffix", "a.com", "nordvpn/wg_us_1")
     # direct/block targets need no channel
     assert _rule(store, "domain_suffix", "a.com", "direct")["id"] == "r1"
 
@@ -733,7 +733,7 @@ def test_config_signature_tracks_router_changes():
     store.add_provider("nordvpn")
     store.add_channel("nordvpn", "US", "", dict(WG))
     before = config_signature(_read_raw())
-    _rule(store, "domain_suffix", "a.com", "nordvpn/us_1")
+    _rule(store, "domain_suffix", "a.com", "nordvpn/wg_us_1")
     after_rule = config_signature(_read_raw())
     assert after_rule != before  # rule edits reconcile like channel edits
     store.set_killswitch(True)
@@ -770,3 +770,18 @@ def test_config_signature_ignores_probe_results():
 
     store.add_channel("nordvpn", "UK", "", dict(WG))
     assert config_signature(_read_raw()) != before  # a new channel does
+
+
+def test_channel_id_standard_protocol_country_code_shape():
+    """The channel-id standard: wg_<alpha2>[_<city>]_<n>, ISO-coded country,
+    full-name fallback when no code resolves, config imports untouched."""
+    from alle.state import _next_id
+
+    assert _next_id(set(), "United States", "San Francisco") == "wg_us_san_francisco_1"
+    assert _next_id(set(), "Switzerland", "") == "wg_ch_1"
+    assert _next_id({"wg_ch_1"}, "Switzerland", "") == "wg_ch_2"
+    assert _next_id(set(), "United Kingdom", "London") == "wg_gb_london_1"
+    assert _next_id(set(), "Atlantis", "") == "wg_atlantis_1"  # no ISO code
+    assert _next_id(set(), "", "") == "channel_1"
+    # config imports keep the filename-derived id (already the standard shape)
+    assert _next_id(set(), "", "", id_hint="wg-JP-351") == "wg_jp_351_1"

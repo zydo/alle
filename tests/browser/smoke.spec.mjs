@@ -3,8 +3,8 @@
 // stream framing, bundle round-trip) — no route mocking, no component stubs.
 import { test, expect } from "./support/fixtures.mjs";
 
-const US = '.row.dashchan.body[data-id="united_states_new_york_1"]';
-const DE = '.row.dashchan.body[data-id="germany_1"]';
+const US = '.row.dashchan.body[data-id="wg_us_new_york_1"]';
+const DE = '.row.dashchan.body[data-id="wg_de_1"]';
 
 test("login: single-use token exchanges for a session; reuse is refused", async ({
   page,
@@ -83,12 +83,12 @@ test("channel disable/enable round-trips through state", async ({ app, evidence 
   );
   // the untargeted channel round-trips
   await page.locator(`${DE} [data-toggle]`).click();
-  await expect(page.locator("#toasts")).toContainText("Disabled germany_1");
+  await expect(page.locator("#toasts")).toContainText("Disabled wg_de_1");
   await expect(page.locator(DE)).toHaveClass(/chan-off/, { timeout: 10_000 });
   await expect(page.locator(`${DE} .chan-state`)).toHaveText("Disabled");
   // a disabled row keeps its Enable control; flip it back
   await page.locator(`${DE} [data-toggle]`).click();
-  await expect(page.locator("#toasts")).toContainText("Enabled germany_1");
+  await expect(page.locator("#toasts")).toContainText("Enabled wg_de_1");
   await expect(page.locator(DE)).not.toHaveClass(/chan-off/, { timeout: 10_000 });
 });
 
@@ -240,10 +240,10 @@ test("ruleset via-chips resolve and track channel labels", async ({ app }) => {
     .locator(".rule-via .vch");
   // resolved to the channel's display name (not the raw provider/id ref),
   // including on a fresh load where routes may render before the first status
-  await expect(viaChip).toHaveText("united_states_new_york_1");
+  await expect(viaChip).toHaveText("wg_us_new_york_1");
   // rename the channel: the via chip must follow without a manual refresh
   await page
-    .locator('.row.dashchan.body[data-id="united_states_new_york_1"] .name.edit')
+    .locator('.row.dashchan.body[data-id="wg_us_new_york_1"] .name.edit')
     .click();
   await page.locator("input.relabel").fill("NYC");
   await page.keyboard.press("Enter");
