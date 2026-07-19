@@ -65,3 +65,28 @@ out** button revokes every session immediately.
 
 The session and cookie design — why the random hostname exists, CSRF
 defenses, revocation — is documented in [security.md](security.md).
+
+## How the UI is tested
+
+Two CI layers guard the Web UI:
+
+- **Static + protocol checks** (`npm run check:web`): JS syntax/import
+  resolution, forbidden-sink lint, and Node-level tests of the NDJSON
+  speed-stream framing.
+- **Real-browser smoke** (`npm run test:browser`, Playwright/Chromium): the
+  actual stdlib server and assets, driven in a real browser against a
+  synthetic fixture daemon (`tests/browser/fixture_server.py` — deterministic
+  state, no network, no credentials, `service.test` canned). It covers the
+  login token exchange, the status poll and offline recovery, channel
+  enable/disable, ruleset reorder staging/apply, dialog cancellation, the
+  Logs page's poll lifecycle, bundle validate/import round-trips, and the
+  incremental speed-row stream. Every test also fails on any browser console
+  error, uncaught promise rejection, or CSP violation, and dedicated specs
+  run axe (WCAG A/AA, with color-contrast as a documented, deliberate
+  exception pending a design pass) plus keyboard-only traversals. Lifetime
+  acceptance tests pin the async rules: an unmounted page's in-flight
+  requests are aborted and produce no stale DOM, toast, or handler effects,
+  and every mutation control is single-flight (a double-click sends exactly
+  one request).
+
+Run locally: `npm ci && npx playwright install chromium && npm run test:browser`.

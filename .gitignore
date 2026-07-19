@@ -16,3 +16,7 @@ htmlcov/
 .tun-sandbox-cache/
 # Local-only notes (roadmaps, scratch) — never committed
 .localonly/
+# Browser test harness (Playwright)
+node_modules/
+test-results/
+playwright-report/

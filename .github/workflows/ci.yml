@@ -114,6 +114,31 @@ jobs:
             uv run pytest -q
           fi
 
+  # Real-browser smoke over the Web UI: the actual stdlib server + assets in
+  # Chromium, with a synthetic fixture daemon (no network, no credentials).
+  # Fails on any console error, uncaught rejection, CSP violation, or axe
+  # (WCAG A/AA, sans the documented color-contrast exception) regression —
+  # runtime evidence the DOM-level check:web job cannot produce.
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          cache-suffix: browser-py3.14
+      - run: uv lock --check
+      - run: uv sync --locked --all-extras
+      - run: npm ci
+      - name: Install the pinned Chromium (Playwright-managed)
+        run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
+
   # macOS is the primary desktop target: launchd daemonctl, the privileged
   # helper's install machinery, and the `ps` fallbacks only exercise their
   # real platform branches here. One job on the newest Python — the version

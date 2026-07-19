@@ -25,7 +25,7 @@ const SHELL = `
           <span class="entry-bead" id="tun-bead" aria-hidden="true"></span>
           <span class="entry-label">TUN</span>
           <span class="tun-pop" id="tun-note" role="tooltip"></span>
-          <span class="toggle" id="tun-toggle" role="button" tabindex="0" aria-label="Toggle system-wide TUN mode" aria-describedby="tun-note"><span class="toggle-knob"></span></span>
+          <button type="button" class="toggle" id="tun-toggle" aria-label="Toggle system-wide TUN mode" aria-describedby="tun-note"><span class="toggle-knob"></span></button>
         </span>
       </div>
     </section>
@@ -68,7 +68,7 @@ export function mount(view, ctx) {
     probeAll: null, speedAll: null,
   };
   el.tunToggle.onclick = toggleTun;
-  el.tunToggle.onkeydown = activateOnKey;
+  el.entry.addEventListener("keydown", activateOnKey);
   view.addEventListener("click", (e) => {
     const t = e.target.closest("[data-copy]");
     if (t?.dataset.copy) { copy(t.dataset.copy); e.stopPropagation(); }
@@ -90,6 +90,28 @@ function activateOnKey(event) {
   if ((event.key === "Enter" || event.key === " ") && event.target.matches('[role="button"]')) {
     event.preventDefault();
     event.target.click();
+  }
+}
+
+// Capture the mount identity at call time: an async continuation runs its
+// effects only while its own mount is still the live one. Every await in this
+// module is followed by an active() check (and every request carries the
+// mount's abort signal), so an unmount both cancels what it can and defuses
+// what it cannot.
+function mountGuard() {
+  const owned = lifetime;
+  return () => owned !== null && owned === lifetime && owned.active();
+}
+
+// One in-flight run per mutation key: re-entry (double-click, repeated Enter)
+// returns instead of firing a second request.
+async function singleFlight(key, run) {
+  if (busy.has(key)) return;
+  busy.add(key);
+  try {
+    await run();
+  } finally {
+    busy.delete(key);
   }
 }
 
@@ -119,11 +141,17 @@ function renderEntry(s) {
     addr.dataset.copy = `http://127.0.0.1:${r.port}`;
     addr.classList.add("copyable");
     addr.title = "Click to copy";
+    addr.setAttribute("role", "button");
+    addr.setAttribute("tabindex", "0");
+    addr.setAttribute("aria-label", `Copy router entrypoint http://127.0.0.1:${r.port}`);
   } else {
     el.entryAddr.textContent = "(assigned on next start)";
     delete addr.dataset.copy;
     addr.classList.remove("copyable");
     addr.title = "";
+    addr.removeAttribute("role");
+    addr.removeAttribute("tabindex");
+    addr.removeAttribute("aria-label");
   }
   renderTun(r);
 }
@@ -145,17 +173,21 @@ function renderTun(r) {
 }
 
 async function toggleTun() {
-  const enabled = !status?.router?.tun;
-  const res = await api.post("/api/v1/tun", { enabled });
-  if (!res.ok) { toast(res.error, "err"); return; }
-  if (status) status.router = res.data.router || status.router;
-  router = res.data.router || router;
-  renderEntry(status);
-  renderRoutes();
-  refreshStatus();
-  toast(enabled
-    ? "TUN mode on — all system traffic now follows the routing rules."
-    : "TUN mode off — only traffic pointed at the proxy ports is routed.");
+  await singleFlight("tun", async () => {
+    const active = mountGuard();
+    const enabled = !status?.router?.tun;
+    const res = await api.post("/api/v1/tun", { enabled }, { signal: lifetime?.signal });
+    if (res.aborted || !active()) return;
+    if (!res.ok) { toast(res.error, "err"); return; }
+    if (status) status.router = res.data.router || status.router;
+    router = res.data.router || router;
+    renderEntry(status);
+    renderRoutes();
+    refreshStatus();
+    toast(enabled
+      ? "TUN mode on — all system traffic now follows the routing rules."
+      : "TUN mode off — only traffic pointed at the proxy ports is routed.");
+  });
 }
 
 async function copy(text) {
@@ -226,7 +258,7 @@ function buildIpCell(off, m, c, st, shortSt) {
     return `<span class="ip chan-state muted" title="Disabled — not connected to the provider (no connection slot used)">Disabled</span>`;
   }
   if (m.ip) {
-    return `<span class="ip copyable" data-copy="${esc(m.ip)}" title="Click to copy">${esc(m.ip)}</span>`;
+    return `<span class="ip copyable" data-copy="${esc(m.ip)}" title="Click to copy" role="button" tabindex="0" aria-label="Copy exit IP ${esc(m.ip)}">${esc(m.ip)}</span>`;
   }
   if (showState) {
     const probeDetail = c.probe?.detail;
@@ -267,7 +299,7 @@ function chanRow(c) {
     <span class="chan-label"><button class="name edit" data-label="${esc(c.label || "")}" title="Rename">${esc(c.label || c.name)}</button>
       <div class="ref">${esc(key)}</div></span>
     <span class="loc" title="${esc(loc(c))}">${esc(loc(c))}</span>
-    <span class="port copyable" data-copy="${portCopy}" title="Click to copy">${esc(c.port)}</span>
+    <span class="port copyable" data-copy="${portCopy}" title="Click to copy" role="button" tabindex="0" aria-label="Copy proxy address ${portCopy}">${esc(c.port)}</span>
     ${ipCell}
     <span class="lat">${latText}</span>
     <span class="mono">${sentText}</span>
@@ -284,6 +316,7 @@ function chanRow(c) {
 }
 
 function renderChannels() {
+  if (!el.channels) return; // a stale continuation after unmount renders nothing
   const chans = status?.channels || [];
   const addRow = `<div class="row dashchan add" data-add-channel role="button" tabindex="0"><span class="add-cell" aria-hidden="true">＋</span><span class="add-label">Add Channel</span></div>`;
   let grid = el.channels.querySelector(".grid");
@@ -341,10 +374,12 @@ function applyMeasurement(row) {
 }
 
 async function runProbe(channel) {
+  const active = mountGuard();
   const res = await api.post("/api/v1/test", {
     speed: false,
     channel: channel ? chanKey(channel) : null,
-  });
+  }, { signal: lifetime?.signal });
+  if (res.aborted || !active()) return;
   if (!res.ok) { toast(res.error, "err"); return; }
   // Test rows carry fresh probes and cumulative traffic totals; disabled rows
   // deliberately clear any prior measurement instead of reviving stale cells.
@@ -359,6 +394,11 @@ async function runTest(channel, speed) {
     toast("No enabled channels to test.", "warn");
     return;
   }
+  // Re-entry guard ahead of beginTest: the disabled-button rendering usually
+  // absorbs a double-click, but the busy set is the contract, not the DOM.
+  const key = channel ? chanKey(channel) : "all";
+  if (channel ? chanBusy(key) : busy.has("all:probe") || busy.has("all:speed")) return;
+  const active = mountGuard();
   const testState = beginTest(channel, speed);
   try {
     if (speed) {
@@ -368,7 +408,9 @@ async function runTest(channel, speed) {
       await runProbe(channel);
     }
   } finally {
-    finishTest(testState);
+    // On unmount the busy set was reset wholesale; only a still-live mount
+    // should re-render out of this run's cleanup.
+    if (active()) finishTest(testState);
   }
 }
 
@@ -376,9 +418,11 @@ async function runTest(channel, speed) {
 // each row's IP/latency/download/upload fills in live instead of all at once at
 // the end. Probe-all stays on the single-shot api.post path above.
 async function runSpeedStream(channel) {
+  const active = mountGuard();
   const res = await startSpeedStream(channel);
   if (!res) return;                 // network/401/non-stream error already toasted
   if (await consumeSpeedStream(res.body)) return;  // mid-stream error already toasted
+  if (!active()) return;            // unmounted mid-stream: no stale toast/refresh
   toast("Speed Test Complete.");
   refreshStatus();
 }
@@ -393,6 +437,7 @@ async function startSpeedStream(channel) {
       signal: lifetime?.signal,
     });
   } catch (err) {
+    if (err?.name === "AbortError") return null; // unmount cancelled the stream
     toast(`Can't reach the daemon: ${err instanceof Error ? err.message : String(err)}`, "err");
     return null;
   }
@@ -412,15 +457,19 @@ async function streamErrorMsg(res) {
 // Read the NDJSON body line by line, applying each row as it lands. Returns true
 // if an error event was seen (so the caller skips the success toast/refresh).
 async function consumeSpeedStream(body) {
+  const active = mountGuard();
   try {
     const terminal = await parseSpeedStream(body, applySpeedRow);
     if (terminal.type === "error") {
-      toast(terminal.data.error || "Speed test failed.", "err");
+      if (active()) toast(terminal.data.error || "Speed test failed.", "err");
       return true;
     }
     return false;
   } catch (err) {
-    toast(`Speed test interrupted: ${err.message || err}`, "err");
+    // an unmount aborts the fetch mid-body: expected teardown, not an error
+    if (err?.name !== "AbortError" && active()) {
+      toast(`Speed test interrupted: ${err.message || err}`, "err");
+    }
     return true;
   }
 }
@@ -488,23 +537,36 @@ async function onChannelClick(e) {
 }
 
 async function toggleChannel(c) {
-  const enable = c.enabled === false;
-  const res = await api.post(`/api/v1/channels/${c.provider}/${c.name}/enabled`, { enabled: enable });
-  if (res.ok) {
-    measured.delete(chanKey(c)); // stale probe/speed cells make no sense across the flip
-    toast(`${enable ? "Enabled" : "Disabled"} ${c.name}.`);
-    refreshStatus();
-  } else {
-    // A refused disable lists the routing rules that still target the channel.
-    toast(res.error, "err");
-  }
+  await singleFlight(`${chanKey(c)}:flip`, async () => {
+    const active = mountGuard();
+    const enable = c.enabled === false;
+    const res = await api.post(
+      `/api/v1/channels/${c.provider}/${c.name}/enabled`,
+      { enabled: enable },
+      { signal: lifetime?.signal },
+    );
+    if (res.aborted || !active()) return;
+    if (res.ok) {
+      measured.delete(chanKey(c)); // stale probe/speed cells make no sense across the flip
+      toast(`${enable ? "Enabled" : "Disabled"} ${c.name}.`);
+      refreshStatus();
+    } else {
+      // A refused disable lists the routing rules that still target the channel.
+      toast(res.error, "err");
+    }
+  });
 }
 
 async function removeChannel(c) {
-  if (!(await confirmDialog("Remove channel", `Remove ${c.provider}/${c.name}?`, { confirmText: "Remove", danger: true }))) return;
-  const res = await api.del(`/api/v1/channels/${c.provider}/${c.name}`);
-  if (res.ok) { measured.delete(chanKey(c)); toast(`Removed ${c.name}.`); refreshStatus(); }
-  else toast(res.error, "err");
+  await singleFlight(`${chanKey(c)}:rm`, async () => {
+    const active = mountGuard();
+    if (!(await confirmDialog("Remove channel", `Remove ${c.provider}/${c.name}?`, { confirmText: "Remove", danger: true }))) return;
+    if (!active()) return;
+    const res = await api.del(`/api/v1/channels/${c.provider}/${c.name}`, { signal: lifetime?.signal });
+    if (res.aborted || !active()) return;
+    if (res.ok) { measured.delete(chanKey(c)); toast(`Removed ${c.name}.`); refreshStatus(); }
+    else toast(res.error, "err");
+  });
 }
 
 function startRelabel(rowEl, c, current) {
@@ -520,8 +582,10 @@ function startRelabel(rowEl, c, current) {
     }
     done = true;
     paused = false;
+    const active = mountGuard();
     if (save) {
-      const res = await api.post(`/api/v1/channels/${c.provider}/${c.name}/label`, { label: input.value.trim() });
+      const res = await api.post(`/api/v1/channels/${c.provider}/${c.name}/label`, { label: input.value.trim() }, { signal: lifetime?.signal });
+      if (res.aborted || !active()) return;
       if (res.ok) toast(input.value.trim() ? "Label updated." : "Label cleared."); else toast(res.error, "err");
     }
     refreshStatus();
@@ -594,6 +658,7 @@ function rulesetBar(rs, index) {
 }
 
 function renderRoutes() {
+  if (!el.routes) return; // a stale continuation after unmount renders nothing
   const list = orderedRulesets();
   const lanOn = router?.lan_direct !== false;
   const lanBar = `<div class="rule-row lan${lanOn ? "" : " off"}">
@@ -635,11 +700,16 @@ async function onRouteClick(e) {
   if (editId) { openEditRuleset(editId); return; }
   const removeId = e.target.closest("[data-id-remove]")?.dataset.idRemove;
   if (!removeId) return;
-  const rs = rulesets.find((r) => r.id === removeId);
-  const name = rs ? rulesetDisplayName(rs) : removeId;
-  if (!(await confirmDialog("Remove ruleset", `Remove the ruleset "${name}"?`, { confirmText: "Remove", danger: true }))) return;
-  const res = await api.del(`/api/v1/routes/rulesets/${encodeURIComponent(removeId)}`);
-  if (res.ok) { toast(`Removed ${name}.`); refreshRoutes(); refreshStatus(); } else toast(res.error, "err");
+  await singleFlight(`ruleset:${removeId}:rm`, async () => {
+    const active = mountGuard();
+    const rs = rulesets.find((r) => r.id === removeId);
+    const name = rs ? rulesetDisplayName(rs) : removeId;
+    if (!(await confirmDialog("Remove ruleset", `Remove the ruleset "${name}"?`, { confirmText: "Remove", danger: true }))) return;
+    if (!active()) return;
+    const res = await api.del(`/api/v1/routes/rulesets/${encodeURIComponent(removeId)}`, { signal: lifetime?.signal });
+    if (res.aborted || !active()) return;
+    if (res.ok) { toast(`Removed ${name}.`); refreshRoutes(); refreshStatus(); } else toast(res.error, "err");
+  });
 }
 
 function moveRuleset(id, direction) {
@@ -703,18 +773,22 @@ function stageDraggedOrder() {
 }
 
 async function applyReorder() {
-  if (!pendingIds) return;
-  const btn = el.routes.querySelector("#dash-reorder-apply");
-  if (btn) { btn.disabled = true; btn.textContent = "Applying…"; }
-  const res = await api.post("/api/v1/routes/reorder", { ids: pendingIds });
-  if (!res.ok) {
-    toast(res.error, "err");
-    if (btn) { btn.disabled = false; btn.textContent = "Apply new order"; }
-    return;
-  }
-  toast("Order applied.");
-  await refreshRoutes();
-  refreshStatus();
+  await singleFlight("reorder", async () => {
+    if (!pendingIds) return;
+    const active = mountGuard();
+    const btn = el.routes.querySelector("#dash-reorder-apply");
+    if (btn) { btn.disabled = true; btn.textContent = "Applying…"; }
+    const res = await api.post("/api/v1/routes/reorder", { ids: pendingIds }, { signal: lifetime?.signal });
+    if (res.aborted || !active()) return;
+    if (!res.ok) {
+      toast(res.error, "err");
+      if (btn) { btn.disabled = false; btn.textContent = "Apply new order"; }
+      return;
+    }
+    toast("Order applied.");
+    await refreshRoutes();
+    if (active()) refreshStatus();
+  });
 }
 
 function cancelReorder() {
@@ -723,22 +797,30 @@ function cancelReorder() {
 }
 
 async function toggleLanDirect(enabled) {
-  const res = await api.post("/api/v1/routes/lan", { enabled });
-  if (!res.ok) { toast(res.error, "err"); renderRoutes(); return; }
-  router = res.data.router || router;
-  renderRoutes();
-  refreshStatus();
-  toast(enabled ? "LAN direct on — local traffic bypasses the rules." : "LAN direct off — local traffic follows your rules.");
+  await singleFlight("lan", async () => {
+    const active = mountGuard();
+    const res = await api.post("/api/v1/routes/lan", { enabled }, { signal: lifetime?.signal });
+    if (res.aborted || !active()) return;
+    if (!res.ok) { toast(res.error, "err"); renderRoutes(); return; }
+    router = res.data.router || router;
+    renderRoutes();
+    refreshStatus();
+    toast(enabled ? "LAN direct on — local traffic bypasses the rules." : "LAN direct off — local traffic follows your rules.");
+  });
 }
 
 async function toggleKillswitch(e) {
-  const enabled = e.target.checked;
-  const res = await api.post("/api/v1/routes/killswitch", { enabled });
-  if (!res.ok) { toast(res.error, "err"); renderRoutes(); return; }
-  router = res.data.router || router;
-  renderRoutes();
-  refreshStatus();
-  toast(enabled ? "Non-VPN traffic is now blocked." : "Non-VPN traffic is now allowed.");
+  await singleFlight("killswitch", async () => {
+    const active = mountGuard();
+    const enabled = e.target.checked;
+    const res = await api.post("/api/v1/routes/killswitch", { enabled }, { signal: lifetime?.signal });
+    if (res.aborted || !active()) return;
+    if (!res.ok) { toast(res.error, "err"); renderRoutes(); return; }
+    router = res.data.router || router;
+    renderRoutes();
+    refreshStatus();
+    toast(enabled ? "Non-VPN traffic is now blocked." : "Non-VPN traffic is now allowed.");
+  });
 }
 
 async function ensureCatalog() {
@@ -839,8 +921,14 @@ async function openAddChannel() {
       const input = wiz.querySelector('[name="token"]');
       const token = input.value.trim();
       if (!token) { err.textContent = "Enter a token."; return; }
-      const res = await api.post(`/api/v1/providers/${p.provider}/token`, { creds: { token } });
+      const btn = wiz.querySelector('button[type="submit"]');
+      if (btn.disabled) return;
+      btn.disabled = true;
+      const active = mountGuard();
+      const res = await api.post(`/api/v1/providers/${p.provider}/token`, { creds: { token } }, { signal: lifetime?.signal });
       input.value = "";  // never keep the token in the DOM after submit
+      if (res.aborted || !active()) return;
+      btn.disabled = false;
       if (!res.ok) { err.textContent = res.error; return; }
       if (res.data?.unchanged) toast(`${res.data.display_name} already has that token.`, "warn");
       else toast(tokenReplaceToast(res.data));
@@ -886,7 +974,13 @@ async function openAddChannel() {
       const p = catalog.find((x) => x.provider === sel.value);
       const body = { provider: p.provider, creds: {} };
       if (p.kind !== "config") p.fields.forEach((f) => { body.creds[f.key] = wiz.querySelector(`[name="${f.key}"]`).value.trim(); });
-      const res = await api.post("/api/v1/providers", body);
+      const btn = wiz.querySelector('button[type="submit"]');
+      if (btn.disabled) return;
+      btn.disabled = true;
+      const active = mountGuard();
+      const res = await api.post("/api/v1/providers", body, { signal: lifetime?.signal });
+      if (res.aborted || !active()) return;
+      btn.disabled = false;
       if (!res.ok) { err.textContent = res.error; return; }
       toast(`Added ${res.data.display_name || p.display_name}.`);
       st.provider = p.provider;
@@ -917,8 +1011,14 @@ async function openAddChannel() {
       const err = wiz.querySelector("#cerr"); err.textContent = "";
       const file = conf.files[0];
       if (!file) { err.textContent = "Choose a .conf file."; return; }
+      const btn = wiz.querySelector('button[type="submit"]');
+      if (btn.disabled) return;
+      btn.disabled = true;
+      const active = mountGuard();
       const body = { provider: st.provider, label: wiz.querySelector("#label").value.trim(), conf_name: file.name, conf_text: await file.text() };
-      const res = await api.post("/api/v1/channels", body);
+      const res = await api.post("/api/v1/channels", body, { signal: lifetime?.signal });
+      if (res.aborted || !active()) return;
+      btn.disabled = false;
       if (!res.ok) { err.textContent = res.error; return; }
       const name = res.data?.channel?.label || res.data?.channel?.id || "channel";
       m.close();
@@ -999,7 +1099,13 @@ async function openAddChannel() {
       e.preventDefault();
       const err = wiz.querySelector("#lerr"); err.textContent = "";
       const body = { provider: st.provider, country: st.country, city: st.city, label: wiz.querySelector("#label").value.trim() };
-      const res = await api.post("/api/v1/channels", body);
+      const btn = wiz.querySelector('button[type="submit"]');
+      if (btn.disabled) return;
+      btn.disabled = true;
+      const active = mountGuard();
+      const res = await api.post("/api/v1/channels", body, { signal: lifetime?.signal });
+      if (res.aborted || !active()) return;
+      btn.disabled = false;
       if (!res.ok) { err.textContent = res.error; return; }
       m.close(); toast(`Added ${body.label || res.data?.channel?.id || "channel"}.`); refreshStatus();
     };
@@ -1084,8 +1190,11 @@ function openEditRuleset(rulesetId) {
     if (!matchers.length) { err.textContent = "Add at least one matcher."; return; }
     const target = m.root.querySelector("#target").value;
     const btn = m.root.querySelector('button[type="submit"]');
+    if (btn.disabled) return;
     btn.disabled = true; btn.textContent = "Saving…";
-    const res = await api.post(`/api/v1/routes/rulesets/${encodeURIComponent(rulesetId)}/update`, { name, target, matchers });
+    const active = mountGuard();
+    const res = await api.post(`/api/v1/routes/rulesets/${encodeURIComponent(rulesetId)}/update`, { name, target, matchers }, { signal: lifetime?.signal });
+    if (res.aborted || !active()) return;
     if (!res.ok) { err.textContent = res.error; btn.disabled = false; btn.textContent = "Save"; return; }
     m.close(); toast(`Saved ${name}.`); refreshRoutes(); refreshStatus();
   };
@@ -1108,8 +1217,13 @@ function openAddRule() {
     const matchers = matcherEntries(m.root);
     if (!matchers.length) { err.textContent = "Add at least one matcher."; return; }
     const target = m.root.querySelector("#target").value;
-    const res = await api.post("/api/v1/routes/rulesets", { name, target, matchers });
-    if (!res.ok) { err.textContent = res.error; return; }
+    const btn = m.root.querySelector('button[type="submit"]');
+    if (btn.disabled) return;
+    btn.disabled = true; btn.textContent = "Creating…";
+    const active = mountGuard();
+    const res = await api.post("/api/v1/routes/rulesets", { name, target, matchers }, { signal: lifetime?.signal });
+    if (res.aborted || !active()) return;
+    if (!res.ok) { err.textContent = res.error; btn.disabled = false; btn.textContent = "Create ruleset"; return; }
     m.close(); toast(`Created ${res.data.ruleset.name}.`); refreshRoutes(); refreshStatus();
   };
   m.root.querySelector("#name").focus();

@@ -3,6 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check:web": "node scripts/check-web-assets.mjs && node --test tests/web_protocol.test.mjs"
+    "check:web": "node scripts/check-web-assets.mjs && node --test tests/web_protocol.test.mjs",
+    "test:browser": "playwright test"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
+    "@playwright/test": "^1.61.1"
   }
 }
