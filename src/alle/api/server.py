@@ -132,6 +132,7 @@ def _api_route_methods(seg: list[str]) -> set[str] | None:
         ("channels", "remove"): {"POST"},
         ("routes",): {"GET"},
         ("routes", "rulesets"): {"POST"},
+        ("routes", "move"): {"POST"},
         ("routes", "reorder"): {"POST"},
         ("routes", "killswitch"): {"POST"},
         ("routes", "lan"): {"POST"},
@@ -143,6 +144,8 @@ def _api_route_methods(seg: list[str]) -> set[str] | None:
         ("upgrade",): {"POST"},
         ("upgrade", "check"): {"GET"},
         ("export",): {"GET"},
+        ("backup",): {"GET", "POST"},
+        ("backup", "now"): {"POST"},
         ("import",): {"POST"},
         ("validate",): {"POST"},
         ("login",): {"POST"},
@@ -199,6 +202,7 @@ _API_RESOURCE_METHODS = {
     "tun": {"POST"},
     "upgrade": {"GET", "POST"},
     "export": {"GET"},
+    "backup": {"GET", "POST"},
     "validate": {"POST"},
     "import": {"POST"},
     "login": {"POST"},
@@ -1269,6 +1273,7 @@ class _Handler(BaseHTTPRequestHandler):
             # Python managers) is contacted because the user clicked, never on
             # a timer. Refusal channels surface through the usual 400 mapping.
             ("upgrade", "check"): service.upgrade_check,
+            ("backup",): service.backup_status,
         }
         fn = routes_.get(tuple(seg))
         if fn is None:
@@ -1497,6 +1502,13 @@ class _Handler(BaseHTTPRequestHandler):
             return self._call(
                 service.routes_ruleset_remove, seg[2], dry_run=self._dry_run()
             )
+        if method == "POST" and seg == ["routes", "move"]:
+            _fields(body, "ids", "ruleset")
+            return self._call(
+                service.routes_move,
+                _str_list_field(body, "ids", required=True),
+                _str_field(body, "ruleset"),
+            )
         if method == "POST" and seg == ["routes", "reorder"]:
             _fields(body, "ids", "flat")
             return self._call(
@@ -1557,6 +1569,21 @@ class _Handler(BaseHTTPRequestHandler):
                     result = self._call(service.upgrade_run)
                     self._flush_upgrade_response()
                     return result
+        if method == "POST" and seg == ["backup"]:
+            _fields(body, "enabled", "dir", "every_hours", "keep")
+            # raw values on purpose: the service enforces strict types (a
+            # coerced string must never toggle a credential-writing schedule)
+            return self._call(
+                lambda: service.backup_configure(
+                    enabled=body.get("enabled"),
+                    directory=body.get("dir"),
+                    every_hours=body.get("every_hours"),
+                    keep=body.get("keep"),
+                )
+            )
+        if method == "POST" and seg == ["backup", "now"]:
+            _fields(body)
+            return self._call(service.backup_now)
         if method == "POST" and seg == ["lifecycle", "start"]:
             _fields(body)
             return self._call(service.start)

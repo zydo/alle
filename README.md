@@ -5,6 +5,7 @@
 <p align="center">
   <a href="https://github.com/zydo/alle/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/zydo/alle/ci.yml?branch=main&amp;label=CI" alt="CI"></a>
   <a href="https://pypi.org/project/alle-proxy/"><img src="https://img.shields.io/pypi/v/alle-proxy.svg?label=PyPI" alt="PyPI"></a>
+  <a href="https://github.com/zydo/homebrew-tap"><img src="https://img.shields.io/badge/dynamic/regex?url=https%3A%2F%2Fraw.githubusercontent.com%2Fzydo%2Fhomebrew-tap%2Fmain%2FFormula%2Falle.rb&amp;search=alle_proxy-(%5B0-9.%5D%2B)%5C.tar&amp;replace=v%241&amp;label=Homebrew" alt="Homebrew"></a>
   <a href="https://hub.docker.com/r/ziyudo/alle"><img src="https://img.shields.io/docker/v/ziyudo/alle?sort=semver&amp;label=Docker" alt="Docker"></a>
 </p>
 

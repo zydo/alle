@@ -31,6 +31,7 @@ omit the checkout prefix.
     - [`alle routes ruleset rename <ruleset> <name>` / `retarget <ruleset> <target>`](#alle-routes-ruleset-rename-ruleset-name--retarget-ruleset-target)
     - [`alle routes ls [--channel <ref>] [--flat] [--json]`](#alle-routes-ls---channel-ref---flat---json)
     - [`alle routes rm <id>...`](#alle-routes-rm-id)
+    - [`alle routes mv <id>... <ruleset>`](#alle-routes-mv-id-ruleset)
     - [`alle routes reorder <ruleset-id>... [--flat] [--json]`](#alle-routes-reorder-ruleset-id---flat---json)
     - [`alle routes killswitch [on|off]`](#alle-routes-killswitch-onoff)
     - [`alle routes lan [on|off]`](#alle-routes-lan-onoff)
@@ -43,6 +44,7 @@ omit the checkout prefix.
   - [`alle tun [on|off]`](#alle-tun-onoff)
   - [`alle test`](#alle-test)
   - [`alle export [--out <file>]`](#alle-export---out-file)
+  - [`alle backup [on|off|now]`](#alle-backup-onoffnow)
   - [`alle import <file> [--replace] [--yes]`](#alle-import-file---replace---yes)
   - [`alle sync <file>`](#alle-sync-file)
   - [`alle validate <file>`](#alle-validate-file)
@@ -468,6 +470,25 @@ alle routes rm r2
 alle routes rm r1 r3 --dry-run
 ```
 
+### `alle routes mv <id>... <ruleset>`
+
+Move matcher rows into another ruleset in **one transaction** — the moved
+matchers keep their ids, adopt the destination's target, and are appended at
+the end of its block. This is the safe spelling of "remove it here, add it
+there": no intermediate state where the matcher is gone (or present twice),
+and no re-typing the matcher value. If the move empties the source ruleset it
+dissolves (rulesets exist only through their matchers) — reported, not an
+error. Unknown ids, an unknown destination, and ids already in the
+destination are all rejected before anything changes.
+
+```bash
+alle routes mv r2 rs3            # one matcher into ruleset rs3
+alle routes mv r1 r4 r7 rs2      # several at once
+```
+
+Shadow-lint warnings are re-checked after the move: a matcher that lands
+behind a covering rule in its new position is flagged immediately.
+
 ### `alle routes reorder <ruleset-id>... [--flat] [--json]`
 
 Replace the ruleset-block evaluation order with a full list of ruleset ids. Pass
@@ -518,15 +539,37 @@ so even an `--all` catch-all cannot capture them:
 | `224.0.0.0/4`, `255.255.255.255/32`             | IPv4 multicast (mDNS/SSDP), broadcast     |
 | `::1/128`, `fe80::/10`, `fc00::/7`, `ff00::/8`  | IPv6 loopback, link-local, ULA, multicast |
 
+A small fixed set of **UDP destination ports** goes direct under the same
+toggle, covering the unicast legs of LAN housekeeping protocols the ranges
+above cannot see (a DHCP renewal goes unicast to the server; mDNS and SSDP
+responders answer unicast from their well-known port):
+
+| UDP ports  | What they are         |
+| ---------- | --------------------- |
+| `67`, `68` | DHCP                  |
+| `1900`     | SSDP / UPnP discovery |
+| `5353`     | mDNS                  |
+
 Notes:
 
 - The built-in rules are fixed — they cannot be edited or removed individually;
-  this toggle is the whole surface. They never appear in `alle routes ls`.
+  this toggle is the whole surface. They never appear in `alle routes ls`
+  (inspect them here with `-v`, or via `lan.cidrs`/`lan.udp_ports` in
+  `GET /api/v1/routes`). The list stays small and curated on purpose: every
+  direct-bypass entry is a small tunnel bypass, so it is not user-extensible.
+- Customization belongs in user rules, not in this block: to send something
+  *extra* direct (e.g. Tailscale's CGNAT range), create a `direct` ruleset
+  and order it above your catch-all — `alle routes ruleset create Tailscale
+  --via direct --cidr 100.64.0.0/10`, then `alle routes reorder …`. To exclude
+  *less* than the built-in block, turn it off and recreate just the ranges you
+  want as your own ruleset. Recipes and the design rationale:
+  [routing.md](routing.md#the-built-in-lan-block-one-toggle-fixed-contents).
 - Applies to the router entrypoint **and**, when [TUN mode](#alle-tun-onoff) is
   on, to all system traffic; per-channel ports are unaffected.
 - DNS is deliberately **not** excluded from the tunnel: sending plain DNS direct
   by default would leak browsing activity, so DNS traffic stays subject to your
-  rules.
+  rules — port `53` is not in the port list, and in TUN mode DNS hijacking
+  still runs ahead of the range exclusions.
 - `alle status` and `routes ls` append `— LAN direct off` to the router line
   while the protection is disabled.
 
@@ -869,6 +912,44 @@ strings (`netflix.com`, `10.8.0.0/16`, `all`), inferred exactly like
 filling the YAML: [declarative-config.md](declarative-config.md). Format
 reference, apply semantics, and caveats (including running one setup on two
 machines): [bundle.md](bundle.md).
+
+---
+
+## `alle backup [on|off|now]`
+
+Scheduled local backups of the setup bundle — the automatic flavor of
+`alle export`. Run without an argument to show status; `on`/`off` toggles the
+schedule (`on` also writes a first backup immediately, so you get instant
+feedback that the destination works); `now` writes one backup on the spot,
+whether or not the schedule is on.
+
+```bash
+alle backup                       # status: schedule + what's on disk
+alle backup on                    # daily into <state dir>/backups, keep 7
+alle backup on --every 6 --keep 4 # every 6 hours, keep the newest 4
+alle backup on --dir ~/Backups/alle
+alle backup now                   # one-shot into the rotation directory
+alle backup off
+```
+
+- `--dir <path>` — destination directory (default: `backups/` inside alle's
+  state directory). It must be user-owned and not group/world-writable; alle
+  creates it `0700` and refuses symlinks. Backup files are written `0600`.
+- `--every <hours>` — interval (default: 24).
+- `--keep <n>` — retention: only the newest *n* `alle-backup-*.yaml` files are
+  kept; older ones are pruned. Nothing else in the directory is ever touched.
+
+How it runs:
+
+- **Backups are written by the alle daemon** while it is running — alle
+  installs no cron jobs or OS timers, and a backup pass is pure local file
+  I/O (the no-background-traffic posture holds). If the daemon was down past
+  a due time, the next daemon start catches up within a few minutes.
+- Due-ness is derived from the newest backup file's timestamp, not stored
+  state — delete the directory and the next check writes a fresh backup.
+- **Backups are secrets**, exactly like `alle export` output: they contain
+  WireGuard private keys and provider tokens. The directory permissions are
+  the protection; treat the files like a password store.
 
 ---
 

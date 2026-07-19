@@ -299,6 +299,14 @@ not a bundle limitation.
   starts with clean probes and the daemon measures everything anew.
 - **Internal ids.** Rule/ruleset ids are re-minted on every apply.
 
+## Scheduled backups
+
+`alle backup on` keeps a rotation of bundle exports written automatically by
+the daemon — see [`alle backup`](cli-reference.md#alle-backup-onoffnow) for
+the schedule, destination-permission, and retention rules. A scheduled backup
+file is byte-for-byte an `alle export` bundle and is applied with the same
+`alle import` (or `alle sync`) path; it is equally a **secret**.
+
 ## Caveats
 
 ### Cloning a setup to a second machine

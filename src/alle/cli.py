@@ -494,6 +494,24 @@ def cmd_routes_rm(args):
         )
 
 
+def cmd_routes_mv(args):
+    result = service.routes_move(args.ids, args.ruleset)
+    rs = result["ruleset"]
+    for rule in result["moved"]:
+        print(
+            f"Moved matcher {rule['id']}: {rule['match']} → ruleset "
+            f"{rs['id']} {rs['name']!r} ({rs['target']})."
+        )
+    for rsid in result["dissolved"]:
+        print(f"Ruleset {rsid} was left empty by the move and no longer exists.")
+    for rule in result["moved"]:
+        if rule.get("shadowed_by"):
+            print(
+                f"  WARNING: {rule['id']} {rule['match']} is shadowed by "
+                f"{routes.shadow_label(rule['shadowed_by'])} — it will never match."
+            )
+
+
 def cmd_routes_reorder(args):
     result = service.routes_reorder(args.ids, flat=args.flat)
     if args.json:
@@ -534,6 +552,10 @@ def cmd_routes_lan(args):
         )
     if args.verbose:
         print("  Built-in ranges: " + ", ".join(result["cidrs"]))
+        print(
+            "  Built-in UDP ports (unicast DHCP/SSDP/mDNS): "
+            + ", ".join(str(p) for p in result["udp_ports"])
+        )
 
 
 def cmd_routes_killswitch(args):
@@ -844,6 +866,61 @@ def cmd_export(args):
     print(
         "This file contains WireGuard private keys and provider tokens — "
         "keep it private."
+    )
+
+
+def cmd_backup(args):
+    if args.action == "now":
+        result = service.backup_now()
+        if args.json:
+            print(output.json_text(result))
+            return
+        print(f"Backup written -> {result['path']}")
+        if result["pruned"]:
+            print(f"  Pruned {len(result['pruned'])} old backup(s).")
+        _print_backup_secret_note(result["backup"])
+        return
+    changing = args.action in ("on", "off") or any(
+        v is not None for v in (args.dir, args.every, args.keep)
+    )
+    if changing:
+        result = service.backup_configure(
+            enabled={"on": True, "off": False}.get(args.action),
+            directory=args.dir,
+            every_hours=args.every,
+            keep=args.keep,
+        )
+    else:
+        result = service.backup_status()
+    if args.json:
+        print(output.json_text(result))
+        return
+    b = result["backup"]
+    if b["enabled"]:
+        print(
+            f"Scheduled backups ON — every {b['every_hours']:g}h -> {b['dir']} "
+            f"(keep {b['keep']})."
+        )
+        first = result.get("first_backup")
+        if first:
+            print(f"  Backup written -> {first['path']}")
+        elif b["last_backup"]:
+            print(f"  Last backup: {b['last_backup']} ({b['count']} on disk).")
+        else:
+            print("  No backups on disk yet.")
+        print("  Backups run while the alle daemon is running.")
+        if first or changing:
+            _print_backup_secret_note(b)
+    else:
+        print("Scheduled backups off — enable: alle backup on")
+        if b["count"]:
+            print(f"  {b['count']} backup(s) remain in {b['dir']}.")
+
+
+def _print_backup_secret_note(b: dict) -> None:
+    print(
+        "Backups contain WireGuard private keys and provider tokens — "
+        f"{b['dir']} is restricted to your user."
     )
 
 
@@ -1495,6 +1572,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="show what would be removed"
     )
     rrm.set_defaults(func=cmd_routes_rm)
+    rmv = ro_sub.add_parser(
+        "mv",
+        help="move matcher(s) into another ruleset in one transaction "
+        "(they adopt its target; an emptied source ruleset dissolves)",
+    )
+    rmv.add_argument("ids", nargs="+", help="rule id(s) shown by: alle routes ls")
+    rmv.add_argument("ruleset", help="destination ruleset id shown by: alle routes ls")
+    rmv.set_defaults(func=cmd_routes_mv)
     rre = ro_sub.add_parser(
         "reorder", help="replace ruleset evaluation order with the given id sequence"
     )
@@ -1669,6 +1754,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --replace: skip the confirmation prompt (required when not a TTY)",
     )
     im.set_defaults(func=cmd_import)
+    bk = sub.add_parser(
+        "backup",
+        help="scheduled local backups of the setup bundle (written while the "
+        "daemon runs; contains credentials — kept 0600 in a 0700 directory)",
+    )
+    bk.add_argument(
+        "action",
+        nargs="?",
+        choices=["on", "off", "now"],
+        help="on/off toggles the schedule ('on' also writes a backup right "
+        "away); 'now' writes one immediately; omit to show status",
+    )
+    bk.add_argument(
+        "--dir",
+        help="destination directory (default: <state dir>/backups; must be "
+        "user-owned, created 0700)",
+    )
+    bk.add_argument(
+        "--every",
+        type=float,
+        metavar="HOURS",
+        help="backup interval in hours (default: 24)",
+    )
+    bk.add_argument(
+        "--keep",
+        type=int,
+        metavar="N",
+        help="backups to keep — older ones are pruned (default: 7)",
+    )
+    bk.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    bk.set_defaults(func=cmd_backup)
     gw = sub.add_parser(
         "gateway",
         help="container gateway profile (ALLE_GATEWAY=1): declare the "

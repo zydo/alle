@@ -745,6 +745,33 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /api/v1/routes/move:
+    post:
+      tags: [routes]
+      summary: Move matcher(s) into another ruleset in one transaction
+      description: >
+        The moved matchers keep their ids but adopt the destination ruleset's
+        target and are appended at its end. A source ruleset left empty by the
+        move dissolves; its id is reported in `dissolved`.
+      operationId: moveRoutes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [ids, ruleset]
+              properties:
+                ids:
+                  type: array
+                  items: { type: string }
+                ruleset: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /api/v1/routes/reorder:
     post:
       tags: [routes]
@@ -815,6 +842,59 @@ paths:
         recipe (sudo/setcap on hosts, --cap-add in containers).
       operationId: setTun
       requestBody: { $ref: "#/components/requestBodies/EnabledFlag" }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/backup:
+    get:
+      tags: [bundle]
+      summary: Scheduled-backup settings and on-disk rotation state
+      operationId: backupStatus
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [bundle]
+      summary: Configure scheduled local backups of the setup bundle
+      description: >
+        Omitted fields keep their current value. An explicit `enabled: true`
+        writes a first backup immediately. The destination must be a
+        user-owned, non-group/world-writable directory (created 0700); backup
+        files are written 0600 and pruned to `keep`. Backups are written by
+        the daemon while it runs — no OS timers, no network.
+      operationId: configureBackup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                enabled: { type: boolean }
+                dir: { type: string }
+                every_hours: { type: number, exclusiveMinimum: 0 }
+                keep: { type: integer, minimum: 1 }
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/backup/now:
+    post:
+      tags: [bundle]
+      summary: Write one backup into the rotation directory immediately
+      description: Works even while the schedule is off.
+      operationId: backupNow
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
       responses:
         "200": { $ref: "#/components/responses/GenericResult" }
         "400": { $ref: "#/components/responses/BadRequest" }

@@ -126,25 +126,31 @@ def test_router_entrypoint_compiles_rules_in_order():
     assert rules[1] == {"inbound": ["in-router"], "action": "sniff"}
     assert rules[2] == {
         "inbound": ["in-router"],
+        "network": ["udp"],
+        "port": list(routes.LAN_DIRECT_UDP_PORTS),
+        "outbound": "direct",
+    }  # the port half of the built-in LAN block (unicast DHCP/SSDP/mDNS)
+    assert rules[3] == {
+        "inbound": ["in-router"],
         "ip_cidr": list(routes.LAN_DIRECT_CIDRS),
         "outbound": "direct",
     }  # the built-in LAN block precedes every user rule
-    assert rules[3] == {
+    assert rules[4] == {
         "inbound": ["in-router"],
         "domain_suffix": ["api.google.com"],
         "outbound": "out-nordvpn-us_1",
     }
-    assert rules[4] == {
+    assert rules[5] == {
         "inbound": ["in-router"],
         "domain_suffix": ["netflix.com"],
         "outbound": "direct",
     }
-    assert rules[5] == {
+    assert rules[6] == {
         "inbound": ["in-router"],
         "ip_cidr": ["10.0.0.0/8"],
         "action": "reject",
     }
-    assert rules[6] == {"inbound": ["in-router"], "outbound": "out-nordvpn-us_1"}
+    assert rules[7] == {"inbound": ["in-router"], "outbound": "out-nordvpn-us_1"}
     assert config["route"]["final"] == "direct"  # unmatched passes through
 
 
@@ -164,6 +170,8 @@ def test_lan_direct_off_omits_the_builtin_block():
         r.get("ip_cidr") != list(routes.LAN_DIRECT_CIDRS)
         for r in config["route"]["rules"]
     )
+    # the port half rides the same toggle — off means off for both
+    assert all("port" not in r for r in config["route"]["rules"])
 
 
 def test_lan_direct_defaults_on_when_key_is_absent():
@@ -174,6 +182,12 @@ def test_lan_direct_defaults_on_when_key_is_absent():
     assert {
         "inbound": ["in-router"],
         "ip_cidr": list(routes.LAN_DIRECT_CIDRS),
+        "outbound": "direct",
+    } in config["route"]["rules"]
+    assert {
+        "inbound": ["in-router"],
+        "network": ["udp"],
+        "port": list(routes.LAN_DIRECT_UDP_PORTS),
         "outbound": "direct",
     } in config["route"]["rules"]
 
@@ -235,14 +249,23 @@ def test_tun_joins_the_same_rule_table_without_duplicating_it():
     # the per-channel exact rule stays pinned to its own inbound (never demoted)
     assert rules[0] == {"inbound": ["in-nordvpn-us_1"], "outbound": "out-nordvpn-us_1"}
     assert rules[1] == {"inbound": both, "action": "sniff"}
-    # DNS hijack is tun-only and precedes LAN-direct, so a query to a LAN
-    # resolver is answered by alle, not leaked
+    # the port half of LAN-direct precedes the DNS hijack: unicast mDNS is
+    # wire-format DNS, so a later position would let the hijack swallow it
+    # into a resolver that cannot answer .local
     assert rules[2] == {
+        "inbound": both,
+        "network": ["udp"],
+        "port": list(routes.LAN_DIRECT_UDP_PORTS),
+        "outbound": "direct",
+    }
+    # DNS hijack is tun-only and precedes the CIDR LAN-direct block, so a
+    # port-53 query to a LAN resolver is answered by alle, not leaked
+    assert rules[3] == {
         "inbound": ["in-tun"],
         "protocol": "dns",
         "action": "hijack-dns",
     }
-    assert rules[3] == {
+    assert rules[4] == {
         "inbound": both,
         "ip_cidr": list(routes.LAN_DIRECT_CIDRS),
         "outbound": "direct",
@@ -250,18 +273,18 @@ def test_tun_joins_the_same_rule_table_without_duplicating_it():
     # IPv6 leak fix: captured v6 is rejected (IPv4-only providers can't carry
     # it) — after LAN-direct so local v6 stays reachable, before user rules so
     # a catch-all can't steer v6 into an IPv4-only channel
-    assert rules[4] == {
+    assert rules[5] == {
         "inbound": ["in-tun"],
         "ip_cidr": ["::/0"],
         "action": "reject",
     }
-    assert rules[5] == {
+    assert rules[6] == {
         "inbound": both,
         "domain_suffix": ["netflix.com"],
         "outbound": "out-nordvpn-us_1",
     }
-    assert rules[6] == {"inbound": both, "action": "reject"}  # system-wide killswitch
-    assert len(rules) == 7  # one shared table — no second rule set
+    assert rules[7] == {"inbound": both, "action": "reject"}  # system-wide killswitch
+    assert len(rules) == 8  # one shared table — no second rule set
 
 
 def test_tun_without_router_port_still_gets_the_rule_table():

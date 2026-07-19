@@ -266,11 +266,16 @@ class Engine:
 
         Layout (order is law): the per-channel exact rules already precede
         these; then a ``sniff`` action (the pinned sing-box dropped inbound
-        sniffing — IP-dialing apps need it for domain rules), the tun-only
-        DNS hijack (ahead of LAN-direct, so queries to a LAN resolver are
-        still answered by alle, not leaked), the built-in LAN/local
-        default-direct block (when ``lan_direct`` is on — ahead of every user
-        rule, so no catch-all can shadow it), the user rules in stored order,
+        sniffing — IP-dialing apps need it for domain rules), the port half
+        of the LAN-direct block (UDP DHCP/SSDP/mDNS ports — ahead of the DNS
+        hijack on purpose: unicast mDNS is wire-format DNS, so the sniffer
+        would classify it as protocol ``dns`` and the hijack would swallow it
+        into a resolver that cannot answer ``.local``), the tun-only DNS
+        hijack (ahead of the CIDR LAN-direct block, so port-53 queries to a
+        LAN resolver are still answered by alle, not leaked), the CIDR half
+        of the built-in LAN/local default-direct block (both halves only when
+        ``lan_direct`` is on — ahead of every user rule, so no catch-all can
+        shadow them), the user rules in stored order,
         and unmatched handling — a trailing ``reject`` when the kill-switch is
         on (with tun active that is genuinely system-wide), otherwise
         fall-through to ``route.final: direct``.
@@ -312,6 +317,16 @@ class Engine:
         if not entry:
             return
         rules.append({"inbound": list(entry), "action": "sniff"})
+        lan_direct = bool(router.get("lan_direct", True))
+        if lan_direct:
+            rules.append(
+                {
+                    "inbound": list(entry),
+                    "network": ["udp"],
+                    "port": list(routes.LAN_DIRECT_UDP_PORTS),
+                    "outbound": "direct",
+                }
+            )
         if tun:
             rules.append(
                 {
@@ -320,7 +335,7 @@ class Engine:
                     "action": "hijack-dns",
                 }
             )
-        if router.get("lan_direct", True):
+        if lan_direct:
             rules.append(
                 {
                     "inbound": list(entry),

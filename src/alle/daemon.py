@@ -4,7 +4,7 @@ The daemon owns runtime reconciliation and probing for the CLI today and future
 Web UI / desktop clients. It keeps the single sing-box process matched to
 ``state.json`` and continuously probes every channel's connectivity.
 
-Its single 1 Hz loop drives four duties:
+Its single 1 Hz loop drives five duties:
 
 1. **Reconcile** — when the config-relevant part of ``state.json`` changes (a
    channel added/removed/relocated), rebuild the one sing-box config and restart
@@ -20,6 +20,10 @@ Its single 1 Hz loop drives four duties:
 4. **Supervision** — every ``SUPERVISE_INTERVAL`` seconds, restart an
    unexpectedly-exited sing-box with capped exponential backoff and publish
    its runtime health into ``applier.info.json``.
+5. **Scheduled backups** — every ``BACKUP_CHECK`` seconds, ask ``backup`` to
+   write a setup-bundle backup if one is due (local file I/O only — no
+   network). The daemon is the scheduler: alle installs no OS timers, so
+   backups happen while the daemon runs.
 
 It is auto-started by CLI mutations (and by ``alle start``) when not already
 running, runs detached with a pidfile, and owns the single sing-box process for
@@ -47,6 +51,7 @@ RECONCILE_RETRY = 60.0  # retry a *failed* reconcile this often, sans state chan
 VERSION_CHECK = 30.0  # how often a supervised daemon checks for an upgraded package
 VERSION_PROBE_TIMEOUT = 5.0  # bounded Homebrew opt-shim version discovery
 SUPERVISE_INTERVAL = 2.0  # how often sing-box liveness is checked (sans probes)
+BACKUP_CHECK = 300.0  # how often due-ness of a scheduled backup is evaluated
 CRASH_BACKOFF_MAX = 60.0  # cap between supervised restart attempts
 CRASH_RESET = 60.0  # this long alive after a crash forgets the crash history
 
@@ -479,7 +484,13 @@ def run_applier(own_children: bool = False) -> None:
 
     probe_worker: dict = {"thread": None}
     metrics_worker: dict = {"thread": None}
+    backup_worker: dict = {"thread": None}
     metrics_error: dict = {"text": None, "at": float("-inf")}
+
+    def _backup_pass() -> None:
+        from alle import backup
+
+        backup.run_due()  # never raises; rate-limits its own failure logging
 
     def _metrics_pass() -> None:
         try:
@@ -517,6 +528,7 @@ def run_applier(own_children: bool = False) -> None:
     last_probe = 0.0
     last_metrics = 0.0
     last_version_check = 0.0
+    last_backup_check = float("-inf")  # first due-ness check on the first tick
     reconcile_ok = True
     reconcile_retry_at = 0.0
     read_error: str | None = None
@@ -659,6 +671,16 @@ def run_applier(own_children: bool = False) -> None:
                 # else: the previous pass is still running — skip this tick
                 # rather than stack passes (each pass is internally bounded).
                 last_probe = now
+
+            if now - last_backup_check >= BACKUP_CHECK:
+                worker = backup_worker["thread"]
+                if worker is None or not worker.is_alive():
+                    worker = threading.Thread(
+                        target=_backup_pass, name="alle-backup", daemon=True
+                    )
+                    backup_worker["thread"] = worker
+                    worker.start()
+                last_backup_check = now
 
             time.sleep(POLL_SECONDS)
     finally:

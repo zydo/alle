@@ -30,8 +30,9 @@ import re
 # pages, mDNS/SSDP discovery — keeps working under a "route everything through
 # VPN" catch-all. DNS is deliberately *not* here: sending plain DNS direct by
 # default would leak browsing activity outside the tunnel, so it stays subject
-# to user rules. mDNS is covered only because its multicast destinations
-# (224.0.0.251 / ff02::fb) fall inside the multicast CIDRs.
+# to user rules. mDNS/SSDP multicast is covered because their destinations
+# (224.0.0.251 / ff02::fb, 239.255.255.250) fall inside the multicast CIDRs;
+# their *unicast* legs ride the port list below.
 LAN_DIRECT_CIDRS = (
     "10.0.0.0/8",  # IPv4 private # noqa: S1313
     "172.16.0.0/12",  # noqa: S1313
@@ -44,6 +45,26 @@ LAN_DIRECT_CIDRS = (
     "fe80::/10",  # IPv6 link-local
     "fc00::/7",  # IPv6 unique local (ULA)
     "ff00::/8",  # IPv6 multicast
+)
+
+# The port half of the built-in LAN-direct block: LAN housekeeping protocols
+# whose *unicast* legs the CIDRs above cannot see — a DHCP renewal goes
+# unicast to the server, and mDNS/SSDP queriers answer unicast from a
+# well-known port. UDP-only (that is what these protocols speak), and a fixed
+# curated list on purpose: every direct-bypass port is a small tunnel-bypass
+# channel, so this is not user-extensible — custom port routing belongs to
+# user rules once the port matcher exists. Settled design (2026-07-18): one
+# toggle, fixed contents, full transparency; if a real network ever needs the
+# list changed and user rules cannot express it, the fallback is
+# subtractive-only overrides (disable entries, never add). Port 53 is
+# deliberately absent:
+# plain DNS stays subject to the hijack/user rules (see LAN_DIRECT_CIDRS'
+# comment on leaks). Rides the same ``lan_direct`` toggle as the CIDRs.
+LAN_DIRECT_UDP_PORTS = (
+    67,  # DHCP server (client -> server, incl. unicast renewals)
+    68,  # DHCP client
+    1900,  # SSDP / UPnP discovery
+    5353,  # mDNS
 )
 
 # One DNS label: alnum (plus inner hyphens/underscores), max 63 chars.

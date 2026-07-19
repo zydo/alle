@@ -31,10 +31,12 @@ alle routes ls
   entrypoint), turn it on explicitly: `alle routes killswitch on`. Per-channel
   ports are never affected by the kill-switch.
 - **LAN/local traffic stays direct by default.** Built-in rules for private,
-  link-local, and multicast ranges are compiled ahead of every user rule, so a
-  catch-all VPN rule never cuts off printers, NAS boxes, router admin pages, or
-  LAN discovery — the same protection mainstream VPN clients ship. Inspect or
-  disable with `alle routes lan [on|off]` (leaving it on is recommended).
+  link-local, and multicast ranges — plus the well-known UDP ports of LAN
+  housekeeping protocols (DHCP 67/68, SSDP 1900, mDNS 5353), which cover their
+  unicast legs — are compiled ahead of every user rule, so a catch-all VPN rule
+  never cuts off printers, NAS boxes, router admin pages, or LAN discovery —
+  the same protection mainstream VPN clients ship. Inspect or disable with
+  `alle routes lan [on|off]` (leaving it on is recommended).
 - **Channels referenced by rules cannot be removed.** `alle channels rm` (and
   `alle providers rm`, for any of its channels) refuses while a rule targets the
   channel, listing every referencing rule and the exact `alle routes rm …` to
@@ -42,6 +44,45 @@ alle routes ls
   as a side effect of something else.
 - Per-channel ports keep working exactly as before, with or without rules — the
   router is an addition, never a replacement.
+
+## The built-in LAN block: one toggle, fixed contents
+
+The LAN-direct block is deliberately **not configurable**: one toggle
+(`alle routes lan on|off`), a fixed list of ranges and UDP ports, and full
+transparency (`alle routes lan -v`; the `lan.cidrs`/`lan.udp_ports` fields of
+`GET /api/v1/routes`). The contents encode protocol facts — private/link-local/
+multicast ranges, DHCP/SSDP/mDNS ports — not preferences, and the block sits in
+the most privileged position in the rule table: ahead of every user rule and
+outside the kill-switch. An editable list there would have ugly failure modes
+in both directions (removing entries breaks LAN in ways that surface much
+later; adding entries silently punches permanent tunnel bypasses — port 53
+would re-open exactly the DNS leak the hijack ordering prevents).
+
+Customization lives in **user rules** instead, where ordering is explicit and
+the shadow lint watches your back:
+
+- **Need something extra to go direct?** Give it its own ruleset and order it
+  above your catch-all. Example — a network that uses CGNAT space the built-in
+  list rightly doesn't cover, such as Tailscale's `100.64.0.0/10`:
+
+  ```bash
+  alle routes ruleset create Tailscale --via direct --cidr 100.64.0.0/10
+  alle routes ls                        # note the ids — new rulesets append last
+  alle routes reorder rs4 rs1 rs2 rs3   # put Tailscale ahead of the catch-all
+  ```
+
+  If you skip the reorder while a catch-all covers it, `routes ls` flags the
+  Tailscale matcher as shadowed — nothing fails silently.
+
+- **Need *less* excluded than the built-in block?** Turn it off
+  (`alle routes lan off`) and recreate just the ranges you want as your own
+  `direct` ruleset — user rules can express the whole CIDR list.
+
+If you hit a network where the fixed list is genuinely wrong and user rules
+cannot express the fix, please open an issue: the planned evolution, should a
+real case appear, is *subtractive-only* overrides (disabling individual
+built-in entries — which only ever narrows the bypass surface), never
+user-added entries.
 
 ## Related
 

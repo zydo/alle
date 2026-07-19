@@ -1303,6 +1303,54 @@ class Store:
         self.data = _read_raw()
         return removed
 
+    def move_rules(self, ids: list[str], ruleset_id: str) -> tuple[dict, list[str]]:
+        """Move matcher rows into another ruleset in one transaction, appended
+        at its end. Returns ``(destination block, dissolved ruleset ids)``.
+
+        The moved rows keep their rule ids but adopt the destination's target
+        and display name — a move is remove+add without the intermediate state
+        (and without re-typing the matcher). A source ruleset emptied by the
+        move dissolves: rulesets are derived from their rows, so an empty one
+        simply stops existing — reported, not an error.
+        """
+        wanted = [str(i) for i in dict.fromkeys(ids)]
+        with transaction() as data:
+            router = data.setdefault("router", _router_blank())
+            rules = router.setdefault("rules", [])
+            blocks = _ruleset_blocks(rules)
+            dest = next((b for b in blocks if b["id"] == ruleset_id), None)
+            if dest is None:
+                raise ValueError(f"unknown ruleset {ruleset_id!r}")
+            by_id = {str(r.get("id")): r for r in rules}
+            missing = [i for i in wanted if i not in by_id]
+            if missing:  # all misses in one pass
+                raise ValueError(f"no rule(s) {', '.join(missing)}")
+            already = [i for i in wanted if by_id[i].get("ruleset") == ruleset_id]
+            if already:
+                raise ValueError(
+                    f"rule(s) {', '.join(already)} are already in ruleset {ruleset_id}"
+                )
+            moving = set(wanted)
+            kept = [r for r in rules if str(r.get("id")) not in moving]
+            end = (
+                max(i for i, r in enumerate(kept) if r.get("ruleset") == ruleset_id) + 1
+            )
+            moved_rows = []
+            for rid in wanted:
+                row = by_id[rid]
+                row["ruleset"] = ruleset_id
+                row["ruleset_name"] = dest["name"]
+                row["target"] = dest["target"]
+                moved_rows.append(row)
+            kept[end:end] = moved_rows
+            router["rules"] = kept
+            after = _ruleset_blocks(kept)
+            after_ids = {b["id"] for b in after}
+            dissolved = [b["id"] for b in blocks if b["id"] not in after_ids]
+            block = next(b for b in after if b["id"] == ruleset_id)
+        self.data = _read_raw()
+        return block, dissolved
+
     def reorder_rules(self, ids: list[str]) -> tuple[list[dict], bool]:
         """Replace rule evaluation order with a full id permutation.
 
@@ -1362,6 +1410,32 @@ class Store:
         with transaction() as data:
             data.setdefault("router", _router_blank())["tun"] = bool(enabled)
         self.data = _read_raw()
+
+    def set_backup(
+        self,
+        *,
+        enabled: bool | None = None,
+        directory: str | None = None,
+        every_hours: float | None = None,
+        keep: int | None = None,
+    ) -> dict:
+        """Merge scheduled-backup settings (top-level ``backup`` key; absent =
+        disabled). ``None`` leaves a field alone. Deliberately outside
+        :func:`config_signature`: backup settings never reconcile sing-box.
+        Returns the stored (unresolved) settings."""
+        with transaction() as data:
+            conf = data.setdefault("backup", {})
+            if enabled is not None:
+                conf["enabled"] = bool(enabled)
+            if directory is not None:
+                conf["dir"] = str(directory)
+            if every_hours is not None:
+                conf["every_hours"] = float(every_hours)
+            if keep is not None:
+                conf["keep"] = int(keep)
+            stored = dict(conf)
+        self.data = _read_raw()
+        return stored
 
     def service_offer_recorded(self) -> bool:
         """Was the one-time `alle start` daemon-install offer already made?"""

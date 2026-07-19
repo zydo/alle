@@ -8,12 +8,14 @@ structured Python data; it deliberately does not print, prompt, or exit.
 from __future__ import annotations
 
 import sys
+import time
 from fnmatch import fnmatchcase
 from pathlib import Path
 
 from alle import (
     __version__,
     applog,
+    backup,
     bundle,
     credentials,
     daemon,
@@ -1017,6 +1019,13 @@ def _routes_payload(
         "filter": channel,
         "flat": flat,
         "router": _router_info(store),
+        # The built-in LAN-direct block's fixed contents, read-only: clients
+        # (Web UI, scripts) must be able to see what bypasses the tunnel
+        # without POSTing a toggle. router.lan_direct says whether it is on.
+        "lan": {
+            "cidrs": list(routes.LAN_DIRECT_CIDRS),
+            "udp_ports": list(routes.LAN_DIRECT_UDP_PORTS),
+        },
         "config_revision": config_signature(store.data),
     }
 
@@ -1145,6 +1154,38 @@ def routes_remove(ids: list[str], dry_run: bool = False) -> dict:
     return {"rules": planned, "dry_run": False}
 
 
+def routes_move(ids: list[str], ruleset_id: str) -> dict:
+    """Move matchers into another ruleset in one transaction — the cross-
+    ruleset ``move`` verb: remove+add without the intermediate state, and
+    without re-typing the matcher. The moved matchers adopt the destination's
+    target; a source ruleset left empty dissolves (reported in ``dissolved``).
+    """
+    if not ids:
+        raise ServiceError("at least one rule id is required (see: alle routes ls).")
+    ids = list(dict.fromkeys(ids))
+    store = Store.load()
+    try:
+        block, dissolved = store.move_rules(ids, ruleset_id)
+    except ValueError as e:
+        raise ServiceError(f"{e} (see: alle routes ls).") from e
+    shadows = routes.shadowed_by(store.rules())
+    decorated = _decorate_ruleset(block, shadows)
+    wanted = set(ids)
+    moved = [rule for rule in decorated["rules"] if rule["id"] in wanted]
+    applog.log(
+        f"moved {len(moved)} matcher(s) into ruleset {decorated['id']} "
+        f"{decorated['name']!r}"
+        + (f"; dissolved empty ruleset(s) {', '.join(dissolved)}" if dissolved else "")
+    )
+    daemon.ensure_running()
+    return {
+        "moved": moved,
+        "ruleset": decorated,
+        "dissolved": dissolved,
+        "router": _router_info(store),
+    }
+
+
 def routes_reorder(ids: list[str], flat: bool = False) -> dict:
     """Replace ruleset-block order (or flat rule order for debugging)."""
     if not ids:
@@ -1182,8 +1223,10 @@ def routes_reorder(ids: list[str], flat: bool = False) -> dict:
 def routes_lan_direct(enable: bool | None = None) -> dict:
     """Set (or with ``None`` just report) the built-in LAN/local direct rules.
 
-    The rules themselves (:data:`alle.routes.LAN_DIRECT_CIDRS`) are fixed and
-    compiled ahead of every user rule; this toggle is the only control.
+    The rules themselves (:data:`alle.routes.LAN_DIRECT_CIDRS` plus the
+    :data:`alle.routes.LAN_DIRECT_UDP_PORTS` unicast-port half) are fixed and
+    compiled ahead of every user rule; this toggle is the only control — both
+    halves ride it together, and the payload lists both for transparency.
     """
     store = Store.load()
     if enable is not None:
@@ -1201,6 +1244,7 @@ def routes_lan_direct(enable: bool | None = None) -> dict:
         "changed": enable is not None,
         "router": _router_info(store),
         "cidrs": list(routes.LAN_DIRECT_CIDRS),
+        "udp_ports": list(routes.LAN_DIRECT_UDP_PORTS),
     }
 
 
@@ -1753,6 +1797,114 @@ def setup_export() -> dict:
         "channels": sum(len(e["channels"]) for e in data["providers"].values()),
         "rulesets": len(data["router"]["rulesets"]),
     }
+
+
+# ---- scheduled backups -------------------------------------------------------
+
+
+def _backup_payload(store: Store) -> dict:
+    """Resolved settings plus what is actually on disk (mtime-derived — the
+    schedule has no stored timestamp to drift from reality)."""
+    conf = backup.settings(store)
+    files = backup.backup_files(Path(conf["dir"]))
+    newest = files[0] if files else None
+    last = None
+    if newest is not None:
+        last = time.strftime(
+            "%Y-%m-%d %H:%M:%S", time.localtime(newest.stat().st_mtime)
+        )
+    return {
+        **conf,
+        "count": len(files),
+        "last_backup": last,
+        "last_file": str(newest) if newest else None,
+    }
+
+
+def backup_status() -> dict:
+    """The scheduled-backup settings and the on-disk rotation state."""
+    return {"backup": _backup_payload(Store.load())}
+
+
+def backup_configure(
+    enabled: bool | None = None,
+    directory=None,
+    every_hours=None,
+    keep=None,
+) -> dict:
+    """Change scheduled-backup settings; an explicit enable writes a first
+    backup immediately (a baseline, and instant feedback that the destination
+    works). ``None`` leaves a field alone. Strict types throughout — a coerced
+    string must never silently toggle a credential-writing schedule.
+    """
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ServiceError("'enabled' must be a boolean.")
+    if directory is not None:
+        if not isinstance(directory, str) or not directory.strip():
+            raise ServiceError("'dir' must be a non-empty path string.")
+        directory = str(Path(directory.strip()).expanduser().absolute())
+    if every_hours is not None:
+        if isinstance(every_hours, bool) or not isinstance(every_hours, (int, float)):
+            raise ServiceError("'every_hours' must be a number.")
+        if not 0 < float(every_hours) <= 24 * 365:
+            raise ServiceError("'every_hours' must be a positive number of hours.")
+    if keep is not None:
+        if isinstance(keep, bool) or not isinstance(keep, int) or keep < 1:
+            raise ServiceError("'keep' must be an integer >= 1.")
+    if enabled is None and directory is None and every_hours is None and keep is None:
+        raise ServiceError("nothing to change — pass enabled, dir, every_hours, keep.")
+    store = Store.load()
+    current = backup.settings(store)
+    will_be_enabled = current["enabled"] if enabled is None else enabled
+    target_dir = directory if directory is not None else current["dir"]
+    if will_be_enabled or directory is not None:
+        # Fail fast, before anything is stored: an unusable destination
+        # (symlink, foreign owner, group/world-writable) must not become a
+        # persisted schedule that fails forever in the daemon's log.
+        try:
+            backup.prepare_dir(target_dir)
+        except backup.BackupError as e:
+            raise ServiceError(str(e)) from e
+    store.set_backup(
+        enabled=enabled, directory=directory, every_hours=every_hours, keep=keep
+    )
+    conf = backup.settings(store)
+    first: dict | None = None
+    if conf["enabled"]:
+        try:
+            # An explicit `on` always snapshots now; a settings tweak while
+            # enabled only backs up if one is actually due.
+            first = backup.run(store, force=enabled is True)
+        except backup.BackupError as e:
+            raise ServiceError(str(e)) from e
+        daemon.ensure_running()  # the daemon is the scheduler
+    applog.log(
+        "backup schedule "
+        + (
+            f"enabled: every {conf['every_hours']:g}h -> {conf['dir']} "
+            f"(keep {conf['keep']})"
+            if conf["enabled"]
+            else "disabled"
+        )
+    )
+    return {
+        "backup": _backup_payload(store),
+        "changed": True,
+        "first_backup": first,
+    }
+
+
+def backup_now() -> dict:
+    """Write one backup immediately, into the configured rotation directory
+    (works even while the schedule is off)."""
+    store = Store.load()
+    try:
+        report = backup.run(store, force=True)
+    except backup.BackupError as e:
+        raise ServiceError(str(e)) from e
+    if report is None:  # unreachable with force=True; keeps the types honest
+        raise ServiceError("backup did not run.")
+    return {"backup": _backup_payload(store), **report}
 
 
 def setup_import(text: str) -> dict:

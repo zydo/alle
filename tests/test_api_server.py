@@ -796,6 +796,9 @@ def test_routes_api_create_reorder_killswitch_delete(live):
     assert st == 200
     assert [r["id"] for r in data["rules"]] == ["r1", "r2"]
     assert [rs["id"] for rs in data["rulesets"]] == ["rs1", "rs2"]
+    # the fixed LAN-direct contents are readable without POSTing a toggle
+    assert data["lan"]["udp_ports"] == [67, 68, 1900, 5353]
+    assert "10.0.0.0/8" in data["lan"]["cidrs"]
 
     st, body, _ = _req(
         base + "/api/v1/routes/reorder",
@@ -843,6 +846,81 @@ def test_routes_api_create_reorder_killswitch_delete(live):
     )
     assert st == 200
     assert Store.load().rules() == []
+
+
+def test_backup_endpoints_configure_run_and_report(live):
+    base, secret = live
+    origin = _bearer(secret)
+
+    st, body, _ = _req(base + "/api/v1/backup", headers=_bearer(secret))
+    assert st == 200 and json.loads(body)["backup"]["enabled"] is False
+
+    st, body, _ = _req(
+        base + "/api/v1/backup",
+        method="POST",
+        headers=origin,
+        data={"enabled": True, "every_hours": 6, "keep": 2},
+    )
+    data = json.loads(body)
+    assert st == 200
+    assert data["backup"]["enabled"] is True and data["backup"]["keep"] == 2
+    assert data["first_backup"] is not None  # explicit enable snapshots now
+
+    st, body, _ = _req(
+        base + "/api/v1/backup/now", method="POST", headers=origin, data={}
+    )
+    assert st == 200 and json.loads(body)["backup"]["count"] >= 1
+
+    # strict types: a string "enabled" must never toggle the schedule
+    st, body, _ = _req(
+        base + "/api/v1/backup",
+        method="POST",
+        headers=origin,
+        data={"enabled": "off"},
+    )
+    assert st == 400 and "boolean" in json.loads(body)["error"]
+    st, body, _ = _req(
+        base + "/api/v1/backup",
+        method="POST",
+        headers=origin,
+        data={"bogus": 1},
+    )
+    assert st == 400
+
+
+def test_routes_move_endpoint_moves_and_reports_dissolved(live):
+    base, secret = live
+    origin = _bearer(secret)
+    for name, target, value in (("A", "direct", "a.com"), ("B", "block", "b.com")):
+        st, _, _ = _req(
+            base + "/api/v1/routes/rulesets",
+            method="POST",
+            headers=origin,
+            data={"name": name, "target": target, "matchers": [{"value": value}]},
+        )
+        assert st == 200
+
+    st, body, _ = _req(
+        base + "/api/v1/routes/move",
+        method="POST",
+        headers=origin,
+        data={"ids": ["r1"], "ruleset": "rs2"},
+    )
+    data = json.loads(body)
+    assert st == 200
+    assert [r["id"] for r in data["moved"]] == ["r1"]
+    assert data["moved"][0]["target"] == "block"  # destination's target adopted
+    assert data["dissolved"] == ["rs1"]  # emptied source dissolves
+    assert [rs["id"] for rs in Store.load().rulesets()] == ["rs2"]
+
+    # unknown-field body is rejected before any mutation (the drift-test contract)
+    st, body, _ = _req(
+        base + "/api/v1/routes/move",
+        method="POST",
+        headers=origin,
+        data={"ids": ["r1"], "ruleset": "rs2", "bogus": 1},
+    )
+    assert st == 400
 
 
 def test_locations_endpoint_requires_a_provider(live):

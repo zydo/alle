@@ -9,6 +9,15 @@ import pytest
 from alle import cli, service
 
 
+def test_routes_mv_parses_trailing_destination_after_variadic_ids():
+    # `mv r1 r2 rs3` must split into ids=[r1, r2] + ruleset=rs3 — the variadic
+    # positional must not swallow the destination.
+    args = cli.build_parser().parse_args(["routes", "mv", "r1", "r2", "rs3"])
+    assert args.ids == ["r1", "r2"]
+    assert args.ruleset == "rs3"
+    assert args.func is cli.cmd_routes_mv
+
+
 def test_channels_ls_rejects_conflicting_machine_outputs():
     args = SimpleNamespace(json=True, ids=True, refs=False)
 

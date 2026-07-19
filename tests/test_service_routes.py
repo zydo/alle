@@ -122,6 +122,13 @@ def test_routes_list_annotates_and_filters(channel):
     )
 
     data = service.routes_list()
+    # the fixed LAN-direct contents ride along read-only (API transparency)
+    from alle import routes as routes_mod
+
+    assert data["lan"] == {
+        "cidrs": list(routes_mod.LAN_DIRECT_CIDRS),
+        "udp_ports": list(routes_mod.LAN_DIRECT_UDP_PORTS),
+    }
     assert [r["id"] for r in data["rules"]] == ["r1", "r2", "r3"]
     assert [rs["id"] for rs in data["rulesets"]] == ["rs1", "rs2", "rs3"]
     assert data["rules"][1]["shadowed_by"] == "r1"
@@ -150,6 +157,64 @@ def test_routes_remove_dry_run_then_real(channel):
     real = service.routes_remove(["r1"])
     assert real["dry_run"] is False
     assert Store.load().rules() == []
+
+
+def test_routes_move_adopts_target_and_appends_at_destination_end(channel):
+    service.routes_ruleset_create(
+        "US", "nordvpn/us_1", [{"value": "a.com"}, {"value": "b.com"}]
+    )
+    service.routes_ruleset_create("Direct", "direct", [{"value": "c.com"}])
+
+    result = service.routes_move(["r1"], "rs2")
+
+    assert [r["id"] for r in result["moved"]] == ["r1"]
+    assert result["moved"][0]["target"] == "direct"  # destination's target
+    assert result["dissolved"] == []
+    rs = result["ruleset"]
+    assert rs["id"] == "rs2" and [r["id"] for r in rs["rules"]] == ["r3", "r1"]
+    listed = service.routes_list()
+    assert [r["id"] for r in listed["rules"]] == ["r2", "r3", "r1"]
+    assert [rs["id"] for rs in listed["rulesets"]] == ["rs1", "rs2"]
+
+
+def test_routes_move_dissolves_an_emptied_source_ruleset(channel):
+    service.routes_ruleset_create("A", "direct", [{"value": "a.com"}])
+    service.routes_ruleset_create("B", "block", [{"value": "b.com"}])
+
+    result = service.routes_move(["r1"], "rs2")
+
+    assert result["dissolved"] == ["rs1"]
+    listed = service.routes_list()
+    assert [rs["id"] for rs in listed["rulesets"]] == ["rs2"]
+    assert [r["id"] for r in listed["rules"]] == ["r2", "r1"]
+    assert listed["rules"][1]["target"] == "block"
+
+
+def test_routes_move_recomputes_shadow_lint_at_the_new_position(channel):
+    service.routes_ruleset_create("Cover", "direct", [{"value": "google.com"}])
+    service.routes_ruleset_create("API", "block", [{"value": "api.google.com"}])
+    # moving the subdomain matcher behind its covering suffix flags it
+    result = service.routes_move(["r2"], "rs1")
+    assert result["moved"][0]["shadowed_by"] == "r1"
+
+
+def test_routes_move_rejects_bad_input_without_mutating(channel):
+    service.routes_ruleset_create("A", "direct", [{"value": "a.com"}])
+    service.routes_ruleset_create("B", "block", [{"value": "b.com"}])
+
+    cases = [
+        (["r1"], "rs9", "unknown ruleset 'rs9'"),
+        (["r7", "r9"], "rs2", "no rule\\(s\\) r7, r9"),
+        (["r2"], "rs2", "already in ruleset rs2"),
+    ]
+    for ids, dest, msg in cases:
+        with pytest.raises(service.ServiceError, match=msg):
+            service.routes_move(ids, dest)
+    with pytest.raises(service.ServiceError, match="at least one rule id"):
+        service.routes_move([], "rs2")
+    listed = service.routes_list()
+    assert [r["id"] for r in listed["rules"]] == ["r1", "r2"]
+    assert [rs["id"] for rs in listed["rulesets"]] == ["rs1", "rs2"]
 
 
 def test_routes_reorder_persists_and_recomputes_shadow_lint(channel):
@@ -209,6 +274,7 @@ def test_lan_direct_defaults_on_and_toggles():
     assert report["changed"] is False
     assert report["router"]["lan_direct"] is True
     assert report["cidrs"] == list(routes_mod.LAN_DIRECT_CIDRS)
+    assert report["udp_ports"] == list(routes_mod.LAN_DIRECT_UDP_PORTS)
     off = service.routes_lan_direct(False)
     assert off["changed"] is True and off["router"]["lan_direct"] is False
     assert service.routes_lan_direct(True)["router"]["lan_direct"] is True
