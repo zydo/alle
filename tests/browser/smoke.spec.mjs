@@ -113,10 +113,22 @@ test("route reorder stages locally, applies once, survives reload", async ({ app
   await expect(
     page.locator('.rule-row[data-id]', { hasText: "Streaming" }).locator(".rule-via"),
   ).toContainText("via");
-  // drag Streaming below Home lab (the only reorder control — buttons are gone)
+  // drag Streaming below Home lab (the only reorder control — buttons are gone).
+  // HTML5 drag-and-drop is driven with explicit mouse moves: locator.dragTo
+  // does not reliably synthesize dragstart/dragover/drop. Both rows must be
+  // on-screen first — the dashboard stacks entry/channels/routes, so with the
+  // routes panel's test box the lower rows sit below the 720px viewport and a
+  // drag to an off-screen target never fires dragover on it.
   const streaming = page.locator('.rule-row[data-id]', { hasText: "Streaming" });
   const homelab = page.locator('.rule-row[data-id]', { hasText: "Home lab" });
-  await streaming.dragTo(homelab, { targetPosition: { x: 200, y: 30 } });
+  await streaming.scrollIntoViewIfNeeded();
+  await homelab.scrollIntoViewIfNeeded();
+  const sBox = await streaming.boundingBox();
+  const hBox = await homelab.boundingBox();
+  await page.mouse.move(sBox.x + sBox.width / 2, sBox.y + sBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(hBox.x + 200, hBox.y + 30, { steps: 12 });
+  await page.mouse.up();
   // staged only: the apply bar appears, nothing is saved yet
   await expect(page.locator(".apply-bar")).toBeVisible();
   await expect(names).toHaveText(["Home lab", "Streaming", "Trackers"]);
