@@ -929,6 +929,41 @@ def test_routes_geo_status_reports_source_and_empty_cache(live):
     assert st == 400
 
 
+def test_routes_trace_endpoint(live):
+    base, secret = live
+    # an IP destination needs no DNS — hermetic, and the LAN built-in decides
+    st, body, _ = _req(
+        base + "/api/v1/routes/trace",
+        method="POST",
+        headers=_bearer(secret),
+        data={"destination": "192.168.1.20"},
+    )
+    data = json.loads(body)
+    assert st == 200
+    assert data["verdict"] == "lan_direct" and data["exit"] == "direct"
+    assert data["matched_rule"] == {"builtin": "lan-direct"}
+    assert any(w.get("matched") for w in data["walked"])
+
+    st, body, _ = _req(
+        base + "/api/v1/routes/trace",
+        method="POST",
+        headers=_bearer(secret),
+        data={"destination": "not a domain"},
+    )
+    assert st == 400 and "not a valid domain" in json.loads(body)["error"]
+
+    st, body, _ = _req(
+        base + "/api/v1/routes/trace",
+        method="POST",
+        headers=_bearer(secret),
+        data={},
+    )
+    assert st == 400 and "destination" in json.loads(body)["error"]
+
+    st, _, _ = _req(base + "/api/v1/routes/trace", headers=_bearer(secret))
+    assert st == 405  # POST-only
+
+
 def test_backup_endpoints_configure_run_and_report(live):
     base, secret = live
     origin = _bearer(secret)

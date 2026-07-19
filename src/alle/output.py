@@ -288,6 +288,52 @@ def routes_list(data: dict) -> str:
     return "\n".join(lines)
 
 
+_TRACE_VERDICTS = {
+    "channel": "VPN",
+    "direct": "direct (outside any tunnel)",
+    "lan_direct": "direct (built-in LAN rule)",
+    "block": "blocked",
+    "reject_v6": "blocked (IPv6 protection)",
+    "killswitch": "blocked (kill-switch)",
+}
+
+
+def routes_trace(data: dict) -> str:
+    verdict = _TRACE_VERDICTS.get(data["verdict"], data["verdict"])
+    if data["verdict"] == "channel":
+        verdict = f"VPN — exits through {data['exit']}"
+    lines = [f"{data['input']} → {verdict}", f"  {data['reason']}"]
+    dns = data.get("dns")
+    if dns:
+        if dns.get("error"):
+            lines.append(
+                f"  DNS ({dns['upstream']}): lookup failed — {dns['error']}; "
+                "domain rules still evaluated, IP rules could not be"
+            )
+        else:
+            shown = ", ".join(data["resolved_ips"][:6]) or "(no answers)"
+            if len(data["resolved_ips"]) > 6:
+                shown += f", … {len(data['resolved_ips']) - 6} more"
+            family = data.get("flow_family")
+            flow = f" — traced as an IPv{family} flow" if family else ""
+            lines.append(f"  DNS ({dns['upstream']}): {shown}{flow}")
+            if dns.get("aaaa_suppressed"):
+                lines.append(
+                    "  note: alle's tun DNS suppresses these AAAA answers "
+                    "(no IPv6-capable channel), so no IPv6 flow exists"
+                )
+    for ref, problem in (data.get("geo_problems") or {}).items():
+        lines.append(f"  WARNING: {ref} is {problem}")
+    lines.append("Rule walk (first match wins):")
+    rows = []
+    for step in data["walked"]:
+        marker = "MATCH" if step.get("matched") else ""
+        target = step.get("target") or ""
+        rows.append([marker, step["rule"], target, step.get("note", "")])
+    lines.extend("  " + line for line in _table(["", "RULE", "TARGET", "NOTE"], rows))
+    return "\n".join(lines)
+
+
 def _latency(ms: float | int | None) -> str:
     return f"{ms}ms" if ms is not None else "-"
 

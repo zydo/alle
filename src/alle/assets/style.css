@@ -1128,6 +1128,104 @@ input.relabel {
   color: var(--text);
 }
 
+/* ---- rule-match tracer (the routes panel's test box) ---- */
+.trace-box {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+/* keep the button's footprint stable while it holds a spinner instead of
+   the "Trace" label, so the row doesn't shift mid-request */
+.trace-box .btn {
+  min-width: 72px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.trace-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 8px 12px;
+  font-size: 13px;
+  font-family: var(--mono);
+}
+
+.trace-input:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -1px;
+}
+
+.trace-result[hidden] {
+  display: none;
+}
+
+.trace-result {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--brand);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--brand) 4%, var(--panel));
+  padding: 10px 36px 10px 14px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.trace-verdict {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.trace-verdict.vpn {
+  color: var(--live);
+}
+
+.trace-verdict.direct {
+  color: var(--live);
+}
+
+.trace-verdict.block {
+  color: var(--down);
+}
+
+.trace-reason {
+  color: var(--muted);
+}
+
+/* emphasized reason parts (the matched matcher, the channel target) — bold
+   weight plus the stronger ink color so they read against the muted reason */
+.trace-reason b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.trace-err {
+  color: var(--down);
+}
+
+.trace-clear {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+}
+
+.rule-row.trace-hit {
+  outline: 2px solid var(--live);
+  outline-offset: -2px;
+  border-radius: 8px;
+}
+
 /* ---- bundle page ---- */
 .bundle-page {
   display: grid;

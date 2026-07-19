@@ -817,6 +817,37 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /api/v1/routes/trace:
+    post:
+      tags: [routes]
+      summary: Which routing rule wins for a destination (rule-match tracer)
+      description: >
+        An offline dry-run of the compiled rule table: walks the same rule
+        order the engine compiles into sing-box (built-ins included) and
+        evaluates the destination with the engine's matching semantics —
+        geosite/geoip answered from the cached rule-set files. No traffic is
+        sent; the disclosed DNS lookup for a domain destination is the only
+        network I/O (tracing a literal IP does none). Returns the verdict
+        (`channel|direct|block|lan_direct|reject_v6|killswitch`), the winning
+        rule, a human-readable reason, and the full walk in evaluation order.
+      operationId: traceRoute
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [destination]
+              properties:
+                destination:
+                  type: string
+                  description: A domain, IP address, or URL (reduced to its host).
+                  example: netflix.com
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /api/v1/routes/geo:
     get:
       tags: [routes]

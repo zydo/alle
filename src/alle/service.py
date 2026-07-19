@@ -30,6 +30,7 @@ from alle import (
     routes,
     singbox,
     throughput,
+    tracer,
     txn,
     wgconf,
 )
@@ -1284,6 +1285,19 @@ def routes_killswitch(enable: bool | None = None) -> dict:
         )
         daemon.ensure_running()
     return {"changed": enable is not None, "router": _router_info(store)}
+
+
+def routes_trace(destination: str) -> dict:
+    """Which routing rule wins for ``destination``, and why.
+
+    An offline evaluation of the compiled rule order (no sing-box, no daemon
+    required); the only network I/O is the disclosed DNS lookup for a domain
+    destination. See :mod:`alle.tracer` for the semantics and their limits.
+    """
+    try:
+        return tracer.trace(Store.load(), destination)
+    except tracer.TraceError as e:
+        raise ServiceError(str(e)) from e
 
 
 def routes_geo_status() -> dict:

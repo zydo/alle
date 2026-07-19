@@ -36,6 +36,11 @@ const SHELL = `
     <section class="dash-panel dash-panel-routes rise">
       <div class="table-title"><span class="eyebrow">Router rules</span></div>
       <p class="route-banner">When a matcher (domain or IP) appears in multiple rules, <b>the first match wins</b>. Drag to reorder.</p>
+      <form class="trace-box" id="trace-form">
+        <input type="text" id="trace-input" class="trace-input" placeholder="Test a destination — netflix.com, 8.8.8.8, or a URL" aria-label="Destination to trace" autocomplete="off" spellcheck="false" />
+        <button type="submit" class="btn" id="trace-btn">Trace</button>
+      </form>
+      <div id="trace-result" class="trace-result" role="status" hidden></div>
       <div id="routes"></div>
     </section>
   </div>`;
@@ -56,6 +61,9 @@ let refreshStatus = () => { };
 let lifetime = null;
 let configRevision = null;
 let lastLabelsSig = null;
+// Last trace verdict; survives routes re-renders so the row highlight can be
+// re-applied after the panel's innerHTML is rebuilt.
+let traceData = null;
 
 export function mount(view, ctx) {
   refreshStatus = ctx?.refresh || (() => { });
@@ -66,9 +74,12 @@ export function mount(view, ctx) {
     tunToggle: view.querySelector("#tun-toggle"), tunNote: view.querySelector("#tun-note"),
     tunBead: view.querySelector("#tun-bead"),
     channels: view.querySelector("#channels"), routes: view.querySelector("#routes"),
+    traceForm: view.querySelector("#trace-form"), traceInput: view.querySelector("#trace-input"),
+    traceBtn: view.querySelector("#trace-btn"), traceResult: view.querySelector("#trace-result"),
     probeAll: null, speedAll: null,
   };
   el.tunToggle.onclick = toggleTun;
+  el.traceForm.onsubmit = onTrace;
   el.entry.addEventListener("keydown", activateOnKey);
   view.addEventListener("click", (e) => {
     const t = e.target.closest("[data-copy]");
@@ -85,7 +96,7 @@ export function mount(view, ctx) {
   refreshRoutes();
 }
 
-export function unmount() { el = {}; status = null; rulesets = []; router = null; measured = new Map(); busy = new Set(); dragRuleId = null; paused = false; pendingIds = null; lifetime = null; configRevision = null; lastLabelsSig = null; }
+export function unmount() { el = {}; status = null; rulesets = []; router = null; measured = new Map(); busy = new Set(); dragRuleId = null; paused = false; pendingIds = null; lifetime = null; configRevision = null; lastLabelsSig = null; traceData = null; }
 
 function activateOnKey(event) {
   if ((event.key === "Enter" || event.key === " ") && event.target.matches('[role="button"]')) {
@@ -716,6 +727,94 @@ function renderRoutes() {
     el.routes.querySelector("#dash-reorder-apply").onclick = applyReorder;
     el.routes.querySelector("#dash-reorder-cancel").onclick = cancelReorder;
   }
+  applyTraceHighlight();
+}
+
+// ---- rule-match tracer -------------------------------------------------------
+
+const TRACE_VERDICTS = {
+  channel: { label: "VPN", cls: "vpn" },
+  direct: { label: "Direct", cls: "direct" },
+  lan_direct: { label: "Direct (LAN)", cls: "direct" },
+  block: { label: "Blocked", cls: "block" },
+  reject_v6: { label: "Blocked (IPv6)", cls: "block" },
+  killswitch: { label: "Blocked (kill-switch)", cls: "block" },
+};
+
+async function onTrace(e) {
+  e.preventDefault();
+  const destination = el.traceInput?.value.trim();
+  if (!destination) return;
+  await singleFlight("trace", async () => {
+    const active = mountGuard();
+    el.traceBtn.disabled = true;
+    el.traceBtn.innerHTML = '<span class="spinner small"></span>';
+    el.traceResult.hidden = false;
+    el.traceResult.innerHTML = `<span class="spinner small"></span><span class="trace-reason">Tracing ${esc(destination)}…</span>`;
+    const res = await api.post("/api/v1/routes/trace", { destination }, { signal: lifetime?.signal });
+    if (res.aborted || !active()) return;
+    el.traceBtn.disabled = false;
+    el.traceBtn.textContent = "Trace";
+    if (!res.ok) {
+      traceData = null;
+      el.traceResult.innerHTML = `<span class="trace-err">${esc(res.error)}</span>`;
+      applyTraceHighlight();
+      return;
+    }
+    traceData = res.data;
+    renderTraceResult();
+    applyTraceHighlight();
+  });
+}
+
+function renderTraceResult() {
+  if (!el.traceResult || !traceData) return;
+  const t = traceData;
+  const v = TRACE_VERDICTS[t.verdict] || { label: t.verdict, cls: "block" };
+  const exit = t.verdict === "channel" ? ` via ${targetLabel(t.exit).name}` : "";
+  // the backend emits the reason as structured segments (reason_parts);
+  // bold segments render emphasized (the matched matcher, the channel target).
+  const parts = Array.isArray(t.reason_parts) && t.reason_parts.length
+    ? t.reason_parts
+    : [{ text: t.reason || "" }];
+  const reasonHtml = parts
+    .map((p) => (p.bold ? `<b>${esc(p.text)}</b>` : esc(p.text)))
+    .join("");
+  const dnsErr = t.dns?.error ? ` — DNS lookup failed (${esc(t.dns.error)})` : "";
+  // DNS resolution is only surfaced for a geoip match (inline in the reason,
+  // as a "(<domain> resolved to)" parenthetical); for every other verdict the
+  // resolved IPs are not part of why it matched, so no DNS line is shown.
+  el.traceResult.hidden = false;
+  el.traceResult.innerHTML = `
+    <span class="trace-verdict ${v.cls}">${esc(v.label)}${esc(exit)}</span>
+    <span class="trace-reason">${reasonHtml}${dnsErr}</span>
+    <button type="button" class="icon-btn trace-clear" id="trace-clear" title="Clear trace" aria-label="Clear trace">×</button>`;
+  el.traceResult.querySelector("#trace-clear").onclick = () => {
+    traceData = null;
+    el.traceResult.hidden = true;
+    el.traceResult.innerHTML = "";
+    applyTraceHighlight();
+  };
+}
+
+// Mark the row the trace's winning rule lives in: the ruleset containing the
+// matched rule id, the built-in LAN row, or the unmatched row (kill-switch or
+// fall-through direct). Re-applied after every routes re-render.
+function applyTraceHighlight() {
+  if (!el.routes) return;
+  el.routes.querySelectorAll(".trace-hit").forEach((r) => r.classList.remove("trace-hit"));
+  if (!traceData) return;
+  let row = null;
+  const ruleId = traceData.matched_rule?.id;
+  if (ruleId) {
+    const rs = rulesets.find((b) => (b.rules || []).some((r) => r.id === ruleId));
+    if (rs) row = el.routes.querySelector(`.rule-row[data-id="${CSS.escape(rs.id)}"]`);
+  } else if (traceData.matched_rule?.builtin === "lan-direct") {
+    row = el.routes.querySelector(".rule-row.lan");
+  } else if (traceData.verdict === "killswitch" || traceData.verdict === "direct") {
+    row = el.routes.querySelector(".rule-row.unmatched");
+  }
+  row?.classList.add("trace-hit");
 }
 
 async function onRouteClick(e) {

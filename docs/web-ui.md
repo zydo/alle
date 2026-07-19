@@ -30,7 +30,11 @@ page:
   and toggle **Allow Non-VPN Traffic** (the Unmatched row: on lets unmatched
   destinations reach the Internet, off blocks them). A fixed **Priority 0 / LAN**
   row at the top keeps local traffic direct ahead of every rule, with a toggle
-  to turn that protection off.
+  to turn that protection off. A **test box** on the panel traces a destination
+  (domain, IP, or URL) through the rule table offline — it renders the verdict
+  and **highlights the winning rule's row** in place, so you can see at a glance
+  why traffic to a site goes where it goes. Same evaluation as
+  `alle routes trace`; nothing is sent through the tunnel.
 - **Bundle** — download the whole setup as a bundle file (it contains
   credentials — the UI warns first), and upload one to **merge** it in or
   **replace** the whole setup (with a confirmation dialog).

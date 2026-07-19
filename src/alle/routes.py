@@ -180,6 +180,67 @@ def describe(rule: dict) -> str:
     return f"{rule['type']} {rule['value']}"
 
 
+def matcher_token(rule: dict) -> str:
+    """The canonical one-token form of a matcher: ``geosite:netflix``,
+    ``geoip:us``, a bare domain (``netflix.com``), a CIDR (``10.0.0.0/8``),
+    or ``all traffic``. The form surfaced in trace output and the Web UI."""
+    mtype = rule["type"]
+    if mtype == "all":
+        return "all traffic"
+    if mtype in GEO_TYPES:
+        return f"{mtype}:{rule['value']}"
+    return str(rule["value"])
+
+
+# ---- destination matching ----------------------------------------------------
+
+
+def domain_suffix_matches(suffix: str, domain: str) -> bool:
+    """alle's one domain semantic: ``suffix`` matches the domain itself and
+    its subdomains, on a dot boundary. The single implementation behind both
+    the shadow lint (:func:`covers`) and the tracer (:func:`match_destination`)."""
+    return domain == suffix or domain.endswith("." + suffix)
+
+
+def match_destination(
+    rule: dict,
+    domain: str | None = None,
+    ips: tuple | list = (),
+    geo: dict | None = None,
+) -> bool:
+    """Would ``rule`` match a destination? — the tracer's core primitive.
+
+    The destination is a ``domain`` and/or its resolved ``ips``
+    (:mod:`ipaddress` address objects; for a literal-IP destination pass just
+    the address). ``geo`` maps ``(kind, category)`` to a parsed rule-set
+    (:class:`alle.srs.RuleSet`) for geosite/geoip rules; a geo rule whose
+    category is missing from ``geo`` matches nothing (the caller decides how
+    to disclose that).
+
+    Same first-match-wins table semantics as the compiled sing-box config:
+    this answers one rule's verdict, the caller walks the order.
+    """
+    mtype = rule["type"]
+    if mtype == "all":
+        return True
+    if mtype == "domain_suffix":
+        return domain is not None and domain_suffix_matches(rule["value"], domain)
+    if mtype == "ip_cidr":
+        try:
+            net = ipaddress.ip_network(rule["value"])
+        except ValueError:
+            return False
+        return any(ip.version == net.version and ip in net for ip in ips)
+    if mtype in GEO_TYPES:
+        ruleset = (geo or {}).get((mtype, rule["value"]))
+        if ruleset is None:
+            return False
+        if mtype == "geosite":
+            return bool(domain) and ruleset.match(domain=domain)
+        return bool(ips) and ruleset.match(ips=list(ips))
+    return False
+
+
 # ---- shadow lint -------------------------------------------------------------
 
 
@@ -219,8 +280,9 @@ def covers(a: dict, b: dict) -> bool:
         # opaque category contents: only an identical category provably covers
         return ta == tb and a["value"] == b["value"]
     if ta == "domain_suffix" and tb == "domain_suffix":
-        # dot-boundary suffix semantics: google.com covers google.com + *.google.com
-        return b["value"] == a["value"] or b["value"].endswith("." + a["value"])
+        # a covers b iff a matches b's root — then every subdomain of b is
+        # a's subdomain too (the same dot-boundary primitive the tracer uses)
+        return domain_suffix_matches(a["value"], b["value"])
     if ta == "ip_cidr" and tb == "ip_cidr":
         return _subnet_of(
             ipaddress.ip_network(b["value"]), ipaddress.ip_network(a["value"])

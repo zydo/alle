@@ -136,6 +136,7 @@ def _api_route_methods(seg: list[str]) -> set[str] | None:
         ("routes", "reorder"): {"POST"},
         ("routes", "killswitch"): {"POST"},
         ("routes", "lan"): {"POST"},
+        ("routes", "trace"): {"POST"},
         ("routes", "geo"): {"GET", "POST"},
         ("routes", "geo", "categories"): {"GET"},
         ("routes", "geo", "refresh"): {"POST"},
@@ -1557,6 +1558,11 @@ class _Handler(BaseHTTPRequestHandler):
             _fields(body, "enabled")
             return self._call(
                 service.routes_lan_direct, _bool_field(body, "enabled", required=True)
+            )
+        if method == "POST" and seg == ["routes", "trace"]:
+            _fields(body, "destination")
+            return self._call(
+                service.routes_trace, _str_field(body, "destination", required=True)
             )
         if method == "GET" and seg == ["routes", "geo"]:
             return self._call(service.routes_geo_status)

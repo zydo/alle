@@ -131,6 +131,64 @@ test("route reorder stages locally, applies once, survives reload", async ({ app
   ]);
 });
 
+test("rule tracer: verdict renders and the winning row is highlighted", async ({
+  app,
+  evidence,
+}) => {
+  const { page } = app;
+  // the deliberate bad-input trace below logs a 400 resource error
+  evidence.allow(/console: Failed to load resource: .*400/);
+  // an IP destination needs no DNS: 203.0.113.55 hits Home lab's ip_cidr
+  await page.locator("#trace-input").fill("203.0.113.55");
+  await page.locator("#trace-btn").click();
+  await expect(page.locator("#trace-result")).toBeVisible();
+  await expect(page.locator(".trace-verdict")).toHaveText("Direct");
+  await expect(page.locator(".trace-reason")).toContainText("203.0.113.55");
+  // the matched matcher is rendered as an emphasized (bold) segment
+  await expect(page.locator(".trace-reason b")).toHaveText("203.0.113.0/24");
+  await expect(page.locator(".rule-row.trace-hit")).toContainText("Home lab");
+  // a private address is decided by the built-in LAN row instead
+  await page.locator("#trace-input").fill("192.168.1.10");
+  await page.locator("#trace-btn").click();
+  await expect(page.locator(".trace-verdict")).toHaveText("Direct (LAN)");
+  await expect(page.locator(".rule-row.lan.trace-hit")).toBeVisible();
+  await expect(page.locator(".trace-hit")).toHaveCount(1);
+  // unusable input surfaces the API's message, clears any highlight
+  await page.locator("#trace-input").fill("not a domain");
+  await page.locator("#trace-btn").click();
+  await expect(page.locator("#trace-result .trace-err")).toContainText("not a valid");
+  await expect(page.locator(".trace-hit")).toHaveCount(0);
+  // clear hides the result box
+  await page.locator("#trace-input").fill("203.0.113.55");
+  await page.locator("#trace-btn").click();
+  await expect(page.locator(".rule-row.trace-hit")).toContainText("Home lab");
+  await page.locator("#trace-clear").click();
+  await expect(page.locator("#trace-result")).toBeHidden();
+  await expect(page.locator(".trace-hit")).toHaveCount(0);
+});
+
+test("rule tracer: in-flight state shows a spinner (button + result), then resolves", async ({
+  app,
+}) => {
+  const { page } = app;
+  // stall the trace POST so the pending state is observable
+  await page.route("**/api/v1/routes/trace**", async (route) => {
+    await new Promise((r) => setTimeout(r, 500));
+    return route.fallback();
+  });
+  await page.locator("#trace-input").fill("203.0.113.55");
+  await page.locator("#trace-btn").click();
+  // both the button and the result area show a spinner while the request is up
+  await expect(page.locator("#trace-btn .spinner")).toBeVisible();
+  await expect(page.locator("#trace-btn")).toBeDisabled();
+  await expect(page.locator("#trace-result .spinner")).toBeVisible();
+  await expect(page.locator("#trace-result")).toContainText("Tracing 203.0.113.55");
+  // …and it resolves to the verdict once the response lands
+  await expect(page.locator(".trace-verdict")).toHaveText("Direct");
+  await expect(page.locator("#trace-btn")).toHaveText("Trace");
+  await expect(page.locator("#trace-btn .spinner")).toHaveCount(0);
+});
+
 test("modal cancellation: Escape closes, background un-inerts, focus returns", async ({
   app,
 }) => {

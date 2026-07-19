@@ -498,6 +498,12 @@ def cmd_routes_ls(args):
     )
 
 
+def cmd_routes_trace(args):
+    _print_or_json(
+        service.routes_trace(args.destination), output.routes_trace, args.json
+    )
+
+
 def cmd_routes_rm(args):
     result = service.routes_remove(args.ids, dry_run=args.dry_run)
     verb = "Would remove" if result["dry_run"] else "Removed"
@@ -1681,6 +1687,14 @@ def build_parser() -> argparse.ArgumentParser:
     rls.add_argument("--flat", action="store_true", help="show the flat matcher rows")
     rls.add_argument("--json", action="store_true", help="print machine-readable JSON")
     rls.set_defaults(func=cmd_routes_ls)
+    rtr = ro_sub.add_parser(
+        "trace",
+        help="which rule wins for a destination — an offline dry-run of the "
+        "rule table (no traffic is sent; DNS for a domain is the one lookup)",
+    )
+    rtr.add_argument("destination", help="a domain, IP address, or URL")
+    rtr.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    rtr.set_defaults(func=cmd_routes_trace)
     rrm = ro_sub.add_parser("rm", help="remove rules by id")
     rrm.add_argument("ids", nargs="+", help="rule id(s) shown by: alle routes ls")
     rrm.add_argument(

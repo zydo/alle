@@ -175,3 +175,51 @@ Switching the upstream: `alle routes geo source metacubex` (alternative:
 [MetaCubeX/meta-rules-dat](https://github.com/MetaCubeX/meta-rules-dat), which
 includes `-lite` variants). Categories will be re-fetched on the next
 `refresh`.
+
+## Tracing rules: which rule wins for a destination?
+
+With more than a couple of rules — and especially with geo categories, whose
+contents are opaque until you look them up — "where will traffic to X
+actually go?" stops being obvious. The tracer answers it without sending any
+traffic:
+
+```bash
+alle routes trace netflix.com
+alle routes trace 192.168.1.1
+alle routes trace https://cache3.example.com/path   # URLs reduce to their host
+alle routes trace 2606:4700::1111 --json            # scripting form
+```
+
+It walks the **same rule table the engine compiles into sing-box** — the
+built-in LAN block, the IPv6 protections, your rules in order, the
+kill-switch — and evaluates the destination with the engine's matching
+semantics. geosite/geoip membership is answered from the same cached,
+digest-verified `.srs` files sing-box loads, parsed offline. The output shows
+every rule considered in evaluation order, which one matched (first match
+wins), and the verdict: which channel the traffic exits through, or `direct`,
+or why it is blocked.
+
+The same evaluation backs `POST /api/v1/routes/trace` and the **test box on
+the Web UI's Router rules panel**, which highlights the winning ruleset row
+in place.
+
+What to know about its answers:
+
+- **It is a table evaluation, not a probe.** Nothing is sent through any
+  tunnel (use `alle test` for that). No daemon or running sing-box is needed.
+- **DNS is the one disclosed lookup.** A domain destination is resolved
+  against the same upstream the tun DNS uses (`1.1.1.1`), never the system
+  resolver, and the answers are shown in the result. Tracing a literal IP
+  does no network I/O at all.
+- **The flow family follows alle's DNS strategy**: IPv4 when any A record
+  exists, IPv6 only for v6-only destinations. With no IPv6-capable channel,
+  the tun DNS suppresses AAAA answers entirely — the trace discloses those
+  answers but does not pretend an IPv6 flow could exist.
+- **IP-based rules (ip_cidr, geoip) are evaluated against the resolved
+  addresses**, which models the tun path (apps resolve, then dial the IP). A
+  proxy client that sends the hostname through `CONNECT` keeps a domain
+  destination end-to-end, so IP-based rules cannot match that path in the
+  live config.
+- Rules that key on dimensions a bare destination does not have (the
+  UDP-port LAN entries, the DNS hijack) are shown in the walk as
+  not-evaluable rather than silently skipped.

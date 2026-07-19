@@ -36,6 +36,7 @@ omit the checkout prefix.
     - [`alle routes killswitch [on|off]`](#alle-routes-killswitch-onoff)
     - [`alle routes lan [on|off]`](#alle-routes-lan-onoff)
     - [`alle routes geo [ls|refresh|source]`](#alle-routes-geo-lsrefreshsource)
+    - [`alle routes trace <destination> [--json]`](#alle-routes-trace-destination---json)
   - [`alle locations`](#alle-locations)
   - [`alle status`](#alle-status)
   - [`alle start` / `stop` / `restart`](#alle-start--stop--restart)
@@ -605,6 +606,33 @@ Geo data is fetched on demand and never auto-updated (no-background-traffic).
 The first rule referencing a category downloads its `.srs` file; `refresh`
 updates them all. Each cached file is sha256-verified against a recorded digest
 on every use. See [routing.md](routing.md#geo-matchers) for the full design.
+
+---
+
+### `alle routes trace <destination> [--json]`
+
+Which routing rule wins for a destination — an offline dry-run of the rule
+table. Nothing is sent through any tunnel (use [`alle test`](#alle-test) for a
+real probe); no daemon or running sing-box is needed. The destination may be a
+domain, a literal IP, or a URL (reduced to its host).
+
+```bash
+alle routes trace netflix.com
+alle routes trace 192.168.1.1
+alle routes trace https://cache3.example.com/path   # URLs reduce to their host
+alle routes trace 2606:4700::1111 --json            # scripting form
+```
+
+The trace walks the same rule order the engine compiles into sing-box — the
+built-in LAN block, the IPv6 protections, your rules in order, the kill-switch
+— and evaluates the destination with the engine's matching semantics. geosite/
+geoip membership is answered from the same cached, digest-verified `.srs` files
+sing-box loads. Output shows every rule considered (first match wins), which
+one matched, and the verdict: the exit channel, `direct`, or why traffic is
+blocked. The only network I/O is the disclosed DNS lookup for a domain
+(tracing a literal IP does none); the same evaluation backs
+`POST /api/v1/routes/trace` and the Web UI's test box. Details and the
+honest limits of the model: [routing.md](routing.md#tracing-rules-which-rule-wins-for-a-destination).
 
 ---
 
