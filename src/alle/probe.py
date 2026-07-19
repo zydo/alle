@@ -41,6 +41,15 @@ IP_ECHO_SOURCES: list[tuple[str, str]] = [
     ("ipify", "https://api.ipify.org"),
 ]
 
+# IPv6-only echo sources, used for the supplementary v6-exit lookup on
+# channels that carry IPv6. The hostnames resolve AAAA-only (or the literal
+# is v6), so the connection is forced over v6 through the tunnel — a v4-happy
+# echo can't answer by accident. Same ordering/first-win rules as above.
+IPV6_ECHO_SOURCES: list[tuple[str, str]] = [
+    ("icanhazip-v6", "https://ipv6.icanhazip.com"),
+    ("ipify-v6", "https://api6.ipify.org"),
+]
+
 _USER_AGENT = "alle-probe/1"
 
 # An IP-echo body is a few dozen bytes (cloudflare-trace ~300). Reading more
@@ -92,6 +101,29 @@ def _extract_ip(source: str, body: str) -> str | None:
     if source == "cloudflare-trace":
         return _valid_public_ip(_parse_trace_ip(body))
     return _valid_public_ip(body)
+
+
+def probe_ipv6(port: int, timeout: float = 6) -> str | None:
+    """The channel's IPv6 exit address, or ``None``.
+
+    A supplementary lookup for v6-capable channels only — never on the
+    critical path: the channel's health/latency verdict comes from
+    :func:`probe_channel`, and a v6-echo failure only means "no v6 exit to
+    show" (the server may still be v4-happy). One source failing falls
+    through to the next; anything non-v6 or non-public is rejected.
+    """
+    opener = proxy_opener(port)
+    for _name, url in IPV6_ECHO_SOURCES:
+        req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})  # noqa: S310 — fixed https URLs, no user-supplied scheme
+        try:
+            with opener.open(req, timeout=timeout) as r:  # noqa: S310 (loopback proxy)
+                body = r.read(MAX_BODY_BYTES).decode(errors="replace")
+        except Exception:  # noqa: BLE001, S112 — best-effort supplement: any failure just means "try the next source", and the channel's health verdict is not affected
+            continue
+        ip = _valid_public_ip(body)
+        if ip and ":" in ip:
+            return ip
+    return None
 
 
 def probe_channel(

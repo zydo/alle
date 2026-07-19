@@ -82,7 +82,9 @@ def test_inbound_and_endpoint_shape():
     assert ep["private_key"] == "PRIV=" and ep["address"] == ["10.5.0.2/32"]
     peer = ep["peers"][0]
     assert peer["address"] == "1.2.3.4" and peer["port"] == 51820
-    assert peer["allowed_ips"] == ["0.0.0.0/0", "::/0"]
+    # nordvpn's registry flag is ipv6: False, so ::/0 is stripped — v6 must
+    # never be routed into a tunnel whose provider doesn't support it
+    assert peer["allowed_ips"] == ["0.0.0.0/0"]
     assert "pre_shared_key" not in peer  # absent when the conf had none
 
 
@@ -674,3 +676,114 @@ def test_probe_result_is_discarded_after_channel_identity_changes(monkeypatch):
     current = Store.load().get_channel("nordvpn", ch.id)
     assert current is not None and current.enabled is False
     assert current.probe == {}
+
+
+# ---- IPv6 per-provider policy ------------------------------------------------
+
+
+def _v6_wg(host="9.9.9.9"):
+    wg = wg_config(host)
+    wg["address"] = ["10.2.0.2/32", "2a07:b944::2:2/128"]
+    return wg
+
+
+def _proton_store(*, tun=True, extra_nord=False, rules=()):
+    router = _router(*rules)
+    router["tun"] = tun
+    specs = [("protonvpn", "wg_jp_351", 9100, "Japan", "", _v6_wg())]
+    if extra_nord:
+        specs.append(("nordvpn", "wg_us_1", 9200, "United States", "", dict(WG)))
+    return _store(*specs, router=router)
+
+
+def test_v6_capable_channel_keeps_v6_addresses():
+    config, errors = Engine(_proton_store())._build_config()
+    assert errors == {}
+    ep = next(e for e in config["endpoints"] if e["tag"] == "out-protonvpn-wg_jp_351")
+    assert ep["address"] == ["10.2.0.2/32", "2a07:b944::2:2/128"]
+    assert ep["peers"][0]["allowed_ips"] == ["0.0.0.0/0", "::/0"]
+
+
+def test_provider_flag_off_strips_v6_even_if_config_has_it():
+    # a v6 address smuggled into a nordvpn config must not survive compile
+    store = _store(("nordvpn", "wg_us_1", 9200, "United States", "", _v6_wg()))
+    config, _ = Engine(store)._build_config()
+    ep = config["endpoints"][0]
+    assert ep["address"] == ["10.2.0.2/32"]
+    assert ep["peers"][0]["allowed_ips"] == ["0.0.0.0/0"]
+
+
+def test_v6_fleet_drops_blanket_reject_and_lifts_dns():
+    config, errors = Engine(_proton_store())._build_config()
+    assert errors == {}
+    assert {
+        "inbound": ["in-tun"],
+        "ip_cidr": ["::/0"],
+        "action": "reject",
+    } not in config["route"]["rules"]
+    assert config["dns"]["strategy"] == "prefer_ipv4"
+
+
+def test_v4_only_fleet_keeps_blanket_reject_and_ipv4_only_dns():
+    router = _router()
+    router["tun"] = True
+    config, _ = Engine(
+        _store(("nordvpn", "wg_us_1", 9200, "US", "", dict(WG)), router=router)
+    )._build_config()
+    assert {
+        "inbound": ["in-tun"],
+        "ip_cidr": ["::/0"],
+        "action": "reject",
+    } in config["route"]["rules"]
+    assert config["dns"]["strategy"] == "ipv4_only"
+
+
+def test_mixed_fleet_guards_v4_only_targets_with_same_matcher_reject():
+    store = _proton_store(
+        extra_nord=True,
+        rules=(
+            ("domain_suffix", "netflix.com", "nordvpn/wg_us_1"),
+            ("all", "", "protonvpn/wg_jp_351"),
+        ),
+    )
+    config, errors = Engine(store)._build_config()
+    assert errors == {}
+    rules = config["route"]["rules"]
+    # the rule steering into the v4-only nordvpn channel is guarded by a
+    # same-matcher tun-only v6 reject compiled immediately before it
+    idx = next(
+        i
+        for i, r in enumerate(rules)
+        if r.get("outbound") == "out-nordvpn-wg_us_1" and r.get("domain_suffix")
+    )
+    guard = rules[idx - 1]
+    assert guard == {
+        "inbound": ["in-tun"],
+        "domain_suffix": ["netflix.com"],
+        "ip_version": 6,
+        "action": "reject",
+    }
+    # the v6-capable catch-all has no guard
+    catchall = next(
+        r
+        for r in rules
+        if r.get("outbound") == "out-protonvpn-wg_jp_351"
+        and "domain_suffix" not in r
+        and "inbound" in r
+        and len(r["inbound"]) > 1
+    )
+    assert "ip_version" not in catchall
+    # and no blanket reject
+    assert {"inbound": ["in-tun"], "ip_cidr": ["::/0"], "action": "reject"} not in rules
+
+
+def test_v6_guard_only_when_tun_is_on():
+    # explicit-proxy mode never captured v6; no guards, no reject needed
+    store = _proton_store(
+        tun=False,
+        extra_nord=True,
+        rules=(("domain_suffix", "netflix.com", "nordvpn/wg_us_1"),),
+    )
+    config, errors = Engine(store)._build_config()
+    assert errors == {}
+    assert all("ip_version" not in r for r in config["route"]["rules"])

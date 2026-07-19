@@ -33,7 +33,7 @@ from alle import (
     txn,
     wgconf,
 )
-from alle.engine import Engine
+from alle.engine import Engine, channel_ipv6
 from alle.providers import (
     PROVIDERS,
     ProviderError,
@@ -591,6 +591,7 @@ def channel_list() -> dict:
                 "country": _country_display(channel),
                 "city": _city_display(channel),
                 "enabled": channel.enabled,
+                "ipv6": channel_ipv6(channel),
             }
         )
     return {"providers": store.provider_names(), "channels": channels}
@@ -2162,6 +2163,7 @@ def status_snapshot() -> dict:
     for channel in store.channels():
         probe = channel.probe or {}
         recon = channel.reconnect or {}
+        ipv6_exit = None
         if not channel.enabled:
             # Administrative intent beats liveness: a disabled channel is not
             # materialised, so probe-derived states would be meaningless.
@@ -2172,6 +2174,7 @@ def status_snapshot() -> dict:
             state = "Active"
             latency = probe.get("latency_ms")
             ip = probe.get("ip") or None
+            ipv6_exit = probe.get("ipv6") or None
         elif recon.get("failed"):
             state = "Reconnect failed"
             latency = None
@@ -2199,10 +2202,14 @@ def status_snapshot() -> dict:
                 "city": _city_display(channel),
                 "state": state,
                 "enabled": channel.enabled,
+                # per-provider policy AND this server's own config — see
+                # engine.channel_ipv6 (surfaced for channels ls / the UI)
+                "ipv6": channel_ipv6(channel),
                 "probe": probe,
                 "reconnect": recon,
                 "latency_ms": latency,
                 "ip": ip,
+                "ipv6_exit": ipv6_exit,
             }
         )
     enabled_count = sum(1 for c in channels if c["enabled"])
@@ -2270,10 +2277,12 @@ def _test_row(channel, probe: dict, traffic: dict) -> dict:
     if healthy:
         latency = probe.get("latency_ms")
         ip = probe.get("ip") or None
+        ipv6_exit = probe.get("ipv6") or None
         error = None
     else:
         latency = None
         ip = None
+        ipv6_exit = None
         error = probe.get("error") or "probe failed"
     return {
         "provider": channel.provider,
@@ -2289,6 +2298,7 @@ def _test_row(channel, probe: dict, traffic: dict) -> dict:
         "state": state,
         "latency_ms": latency,
         "ip": ip,
+        "ipv6_exit": ipv6_exit,
         "error": error,
         "detail": probe.get("detail") if not healthy else None,
         "probe": probe,

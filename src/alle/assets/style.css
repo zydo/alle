@@ -465,7 +465,7 @@ section+section {
      absorbs exactly the remaining width (so the table's total never
      changes) and is the shrink valve on narrow windows, where its label
      and ref ellipsize. */
-  grid-template-columns: minmax(0, 1fr) minmax(140px, 210px) 56px 134px 88px 88px 88px 88px 88px 156px;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 210px) 56px 160px 88px 88px 88px 88px 88px 156px;
 }
 
 .row.dashchan.body {
@@ -1699,6 +1699,38 @@ input.relabel {
 .modal-body {
   padding: 16px 20px 22px;
   overflow-y: auto;
+}
+
+.v6-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  border: 1px solid var(--line-2);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 15px;
+  letter-spacing: .02em;
+  vertical-align: 1px;
+}
+
+.ip-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.ip-stack .ip {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ip-stack .ip-v6 {
+  font-size: 11px;
+  color: var(--muted);
 }
 
 /* ---- forms ---- */

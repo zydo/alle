@@ -74,6 +74,40 @@ offer standard WireGuard config download/generation from their portal:
 | PureVPN    | Portal generates WireGuard configs, but they **expire** ("activate within 30 minutes… or redownload") — hostile to alle's stored-config model; expect frequent re-imports |
 | FastestVPN | WireGuard `.conf` provided **only via support email** — no self-service generator; provisioning is manual and slow                                                        |
 
+## IPv6 support (planned providers)
+
+Snapshot: **2026-07**, checked against each provider's own support/knowledge-base
+articles. Scope is the post-MVP providers above (NordVPN and ProtonVPN are already
+implemented, not "planned", and are omitted). For `alle`, what matters is whether the
+provider's **WireGuard config/API actually assigns a routable IPv6 address** — a
+generic "IPv6 leak protection" feature just blocks IPv6 outside the tunnel and is not
+IPv6 support.
+
+| Provider                | IPv6 status                                        | Notes                                                                                                                                                          |
+| ----------------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Mullvad                 | **Supported** (dual-stack)                         | WireGuard tunnels carry IPv6 as well as IPv4 (native since 2014); IPv6 is off by default in the app and Mullvad's own guidance leans toward leaving it off.    |
+| AirVPN                  | **Supported** (dual-stack, entry + exit)           | Servers are reachable over both IPv4 and IPv6 entry-IPs; WireGuard configs assign an IPv6 ULA address (`fd7d:76ee:e68f:a993::/64`) alongside the IPv4 one.     |
+| IVPN                    | **Partial**                                        | WireGuard gives IPv6-over-IPv4 egress (access the IPv6 internet through an IPv4 tunnel); native IPv6 *to* their servers has been "under development" 2+ years. |
+| Windscribe              | **Partial** (WireGuard, select Pro locations only) | IPv6 egress works when "IP Stack" is set to Auto over WireGuard, but only on enabled Pro server locations — not fleet-wide.                                    |
+| Private Internet Access | **Not supported** (blocked, not routed)            | IPv4-only by design; the app actively blocks/leak-protects IPv6 rather than tunneling it.                                                                      |
+| VyprVPN                 | **Not supported**                                  | Official support: VyprVPN "will only route a VPN connection using IPv4"; recommends disabling IPv6 locally.                                                    |
+| Surfshark               | **Not supported**                                  | Official support: "Surfshark does not support the IPv6 protocol"; recommends disabling IPv6 locally.                                                           |
+| IPVanish                | **Not supported (yet)**                            | Official article: "IPVanish currently only supports IPv4"; company says IPv6 support is planned "absolutely" but with no ETA.                                  |
+| PureVPN                 | **Not supported** (leak-protected only)            | Public IPv6 page is "IPv6 Leak Protection" — blocks IPv6 outside the tunnel, does not route it.                                                                |
+| TorGuard                | **Not supported** (leak-protected only)            | Only public IPv6 material is a 2015 "IPv6 Leak Protection" blog post (blocking); forum ETA requests are unanswered.                                            |
+| PrivateVPN              | **Undocumented** — likely unsupported              | No official IPv6-support statement; only "disable IPv6" troubleshooting guides exist.                                                                          |
+| VPN Unlimited           | **Undocumented** — likely unsupported              | KB has only a generic "what is IPv6" glossary entry; no statement of support anywhere.                                                                         |
+| PrivadoVPN              | **Undocumented** — likely unsupported              | No support article confirms tunneling; only "disable IPv6" troubleshooting guides.                                                                             |
+| VPN.ac                  | **Undocumented** — likely unsupported              | No KB article confirms IPv6; the app-options doc doesn't mention IPv6 addressing.                                                                              |
+| FastestVPN              | **Undocumented** — likely unsupported              | Only "disable IPv6" troubleshooting guides found; no support statement either way.                                                                             |
+
+**Bottom line:** of the planned providers, only **Mullvad** and **AirVPN** hand out a
+real dual-stack IPv6 address in their WireGuard config today. IVPN and Windscribe are
+conditional/partial. Everything else is IPv4-only (either by explicit statement or by
+the absence of any documented support) — an IPv6-capable client on those providers
+would need to fall back to IPv4 (or disable IPv6 locally, per their own guidance) to
+avoid leaking outside the tunnel.
+
 ## Excluded providers
 
 - **ExpressVPN** — *has* WireGuard (since ~2025), but only as a **customized,
@@ -119,3 +153,22 @@ offer standard WireGuard config download/generation from their portal:
   <https://windscribe.com/features/config-generators>; Surfshark manual WireGuard —
   <https://support.surfshark.com/hc/en-us/articles/6585805595666>; VPN Unlimited
   WireGuard manuals — <https://www.vpnunlimited.com/help/manuals/wireguard/windows>
+- Mullvad IPv6 — <https://mullvad.net/en/blog/ipv6-support>,
+  <https://mullvad.net/en/blog/introducing-wireguard-over-tcp-and-ipv6>
+- AirVPN IPv6 (dual-stack entry/exit, WireGuard ULA) — <https://airvpn.org/specs/>
+- IVPN IPv6 (partial, egress-only) —
+  <https://www.ivpn.net/knowledgebase/general/do-you-support-ipv6/>
+- Windscribe IPv6 (WireGuard, select Pro locations) —
+  <https://windscribe.com/knowledge-base/articles/does-windscribe-support-ipv6>
+- PIA IPv6 (blocked, not routed) —
+  <https://helpdesk.privateinternetaccess.com/hc/en-us/articles/46777101512987-Why-Do-You-Block-IPv6>
+- VyprVPN IPv6 (unsupported) —
+  <https://support.vyprvpn.com/hc/en-us/articles/360038600131-Does-VyprVPN-support-IPv6>
+- Surfshark IPv6 (unsupported) —
+  <https://support.surfshark.com/hc/en-us/articles/360011550239-Does-Surfshark-support-IPv6-Do-I-have-it-on-my-network>
+- IPVanish IPv6 (unsupported, planned) —
+  <https://support.ipvanish.com/hc/en-us/articles/33788722461083-Does-IPVanish-support-IPv6>
+- PureVPN IPv6 (leak protection only) —
+  <https://www.purevpn.com/features/ipv6-leak-protection>
+- TorGuard IPv6 (leak protection only) —
+  <https://blog.torguard.net/ipv6-leak-protection-with-torguard-vpn/>

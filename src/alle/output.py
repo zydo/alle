@@ -157,11 +157,16 @@ def channels_list(data: dict) -> str:
         return 'No channels yet. Add one:  alle channels add nordvpn --country "United States"'
     # STATUS is administrative intent (enabled/disabled), not probe liveness —
     # this table stays static config, independent of whether alle is running.
+    # IPV6 is the per-provider policy AND this server's own capability.
     return "\n".join(
         _table(
-            [*BASE_HEADERS, "STATUS"],
+            [*BASE_HEADERS, "IPV6", "STATUS"],
             [
-                [*_base_cells(c), "enabled" if c.get("enabled", True) else "disabled"]
+                [
+                    *_base_cells(c),
+                    "yes" if c.get("ipv6") else "no",
+                    "enabled" if c.get("enabled", True) else "disabled",
+                ]
                 for c in channels
             ],
         )
@@ -323,7 +328,8 @@ def test_result(data: dict) -> str:
             *BASE_HEADERS,
             "STATE",
             "LATENCY",
-            "IP",
+            "IPV4",
+            "IPV6",
             "SENT",
             "RECV",
             "DOWNLOAD",
@@ -338,6 +344,7 @@ def test_result(data: dict) -> str:
                     _state_cell(c),
                     _latency(c.get("latency_ms")),
                     c.get("ip") or "-",
+                    c.get("ipv6_exit") or "-",
                     _bytes(c.get("sent", 0)),
                     _bytes(c.get("received", 0)),
                     _mbps(speed.get("download_bps")),
@@ -346,13 +353,14 @@ def test_result(data: dict) -> str:
             )
         return "\n".join(_table(headers, rows))
 
-    headers = [*BASE_HEADERS, "STATE", "LATENCY", "IP", "SENT", "RECV"]
+    headers = [*BASE_HEADERS, "STATE", "LATENCY", "IPV4", "IPV6", "SENT", "RECV"]
     rows = [
         [
             *_base_cells(c),
             _state_cell(c),
             _latency(c.get("latency_ms")),
             c.get("ip") or "-",
+            c.get("ipv6_exit") or "-",
             _bytes(c.get("sent", 0)),
             _bytes(c.get("received", 0)),
         ]
@@ -365,8 +373,17 @@ def test_result(data: dict) -> str:
 # widths for them. Their values aren't known until each channel finishes, so the
 # streamed table can't size them from the data; these floors fit typical
 # "Healthy" / "23ms" / "45.2 Mbps" cells and keep rows aligned as they appear.
-_SPEED_RESULT_HEADERS = ["STATE", "LATENCY", "IP", "SENT", "RECV", "DOWNLOAD", "UPLOAD"]
-_SPEED_RESULT_WIDTHS = [7, 7, 15, 8, 8, 10, 10]
+_SPEED_RESULT_HEADERS = [
+    "STATE",
+    "LATENCY",
+    "IPV4",
+    "IPV6",
+    "SENT",
+    "RECV",
+    "DOWNLOAD",
+    "UPLOAD",
+]
+_SPEED_RESULT_WIDTHS = [7, 7, 15, 22, 8, 8, 10, 10]
 _SPEED_HEADERS = [*BASE_HEADERS, *_SPEED_RESULT_HEADERS]
 
 
@@ -406,6 +423,7 @@ def test_stream_row(row: dict, widths: list[int]) -> str:
         _state_cell(row),
         _latency(row.get("latency_ms")),
         row.get("ip") or "-",
+        row.get("ipv6_exit") or "-",
         _bytes(row.get("sent", 0)),
         _bytes(row.get("received", 0)),
         _mbps(speed.get("download_bps")),

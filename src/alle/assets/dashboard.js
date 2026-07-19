@@ -272,7 +272,12 @@ function buildIpCell(off, m, c, st, shortSt) {
     return `<span class="ip chan-state muted" title="Disabled — not connected to the provider (no connection slot used)">Disabled</span>`;
   }
   if (m.ip) {
-    return `<span class="ip copyable" data-copy="${esc(m.ip)}" title="Click to copy" role="button" tabindex="0" aria-label="Copy exit IP ${esc(m.ip)}">${esc(m.ip)}</span>`;
+    // one cell, two stacked rows: the IPv4 exit, and — when the channel
+    // carries v6 — the IPv6 exit beneath it (each its own copy control)
+    const v6 = m.ipv6_exit
+      ? `<span class="ip ip-v6 copyable" data-copy="${esc(m.ipv6_exit)}" title="Click to copy" role="button" tabindex="0" aria-label="Copy IPv6 exit ${esc(m.ipv6_exit)}">${esc(m.ipv6_exit)}</span>`
+      : "";
+    return `<span class="ip-stack"><span class="ip copyable" data-copy="${esc(m.ip)}" title="Click to copy" role="button" tabindex="0" aria-label="Copy exit IP ${esc(m.ip)}">${esc(m.ip)}</span>${v6}</span>`;
   }
   if (showState) {
     const probeDetail = c.probe?.detail;
@@ -311,7 +316,7 @@ function chanRow(c) {
 
   return `<div class="row dashchan body${off ? " chan-off" : ""}" data-provider="${esc(c.provider)}" data-id="${esc(c.name)}">
     <span class="chan-label"><button class="name edit" data-label="${esc(c.label || "")}" title="Rename">${esc(c.label || c.name)}</button>
-      <div class="ref">${esc(key)}</div></span>
+      <div class="ref">${esc(key)}${c.ipv6 ? '<span class="v6-badge" title="Carries IPv6 inside the tunnel (provider + server support)">IPv6</span>' : ""}</div></span>
     <span class="loc" title="${esc(loc(c))}">${esc(loc(c))}</span>
     <span class="port copyable" data-copy="${portCopy}" title="Click to copy" role="button" tabindex="0" aria-label="Copy proxy address ${portCopy}">${esc(c.port)}</span>
     ${ipCell}

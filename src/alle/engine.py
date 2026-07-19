@@ -30,7 +30,7 @@ from alle.constants import (
     TUN_INBOUND_TAG,
     TUN_MTU,
 )
-from alle.providers import ProviderError
+from alle.providers import ProviderError, supports_ipv6
 from alle.state import Channel, Store, channel_fingerprint
 
 # Probe concurrency: enough parallelism that a fleet of dead channels stays
@@ -104,6 +104,43 @@ def _probe_log(channels: list[Channel], results: dict[str, dict]) -> str:
     return f"{summary}: {details}" if details else summary
 
 
+def _v4_only(cidrs: list) -> list:
+    """The IPv4 entries of an address/allowed_ips list."""
+    out = []
+    for value in cidrs or []:
+        try:
+            if ipaddress.ip_network(str(value), strict=False).version == 4:
+                out.append(value)
+        except ValueError:
+            continue
+    return out
+
+
+def _has_global_v6(cidrs: list) -> bool:
+    for value in cidrs or []:
+        try:
+            net = ipaddress.ip_network(str(value), strict=False)
+        except ValueError:
+            continue
+        if net.version == 6 and net.network_address.is_global:
+            return True
+    return False
+
+
+def channel_ipv6(ch: Channel) -> bool:
+    """Whether this channel carries IPv6 inside its tunnel.
+
+    Both halves must hold: the provider explicitly supports v6 (registry
+    ``ipv6`` flag — NordVPN off, ProtonVPN on), AND this channel's own
+    WireGuard config has a *global* v6 interface address (per-server
+    capability, e.g. Proton's ~20% v4-only servers, detected locally — a
+    ULA/link-local address is plumbing, not connectivity).
+    """
+    if not supports_ipv6(ch.provider):
+        return False
+    return _has_global_v6((ch.wg or {}).get("address") or [])
+
+
 class Engine:
     def __init__(self, store: Store):
         self.store = store
@@ -124,11 +161,21 @@ class Engine:
                 f"channel {ch.provider}/{ch.id} has no usable WireGuard config."
             )
         peer = wg["peer"]
+        v6 = channel_ipv6(ch)
+        # IPv6 is an explicit per-provider decision (providers.supports_ipv6):
+        # a non-supporting provider gets v6 stripped from BOTH the interface
+        # addresses and allowed_ips, even if its config smuggled some in —
+        # sing-box must never try to route v6 into a tunnel that can't carry
+        # it. A supporting provider's v4-only server strips the same way.
+        address = wg["address"] if v6 else _v4_only(wg["address"])
+        allowed = (
+            peer["allowed_ips"] if v6 else _v4_only(peer["allowed_ips"])
+        ) or peer["allowed_ips"]
         wg_peer = {
             "address": peer["endpoint_host"],
             "port": peer["endpoint_port"],
             "public_key": peer["public_key"],
-            "allowed_ips": peer["allowed_ips"],
+            "allowed_ips": allowed,
             "persistent_keepalive_interval": peer["keepalive"],
         }
         if peer.get("preshared_key"):
@@ -137,7 +184,7 @@ class Engine:
             "type": "wireguard",
             "tag": ch.outbound_tag,
             "system": False,
-            "address": wg["address"],
+            "address": address,
             "private_key": wg["private_key"],
             "peers": [wg_peer],
         }
@@ -145,6 +192,7 @@ class Engine:
     def _build_config(self) -> tuple[dict, dict[str, str]]:
         inbounds, endpoints, rules, errors = [], [], [], {}
         built: set[tuple[str, str]] = set()
+        v6_capable: set[tuple[str, str]] = set()
         for ch in self.store.channels():
             if not ch.enabled:
                 # A disabled channel is not materialised at all: no inbound,
@@ -177,8 +225,10 @@ class Engine:
             endpoints.append(endpoint)
             rules.append({"inbound": [ch.inbound_tag], "outbound": ch.outbound_tag})
             built.add((ch.provider, ch.id))
+            if channel_ipv6(ch):
+                v6_capable.add((ch.provider, ch.id))
         rule_sets: list[dict] = []
-        self._router_config(inbounds, rules, built, errors, rule_sets)
+        self._router_config(inbounds, rules, built, errors, rule_sets, v6_capable)
         api = singbox.clash_api()
         config: dict = {
             "log": {"level": "warn", "timestamp": True},
@@ -217,10 +267,13 @@ class Engine:
                         "server": TUN_DNS_UPSTREAM,
                     }
                 ],
-                # ipv4_only: the supported providers' WireGuard is IPv4-only,
-                # so AAAA answers would only feed connections the ::/0 reject
-                # (the IPv6 leak fix) then blocks — don't hand them out.
-                "strategy": "ipv4_only",
+                # With no v6-capable channel, AAAA answers would only feed
+                # connections the ::/0 reject (the IPv6 leak fix) then blocks
+                # — don't hand them out (ipv4_only). Once a v6-capable channel
+                # exists, prefer_ipv4 keeps v4 first (safe everywhere) while
+                # letting v6-only destinations resolve and ride a capable
+                # channel — or fail closed at a v4-only channel's guard.
+                "strategy": "prefer_ipv4" if v6_capable else "ipv4_only",
             }
             config["route"]["default_domain_resolver"] = TUN_DNS_TAG
             config["route"]["auto_detect_interface"] = True
@@ -262,6 +315,7 @@ class Engine:
         built: set[tuple[str, str]],
         errors: dict[str, str],
         rule_sets: list[dict],
+        v6_capable: set[tuple[str, str]] | None = None,
     ) -> None:
         """Append the shared-rule entry inbounds (router, tun) and the one
         compiled rule table both share.
@@ -350,16 +404,19 @@ class Engine:
                     "outbound": "direct",
                 }
             )
-        if tun:
-            # IPv6 leak fix — block, don't leak. The supported providers'
-            # WireGuard configs are IPv4-only, so IPv6 cannot ride the tunnel;
-            # without this rule (and the tun's v6 address that captures the
-            # traffic), IPv6 would silently bypass the VPN via the physical
-            # interface, exposing the home address. Placed after LAN-direct
-            # (link-local/ULA v6 to LAN devices stays reachable when that is
-            # on) and before user rules (a catch-all must not steer v6 into an
-            # IPv4-only channel). Tun-only: explicit-proxy mode never captured
-            # IPv6 in the first place.
+        v6_capable = v6_capable or set()
+        if tun and not v6_capable:
+            # IPv6 leak fix — block, don't leak. With no v6-capable channel in
+            # the fleet, IPv6 cannot ride any tunnel; without this rule (and
+            # the tun's v6 address that captures the traffic), IPv6 would
+            # silently bypass the VPN via the physical interface, exposing the
+            # home address. Placed after LAN-direct (link-local/ULA v6 to LAN
+            # devices stays reachable when that is on) and before user rules
+            # (a catch-all must not steer v6 into an IPv4-only channel).
+            # Tun-only: explicit-proxy mode never captured IPv6 at all.
+            # When v6-capable channels exist, this blanket reject is replaced
+            # by per-rule guards below: v6 flows into capable channels and is
+            # rejected — same matcher, fail closed — ahead of v4-only ones.
             rules.append(
                 {
                     "inbound": [TUN_INBOUND_TAG],
@@ -421,6 +478,17 @@ class Engine:
                     compiled["action"] = "reject"
                     rules.append(compiled)
                     continue
+                if v6_capable and (provider, cid) not in v6_capable and tun:
+                    # Mixed fleet, tun on, and this rule targets a v4-only
+                    # channel: the blanket ::/0 reject is gone, so guard this
+                    # rule with a same-matcher v6 reject compiled FIRST —
+                    # matching v6 traffic is blocked, never steered into a
+                    # tunnel that can't carry it and never falls through.
+                    guard = {k: v for k, v in compiled.items() if k != "outbound"}
+                    guard["inbound"] = [TUN_INBOUND_TAG]
+                    guard["ip_version"] = 6
+                    guard["action"] = "reject"
+                    rules.append(guard)
                 compiled["outbound"] = f"{OUTBOUND_PREFIX}{provider}-{cid}"
             rules.append(compiled)
         # Geo rule-sets referenced above, deduped in stable order so the
@@ -519,6 +587,16 @@ class Engine:
         return recovered
 
     # ---- probing -----------------------------------------------------------
+    @staticmethod
+    def _probe_one(ch: Channel) -> dict:
+        """One channel's probe, plus the supplementary IPv6-exit lookup for
+        v6-capable channels. The v6 echo never affects the health verdict —
+        a healthy v4 probe with no v6 answer just shows no v6 exit."""
+        result = probe.probe_channel(ch.port)
+        if result.get("ok") and channel_ipv6(ch):
+            result["ipv6"] = probe.probe_ipv6(ch.port)
+        return result
+
     def probe_all(self, channels: list[Channel] | None = None) -> dict[str, dict]:
         """Probe each channel through its proxy and persist the result.
 
@@ -552,7 +630,7 @@ class Engine:
         elif channels:
             deadline = time.monotonic() + PROBE_PASS_DEADLINE
             pool = ThreadPoolExecutor(max_workers=min(PROBE_POOL_SIZE, len(channels)))
-            futures = {pool.submit(probe.probe_channel, ch.port): ch for ch in channels}
+            futures = {pool.submit(self._probe_one, ch): ch for ch in channels}
             try:
                 try:
                     remaining = max(0.0, deadline - time.monotonic())

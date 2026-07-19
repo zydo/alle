@@ -515,6 +515,7 @@ def test_channels_ls_is_a_flat_table_with_separator(capsys, no_background, tmp_p
         "PORT",
         "COUNTRY",
         "CITY",
+        "IPV6",
         "STATUS",
     ]  # single header
     assert set(lines[1]) <= {"-", " "} and "-" in lines[1]  # dash separator

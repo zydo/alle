@@ -181,6 +181,9 @@ def fake_test(
             "label": c.label,
             "enabled": True,
             "ip": f"203.0.113.{10 + i}",
+            # the DE channel plays the v6-capable one: rows for capable
+            # channels carry the v6 exit, others omit it (the real shape)
+            "ipv6_exit": "2a02:6ea0:d33b:6276::28" if c.id == "wg_de_1" else None,
             "latency_ms": 20 + 7 * i,
             "sent": 1_000_000 * (i + 1),
             "received": 5_000_000 * (i + 1),

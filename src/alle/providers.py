@@ -299,6 +299,10 @@ REGISTRY: dict[str, dict] = {
         "name": "NordVPN",
         "kind": "token",
         "functional": True,
+        # NordVPN's WireGuard (NordLynx) does not fully support IPv6 —
+        # configs are IPv4-only and v6 inside the tunnel is unsupported, so
+        # alle explicitly disables v6 for its channels (see Engine._endpoint).
+        "ipv6": False,
         "fields": [AuthField("token", "Access token")],
         "help": "https://my.nordaccount.com/dashboard/nordvpn/access-tokens → "
         "generate a new access token.",
@@ -316,6 +320,11 @@ REGISTRY: dict[str, dict] = {
         "name": "Proton VPN",
         "kind": "config",
         "functional": False,
+        # Proton VPN supports IPv6 inside the WireGuard tunnel (~80% of
+        # servers; the server connection itself stays IPv4). A channel
+        # actually carries v6 only when its own config has a global v6
+        # interface address — per-server capability, detected locally.
+        "ipv6": True,
         "config_help": "Proton VPN has no usable WireGuard API. Generate a WireGuard "
         "config in the Proton portal (Downloads → WireGuard configuration), "
         "then add it as a channel: "
@@ -347,6 +356,17 @@ def kind(provider: str) -> str:
 
 def is_functional(provider: str) -> bool:
     return bool(REGISTRY.get(provider, {}).get("functional"))
+
+
+def supports_ipv6(provider: str) -> bool:
+    """Whether alle enables IPv6 for this provider's channels.
+
+    An explicit per-provider decision (user policy, not autodetection):
+    a provider that does not fully support v6 inside its tunnel gets v6
+    stripped from its channels even if a config smuggles a v6 address in.
+    Unknown providers default to False — v6 is opt-in per provider.
+    """
+    return bool(REGISTRY.get(provider, {}).get("ipv6"))
 
 
 def display_name(key: str) -> str:

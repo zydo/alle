@@ -50,9 +50,16 @@ test("status poll: masthead + channels render the daemon's truth", async ({ app 
   await expect(page.locator(`${US} .ip`)).toHaveText("");
   await page.locator("#probe-all").click();
   await expect(page.locator("#toasts")).toContainText("Probe complete.");
-  await expect(page.locator(`${DE} .ip`)).toHaveText("203.0.113.10");
-  await expect(page.locator(`${US} .ip`)).toHaveText("203.0.113.11");
+  await expect(page.locator(`${DE} .ip`).first()).toHaveText("203.0.113.10");
+  await expect(page.locator(`${US} .ip`).first()).toHaveText("203.0.113.11");
   await expect(page.locator(`${US} .lat`)).toHaveText("27 ms");
+  // the v6-capable channel shows its IPv6 exit stacked under the IPv4 in
+  // the same cell; v4-only channels show no second row. The 160px column
+  // fits a realistic compressed v6 exit untruncated (measured, not hoped).
+  const v6 = page.locator(`${DE} .ip-v6`);
+  await expect(v6).toHaveText("2a02:6ea0:d33b:6276::28");
+  expect(await v6.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+  await expect(page.locator(`${US} .ip-v6`)).toHaveCount(0);
 });
 
 test("offline recovery: banner appears while down, clears on reconnect", async ({
