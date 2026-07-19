@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ipaddress
 import zlib
+from collections.abc import Sequence
 
 import pytest
 
@@ -79,7 +80,7 @@ def _succinct_set(keys: list[bytes]) -> bytes:
     return out + _uvarint(len(labels)) + bytes(labels)
 
 
-def _domain_matcher(exact: list[str] = (), suffix: list[str] = ()) -> bytes:
+def _domain_matcher(exact: Sequence[str] = (), suffix: Sequence[str] = ()) -> bytes:
     """``NewMatcher`` non-legacy key building: ``\\n``-prefixed suffixes
     (dot-boundary + the root itself), ``\\r``-prefixed dotted suffixes."""
     keys = []
@@ -102,13 +103,13 @@ def _ip_set(cidrs: list[str]) -> bytes:
 
 def _default_rule(
     *,
-    exact=(),
-    suffix=(),
-    keywords=(),
-    regexes=(),
-    cidrs=(),
-    networks=(),
-    invert=False,
+    exact: Sequence[str] = (),
+    suffix: Sequence[str] = (),
+    keywords: Sequence[str] = (),
+    regexes: Sequence[str] = (),
+    cidrs: Sequence[str] = (),
+    networks: Sequence[str] = (),
+    invert: bool = False,
 ) -> bytes:
     out = b"\x00"
     if networks:

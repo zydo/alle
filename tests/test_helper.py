@@ -109,7 +109,7 @@ def live_helper(monkeypatch, tmp_path, fake_runner):
         pass
 
 
-def _ask(sock_path, cmd, home=SERVED_HOME, **fields):
+def _ask(sock_path, cmd, home: str | None = SERVED_HOME, **fields):
     """Send one command as uid 1000 (we can't spoof uid over AF_UNIX, so these
     tests connect as the real test process uid — the fixture's serve() accepts
     any uid in {0, 1000} OR, to make the suite portable, we relax: actually we

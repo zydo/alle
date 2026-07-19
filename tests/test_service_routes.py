@@ -492,6 +492,7 @@ def test_tun_trial_expire_after_confirm_never_reverts(rooted):
     # ...and after an expiry wins, a confirm reports no pending trial
     service.tun_trial_arm(60)
     marker = service._tun_trial_read()
+    assert marker is not None
     assert service.tun_trial_expire(marker["nonce"]) is True
     with pytest.raises(service.ServiceError, match="no TUN trial is pending"):
         service.tun_trial_confirm()
@@ -518,6 +519,7 @@ def test_tun_trial_recover_rearms_a_live_trial(rooted):
 
     service.tun_trial_arm(60)
     marker = service._tun_trial_read()
+    assert marker is not None
     rooted.clear()  # forget the original arm's watchdog
     remaining = marker["deadline"] - int(time.time())
     result = service.tun_trial_recover()

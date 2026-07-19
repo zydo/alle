@@ -37,7 +37,7 @@ const SHELL = `
       <div class="table-title"><span class="eyebrow">Router rules</span></div>
       <p class="route-banner">When a matcher (domain or IP) appears in multiple rules, <b>the first match wins</b>. Drag to reorder.</p>
       <form class="trace-box" id="trace-form">
-        <input type="text" id="trace-input" class="trace-input" placeholder="Test a destination — netflix.com, 8.8.8.8, or a URL" aria-label="Destination to trace" autocomplete="off" spellcheck="false" />
+        <input type="text" id="trace-input" class="trace-input" placeholder="Test a destination — e.g. netflix.com, 8.8.8.8, or a URL" aria-label="Destination to trace" autocomplete="off" spellcheck="false" />
         <button type="submit" class="btn" id="trace-btn">Trace</button>
       </form>
       <div id="trace-result" class="trace-result" role="status" hidden></div>
@@ -679,9 +679,10 @@ function rulesetBar(rs, index) {
     : `<span class="ct">${n}</span><span class="lb">${esc(addrLabel)}</span>${PEN}`;
   // Every ruleset shows its destination: "via <channel>", "Direct", or
   // "Block" — a blank cell reads as "unset", which none of them are.
+  const destLabel = rs.target === "direct" ? "Direct" : "Block";
   const via = isChannel
     ? `<span class="rule-via"><span class="vw">via</span><span class="vch">${esc(channelLabel)}</span></span>`
-    : `<span class="rule-via ${rs.target}"><span class="vch">${rs.target === "direct" ? "Direct" : "Block"}</span></span>`;
+    : `<span class="rule-via ${rs.target}"><span class="vch">${destLabel}</span></span>`;
   return `<div class="rule-row" draggable="true" data-id="${esc(rs.id)}">
     <div class="rule-handle" title="Drag to reorder" aria-label="Drag ${esc(name)} to reorder">
       <span class="hh rest">${GRIP} Priority ${index + 1}</span>
@@ -1242,7 +1243,7 @@ function matcherInputHTML(buttonText) {
   return `<div class="match-group">
       <label class="field check" id="match-all"><input type="checkbox" id="all-traffic"><span><b>All traffic</b> — match everything (catch-all).</span></label>
       <div class="or-divider" aria-hidden="true"><span>or</span></div>
-      <label class="field" id="match-list"><span>Specific domains / IPs / geo categories (one per line)</span><textarea id="matchers" placeholder="netflix.com\napi.openai.com\n10.8.0.0/16\ngeosite:netflix\ngeoip:us"></textarea>
+      <label class="field" id="match-list"><span>Specific domains / IPs / geo categories (one per line)</span><textarea id="matchers" spellcheck="false" placeholder="netflix.com\napi.openai.com\n10.8.0.0/16\ngeosite:netflix\ngeoip:us"></textarea>
         <div class="match-examples">
           <div class="mx-title">Examples (a domain matches itself and all its subdomains):</div>
           <div class="mx-item"><code>netflix.com</code>the domain plus any <code>*.netflix.com</code></div>

@@ -81,9 +81,9 @@ def _get_json(url: str, headers: dict | None = None, timeout: int = 30):
     would put reconnect backoff, bundle fallback, or CLI reporting on the
     wrong path.
     """
-    req = urllib.request.Request(url, headers=headers or {"User-Agent": "alle/1"})  # noqa: S310 — fixed https/loopback URL, no user-supplied scheme
+    req = urllib.request.Request(url, headers=headers or {"User-Agent": "alle/1"})  # noqa: S310
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 — fixed https/loopback URL, no user-supplied scheme
+        with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310
             body = r.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as e:
         raise ProviderAPIError(

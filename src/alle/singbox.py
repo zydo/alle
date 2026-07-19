@@ -100,7 +100,7 @@ def bin_path() -> Path:
 
 
 def _download(url: str, dest: Path) -> None:
-    req = urllib.request.Request(url, headers={"User-Agent": "alle/1"})  # noqa: S310 — fixed https/loopback URL, no user-supplied scheme
+    req = urllib.request.Request(url, headers={"User-Agent": "alle/1"})  # noqa: S310
     with urllib.request.urlopen(req, timeout=120) as r:  # noqa: S310 (pinned https URL)
         length = r.headers.get("Content-Length")
         if length is not None:

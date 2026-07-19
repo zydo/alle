@@ -222,14 +222,15 @@ def ensure_matchers(matchers: list[tuple[str, str]]) -> list[str]:
     name or an unreachable upstream fails the whole operation cleanly. Returns
     the newly fetched ``kind:name`` refs (empty when everything was cached).
     """
-    wanted = [(t, v) for t, v in matchers if t in KINDS]
+    # ordered dedup: first occurrence wins, so fetch order follows input order
+    wanted = list(dict.fromkeys((t, v) for t, v in matchers if t in KINDS))
     if not wanted:
         return []
     store = Store.load()
     source = source_name(store)
     fetched: list[str] = []
     commits: dict[str, str] = {}
-    for kind, name in dict.fromkeys(wanted):
+    for kind, name in wanted:
         if cached_path(store, kind, name) is not None:
             continue
         spec = SOURCES[source][kind]
@@ -391,12 +392,10 @@ def prune(store: Store) -> list[str]:
     for path in cache_dir().iterdir():
         if path.name in keep:
             continue
-        if path.suffix == ".srs":
-            path.unlink(missing_ok=True)
-            removed.append(path.name)
-        elif path.suffix == ".tmp":
-            # orphaned by a crash between write_bytes and replace — safe to
-            # remove (the next fetch recreates it atomically)
+        if path.suffix in (".srs", ".tmp"):
+            # .srs: no record references it. .tmp: orphaned by a crash
+            # between write_bytes and replace. Both safe to remove — the
+            # next fetch recreates a .tmp atomically.
             path.unlink(missing_ok=True)
             removed.append(path.name)
     return sorted(removed)

@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from typing import Any
 
 import pytest
 
@@ -20,7 +21,7 @@ WG = wg_config("1.2.3.4")
 # The bundle validator checks real WireGuard key shapes (32 bytes, base64) —
 # the conftest stub keys are for state-level tests only.
 _KEY = base64.b64encode(bytes([7] * 32)).decode()
-BUNDLE_WG = dict(wg_config("1.2.3.4"), private_key=_KEY)
+BUNDLE_WG: dict[str, Any] = dict(wg_config("1.2.3.4"), private_key=_KEY)
 BUNDLE_WG["peer"] = dict(BUNDLE_WG["peer"], public_key=_KEY)
 
 

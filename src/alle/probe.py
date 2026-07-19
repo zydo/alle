@@ -114,11 +114,11 @@ def probe_ipv6(port: int, timeout: float = 6) -> str | None:
     """
     opener = proxy_opener(port)
     for _name, url in IPV6_ECHO_SOURCES:
-        req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})  # noqa: S310 — fixed https URLs, no user-supplied scheme
+        req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})  # noqa: S310
         try:
             with opener.open(req, timeout=timeout) as r:  # noqa: S310 (loopback proxy)
                 body = r.read(MAX_BODY_BYTES).decode(errors="replace")
-        except Exception:  # noqa: BLE001, S112 — best-effort supplement: any failure just means "try the next source", and the channel's health verdict is not affected
+        except Exception:  # noqa: BLE001, S112
             continue
         ip = _valid_public_ip(body)
         if ip and ":" in ip:
@@ -161,7 +161,7 @@ def probe_channel(
             last_reason = f"channel deadline ({deadline:g}s) exhausted"
             break
         attempted.append(name)
-        req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})  # noqa: S310 — fixed https/loopback URL, no user-supplied scheme
+        req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})  # noqa: S310
         start = time.monotonic()
         try:
             with opener.open(  # noqa: S310 (loopback proxy)

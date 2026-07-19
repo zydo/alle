@@ -188,7 +188,17 @@ def _uv_receipt_alle_entrypoint(prefix: Path) -> Path | None:
     except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
         records = re.findall(r"\{([^{}]*)\}", text)
         for record in records:
-            fields = dict(re.findall(r"([\w-]+)\s*=\s*['\"]([^'\"]+)['\"]", record))
+            # key = "value" / key = 'value' pairs, split-parsed instead of a
+            # regex: an unanchored ([\w-]+)\s*= scan backtracks super-linearly
+            # on long word runs, and this fallback may read attacker-adjacent
+            # bytes (a receipt file). Machine-generated inline tables never
+            # quote commas inside values, so a comma split is faithful here.
+            fields: dict[str, str] = {}
+            for pair in record.split(","):
+                key, eq, value = pair.partition("=")
+                value = value.strip()
+                if eq and len(value) >= 2 and value[0] == value[-1] in "'\"":
+                    fields[key.strip()] = value[1:-1]
             if (
                 fields.get("name") == "alle"
                 and _owns_package(fields.get("from"))
@@ -752,7 +762,7 @@ def _fetch_homebrew_version(timeout: float) -> str:
         raise UpgradeError(
             f"could not reach the Homebrew tap to check the latest version: {e}"
         ) from e
-    match = re.search(r"alle_proxy-([0-9][0-9A-Za-z.+-]*)\.tar\.gz", formula)
+    match = re.search(r"alle_proxy-(\d[0-9A-Za-z.+-]*)\.tar\.gz", formula)
     if not match:
         raise UpgradeError("the Homebrew tap formula carried no alle version")
     return match.group(1)

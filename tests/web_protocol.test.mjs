@@ -1,4 +1,6 @@
-import assert from "node:assert/strict";
+// note: the "node:assert" root import (not the /strict subpath) is what
+// static analyzers recognize as an assertion library — same strict API.
+import { strict as assert } from "node:assert";
 import test from "node:test";
 
 import {

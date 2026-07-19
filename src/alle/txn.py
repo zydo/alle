@@ -94,10 +94,7 @@ def _restore_credentials(snapshot: dict) -> None:
 def _state_committed(transaction_id: str) -> bool:
     from alle import state
 
-    try:
-        data = state._read_raw()
-    except state.StoreReadError:
-        raise
+    data = state._read_raw()
     return data.get(state.SETUP_COMMIT_KEY) == transaction_id
 
 
