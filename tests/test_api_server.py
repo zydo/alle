@@ -424,7 +424,7 @@ def test_add_config_provider_then_channel_via_upload(live):
     )
     assert st == 200
     ch = json.loads(body)["channel"]
-    assert ch["label"] == "West" and ch["id"] == "wg_us_ca_9"
+    assert ch["label"] == "West" and ch["name"] == "wg_us_ca_9"
 
 
 def test_reupload_identical_conf_reports_unchanged(live):
@@ -450,6 +450,28 @@ def test_reupload_identical_conf_reports_unchanged(live):
         base + "/api/v1/channels", method="POST", headers=origin, data=body
     )
     assert st == 200 and json.loads(again)["unchanged"] is True
+
+
+def test_add_channel_response_never_leaks_the_private_key(live, monkeypatch):
+    # the add/import response must project the channel (public fields only),
+    # never the raw dataclass — wg carries the WireGuard private key
+    from alle import service
+
+    base, secret = live
+    origin = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    monkeypatch.setattr(service, "validate_provider_credentials", lambda p, c: None)
+    monkeypatch.setattr(service, "provider_wg", lambda p, c, city: dict(WG))
+    st, body, _ = _req(
+        base + "/api/v1/channels",
+        method="POST",
+        headers=origin,
+        data={"provider": "nordvpn", "country": "United States", "city": ""},
+    )
+    assert st == 200
+    ch = json.loads(body)["channel"]
+    assert "wg" not in ch and "private_key" not in ch
+    # the projected shape matches channel_list (name, not id; port_number)
+    assert ch["name"] and ch["port_number"] and "ipv6" in ch
 
 
 def test_replace_token_endpoint_reresolves_and_hides_token(live, monkeypatch):
@@ -1199,7 +1221,7 @@ def test_upgrade_check_is_get_and_authed(live, monkeypatch):
     monkeypatch.setattr(
         service,
         "upgrade_check",
-        lambda: {
+        lambda *, prerelease=False: {
             "channel": "uv-tool",
             "current": "0.1.8",
             "latest": "0.1.9",
@@ -1227,7 +1249,7 @@ def test_upgrade_post_calls_service_and_surfaces_refusals(live, monkeypatch):
     monkeypatch.setattr(
         service,
         "upgrade_run",
-        lambda: {
+        lambda *, prerelease=False: {
             "channel": "homebrew",
             "command": ["/opt/homebrew/bin/brew", "upgrade", "alle"],
             "before": "0.1.8",
@@ -1246,7 +1268,7 @@ def test_upgrade_post_calls_service_and_surfaces_refusals(live, monkeypatch):
     assert result["command"][-1] == "alle"
     assert result["restart_owner"] == "homebrew"
 
-    def refuse():
+    def refuse(*, prerelease=False):
         raise service.ServiceError("this alle is a git checkout — upgrade with git")
 
     monkeypatch.setattr(service, "upgrade_run", refuse)
@@ -1265,7 +1287,7 @@ def test_upgrade_post_defers_daemon_exit_through_response_flush(live, monkeypatc
     monkeypatch.setattr(
         service,
         "upgrade_run",
-        lambda: {
+        lambda *, prerelease=False: {
             "channel": "homebrew",
             "command": ["/opt/homebrew/bin/brew", "upgrade", "alle"],
             "before": "0.1.8",
@@ -1318,7 +1340,7 @@ def test_upgrade_post_defers_native_restart_until_response_flush(live, monkeypat
     spawned = []
     monkeypatch.setattr(daemon, "spawn_detached", lambda code: spawned.append(code))
 
-    def native_upgrade():
+    def native_upgrade(*, prerelease=False):
         # This is what service.upgrade_run requests for a uv/pipx/pip upgrade
         # running inside the daemon process.
         daemon.schedule_lifecycle("restart", delay=0.0)

@@ -1034,7 +1034,7 @@ async function openAddChannel() {
       if (res.aborted || !active()) return;
       btn.disabled = false;
       if (!res.ok) { err.textContent = res.error; return; }
-      const name = res.data?.channel?.label || res.data?.channel?.id || "channel";
+      const name = res.data?.channel?.label || res.data?.channel?.name || "channel";
       m.close();
       // A byte-identical re-upload of an existing .conf is a no-op — tell the
       // user the channel already exists instead of a misleading "Added".
@@ -1121,7 +1121,7 @@ async function openAddChannel() {
       if (res.aborted || !active()) return;
       btn.disabled = false;
       if (!res.ok) { err.textContent = res.error; return; }
-      m.close(); toast(`Added ${body.label || res.data?.channel?.id || "channel"}.`); refreshStatus();
+      m.close(); toast(`Added ${body.label || res.data?.channel?.name || "channel"}.`); refreshStatus();
     };
     wiz.querySelector("#label").focus();
   }

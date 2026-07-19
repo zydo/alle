@@ -253,11 +253,11 @@ administrative `enabled` / `disabled` state (see
 probe liveness — this table stays the same whether alle is up or down.
 
 ```text
-LABEL           ID                        PORT    COUNTRY        CITY        STATUS
---------------  ------------------------  ------  -------------  ----------  --------
-Streaming - US  nordvpn/wg_jp_1           :53124  Japan          (Any City)  enabled
-seattle_1       nordvpn/seattle_1         :53125  United States  Seattle     disabled
-wg_us_ca_842    protonvpn/wg_us_ca_842    :53126  United States  California  enabled
+LABEL           ID                        PORT    COUNTRY        CITY           IPV6  STATUS
+--------------  ------------------------  ------  -------------  -------------  ----  -------
+Streaming - US  nordvpn/wg_jp_1           :53124  Japan          (Any City)     no    enabled
+wg_us_seattle_1 nordvpn/wg_us_seattle_1   :53125  United States  Seattle        no    disabled
+California      protonvpn/wg_us_ca_842    :53126  United States  California     yes   enabled
 ```
 
 `--json` carries the same fact as a boolean `enabled` per channel.
@@ -403,11 +403,13 @@ one exit target. `<target>` is where matched traffic exits:
 Matcher flags may be repeated; creation is atomic, so a multi-domain ruleset
 lands in one transaction and one daemon reconcile:
 
-| Matcher        | Matches                                                    |
-| -------------- | ---------------------------------------------------------- |
-| `--domain <d>` | `d` and all of its subdomains (dot-boundary)               |
-| `--cidr <net>` | destination IP in `net` (a bare IP means that one address) |
-| `--all`        | everything — the catch-all for "VPN by default"            |
+| Matcher           | Matches                                                                                                   |
+| ----------------- | --------------------------------------------------------------------------------------------------------- |
+| `--domain <d>`    | `d` and all of its subdomains (dot-boundary)                                                              |
+| `--cidr <net>`    | destination IP in `net` (a bare IP means that one address)                                                |
+| `--geosite <cat>` | a community domain category (e.g. `netflix`, `category-ads-all`) — fetched on first use; see `routes geo` |
+| `--geoip <cc>`    | destination IPs in a country (e.g. `us`, `cn`) — fetched on first use                                     |
+| `--all`           | everything — the catch-all for "VPN by default"                                                           |
 
 ```bash
 alle routes ruleset create Streaming --via nordvpn/wg_us_1 --domain netflix.com --domain hulu.com
@@ -807,17 +809,17 @@ alle tun off
   goes direct even under the kill-switch (rule matching and endpoint dialing
   need it). Apps doing their own encrypted DNS (DoH/DoT) are ordinary traffic,
   subject to your rules like anything else.
-- **No IPv6 while on the VPN — blocked, not leaked (a provider restriction).**
-  The supported providers' WireGuard configs are **IPv4-only** (NordVPN and
-  Proton VPN ship no IPv6 tunnel addressing), so IPv6 *cannot* be carried
-  through the tunnel — that is their restriction, not alle's. The honest
-  options are to leak IPv6 around the VPN or to block it; alle blocks it:
-  with tun on, the v6 default route is captured into the tun and all IPv6 is
-  rejected (`curl -6` fails with connection reset; your home IPv6 never
-  appears on IP-check sites). LAN-direct still passes local IPv6
-  (link-local/ULA) when enabled, DNS is `ipv4_only` so apps rarely even try
-  v6, and IPv6 returns to normal the moment tun is off. If a future provider
-  ships IPv6 WireGuard endpoints, real IPv6-over-VPN becomes possible.
+- **IPv6 — explicit per-provider policy, never leaked.** IPv6 is enabled or
+  disabled per provider based on whether that provider's WireGuard tunnel
+  actually supports it: NordVPN (NordLynx) does not fully support IPv6, so
+  alle strips it; Proton VPN supports IPv6 inside the tunnel (~80% of
+  servers), so alle carries it when the server's config supplies a global v6
+  address. A mixed fleet fails closed: v6 flows into v6-capable channels,
+  while every rule targeting a v4-only channel gets a same-matcher v6 reject
+  ahead of it, and any v6 matching no rule is rejected too — never leaked to
+  the physical interface. With no v6-capable channel at all, the blanket
+  block-all-v6 behavior holds (byte-identical to a v4-only setup). LAN-direct
+  still passes local IPv6 (link-local/ULA) when enabled.
 - **Kill-switch + tun blocks alle's own provider calls.** Only sing-box's own
   sockets bypass the tun; the alle daemon's provider API traffic (NordVPN
   server re-resolution on reconnect, `alle locations --refresh`) is ordinary
@@ -852,7 +854,7 @@ alle tun off
 **The** per-channel table: probe channels **now** (rather than waiting for the
 next background cycle) and print each channel's fresh connectivity plus its
 cumulative traffic: `LABEL`, `ID`, `PORT`, `COUNTRY`, `CITY`, `STATE`,
-`LATENCY` (probe latency), `IP` (exit IP), `SENT`, `RECV` (durable totals since
+`LATENCY` (probe latency), `IPV4`/`IPV6` (exit IPs — v6 only for v6-capable channels), `SENT`, `RECV` (durable totals since
 counters began). With `--channel`, test just one channel by id. `STATE` is
 `Healthy`, or the failure reason (`Stopped` while the runtime is down,
 otherwise the probe error — e.g. `Timeout`, `Failed`); a failing channel marks
@@ -864,11 +866,11 @@ lead — `LABEL` is the display name (the id when no label is set), `ID` is the
 provider-qualified ref commands take.
 
 ```text
-LABEL         ID                      PORT    COUNTRY        CITY        STATE     LATENCY  IP             SENT      RECV
-------------  ----------------------  ------  -------------  ----------  --------  -------  -------------  --------  --------
-Test runner   nordvpn/wg_jp_1         :53124  Japan          (Any City)  Healthy   398.0ms  93.118.43.151  104.0 MB  396.7 MB
-seattle_1     nordvpn/seattle_1       :53125  United States  Seattle     Disabled  -        -              12.5 MB   88.0 MB
-wg_us_ca_842  protonvpn/wg_us_ca_842  :53126  United States  California  Timeout   -        -              28.1 MB   141.8 MB
+LABEL           ID                        PORT    COUNTRY        CITY           STATE     LATENCY  IPV4            IPV6                  SENT      RECV
+--------------  ------------------------  ------  -------------  -------------  --------  -------  --------------  --------------------  --------  --------
+Tokyo           nordvpn/wg_jp_1           :53124  Japan          (Any City)     Healthy   398.0ms  93.118.43.151   -                     104.0 MB  396.7 MB
+wg_us_seattle_1 nordvpn/wg_us_seattle_1   :53125  United States  Seattle        Disabled  -        -               -                     12.5 MB   88.0 MB
+California      protonvpn/wg_us_ca_842    :53126  United States  California     Healthy   142.0ms  185.159.126.21  2a02:6ea0:c045::21   28.1 MB   141.8 MB
 ```
 
 Add `--fail` for monitoring use: exit code 1 when any probed channel is
@@ -1094,7 +1096,7 @@ It runs the self-contained (`--replace`-style) checks:
 $ alle validate broken.yaml
 bundle rejected (3 problems) — nothing was changed:
   line 7   providers.nordvpn.credential — a non-empty token is required for NordVPN
-  line 10  providers.nordvpn.channels.us_1.country — 'Atlantis' is not a known NordVPN country
+  line 10  providers.nordvpn.channels.wg_us_1.country — 'Atlantis' is not a known NordVPN country
   line 14  router.lan_direct — must be set explicitly to true or false
 ```
 

@@ -112,7 +112,7 @@ def test_channel_add_success_uses_provider_wg(monkeypatch):
     result = service.channel_add("nordvpn", "Japan", None)
 
     assert calls == [("nordvpn", "Japan", "")]
-    assert result["channel"].id == "wg_jp_1"
+    assert result["channel"]["name"] == "wg_jp_1"
 
 
 def test_channel_add_config_read_error(monkeypatch, tmp_path):
@@ -377,7 +377,7 @@ def test_channel_add_stores_label(monkeypatch):
     store.add_provider("nordvpn")
     monkeypatch.setattr(service, "provider_wg", lambda p, c, city: dict(WG))
     result = service.channel_add("nordvpn", "US", None, label="  My US  ")
-    assert result["channel"].label == "My US"  # stripped and stored
+    assert result["channel"]["label"] == "My US"  # stripped and stored
 
 
 # ---- token replacement (Phase 5.5) ----------------------------------------

@@ -168,9 +168,14 @@ class Engine:
         # sing-box must never try to route v6 into a tunnel that can't carry
         # it. A supporting provider's v4-only server strips the same way.
         address = wg["address"] if v6 else _v4_only(wg["address"])
-        allowed = (
-            peer["allowed_ips"] if v6 else _v4_only(peer["allowed_ips"])
-        ) or peer["allowed_ips"]
+        allowed = peer["allowed_ips"] if v6 else _v4_only(peer["allowed_ips"])
+        if not allowed:
+            # Every entry was v6/unparseable on a v4-only channel: fall back to
+            # the v4 default rather than the original list (which would smuggle
+            # v6 ranges back into a tunnel with no v6 source). An empty list
+            # would make sing-box reject the config; ["0.0.0.0/0"] is the
+            # honest "route all v4" intent of a VPN tunnel.
+            allowed = ["0.0.0.0/0"]
         wg_peer = {
             "address": peer["endpoint_host"],
             "port": peer["endpoint_port"],
@@ -441,16 +446,20 @@ class Engine:
             elif mtype in routes.GEO_TYPES:
                 # Geo matchers reference a cached, digest-verified .srs file.
                 # Without the file the matcher cannot exist at all (sing-box
-                # rejects an unknown rule_set tag), so the rule is omitted —
-                # loudly — rather than compiled into a match-everything shape.
+                # rejects an unknown rule_set tag) — fail CLOSED (reject), the
+                # same shape as an unusable-channel target below, so matching
+                # traffic is blocked rather than falling through to direct
+                # (which would leak it, defeating the rule's intent).
                 name = str(rule.get("value"))
                 path = geodata.cached_path(self.store, mtype, name)
                 if path is None:
                     errors[ref] = (
                         f"{mtype} category {name!r} is not cached (or failed "
-                        "its digest check) — the rule is omitted until it is "
-                        "fetched: alle routes geo refresh"
+                        "its digest check) — matching traffic is blocked until "
+                        "it is fetched: alle routes geo refresh"
                     )
+                    compiled["action"] = "reject"
+                    rules.append(compiled)
                     continue
                 tag = f"{mtype}-{name}"
                 rule_set_tags[tag] = {
@@ -483,9 +492,10 @@ class Engine:
                     # channel: the blanket ::/0 reject is gone, so guard this
                     # rule with a same-matcher v6 reject compiled FIRST —
                     # matching v6 traffic is blocked, never steered into a
-                    # tunnel that can't carry it and never falls through.
+                    # tunnel that can't carry it and never falls through. The
+                    # guard inherits the compiled rule's inbounds (router+tun),
+                    # so v6 is rejected on both surfaces.
                     guard = {k: v for k, v in compiled.items() if k != "outbound"}
-                    guard["inbound"] = [TUN_INBOUND_TAG]
                     guard["ip_version"] = 6
                     guard["action"] = "reject"
                     rules.append(guard)
@@ -494,6 +504,21 @@ class Engine:
         # Geo rule-sets referenced above, deduped in stable order so the
         # compiled config does not churn on a refresh that changed nothing.
         rule_sets.extend(rule_set_tags[tag] for tag in sorted(rule_set_tags))
+        if tun and v6_capable:
+            # Catch-all v6 reject (after user rules, before the kill-switch):
+            # with v6-capable channels the blanket ::/0 reject is gone, so v6
+            # matching NO rule would otherwise fall through to route.final
+            # (direct) and leak the home address. Catch-alls (all → channel)
+            # and v6-capable targets still match their v6 earlier in the list;
+            # only truly unmatched v6 is rejected. LAN v6 (ULA/link-local/
+            # multicast) is untouched — those CIDR rules precede user rules.
+            rules.append(
+                {
+                    "inbound": [TUN_INBOUND_TAG],
+                    "ip_cidr": ["::/0"],
+                    "action": "reject",
+                }
+            )
         if router.get("killswitch"):
             rules.append({"inbound": list(entry), "action": "reject"})
 

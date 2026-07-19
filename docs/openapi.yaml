@@ -1142,7 +1142,7 @@ components:
               value: { type: string }
               type:
                 type: string
-                enum: [domain_suffix, domain, ip_cidr, all]
+                enum: [domain_suffix, domain, ip_cidr, all, geosite, geoip]
               matcher_type:
                 type: string
                 description: Legacy alias of "type".

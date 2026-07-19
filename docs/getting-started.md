@@ -211,9 +211,9 @@ alle channels ls
 `alle channels ls` prints the local proxy port for each channel:
 
 ```text
-LABEL            ID                       PORT    COUNTRY        CITY
----------------  -----------------------  ------  -------------  ----------
-wg_us_1          nordvpn/wg_us_1          :53124  United States  (Any City)
+LABEL            ID                       PORT    COUNTRY        CITY           IPV6  STATUS
+---------------  -----------------------  ------  -------------  -------------  ----  -------
+wg_us_1          nordvpn/wg_us_1          :53124  United States  (Any City)     no    enabled
 ```
 
 Use that port from any tool or app that supports an HTTP or SOCKS proxy:

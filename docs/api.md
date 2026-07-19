@@ -85,7 +85,7 @@ liveness probe.
 - `?dry_run=` on destructive DELETEs accepts exactly `1`, `true`, `0`,
   `false`; anything else is a 400 (a typo must never turn a preview into the
   real removal). Body `dry_run` fields are plain booleans.
-- Channel *refs* use the CLI grammar: a bare id (`us_1`), a qualified
+- Channel *refs* use the CLI grammar: a bare id (`wg_us_1`), a qualified
   `provider/channel` (`nordvpn/wg_us_1`), or a glob (`wg_us_*`). A bare id matching
   channels under several providers is refused; a glob may span providers.
 - `/api/v1` is the versioned contract. Additive response fields may appear;
@@ -99,7 +99,7 @@ liveness probe.
 | `GET /api/v1/providers`                                  | Added providers with channel counts (`alle providers ls --json`).                                                                                                                                                           |
 | `GET /api/v1/providers/catalog`                          | The known-provider registry: names, kinds (`token`/`config`), credential fields.                                                                                                                                            |
 | `GET /api/v1/channels`                                   | All channels with ports, locations, enabled state (`alle channels ls --json`).                                                                                                                                              |
-| `GET /api/v1/routes`                                     | Routing rules/rulesets, kill switch, LAN policy (`alle routes ls --json`). Includes the built-in LAN-direct block's fixed contents read-only (`lan.cidrs`, `lan.udp_ports`) — visible without toggling anything.                                                                                                                                                  |
+| `GET /api/v1/routes`                                     | Routing rules/rulesets, kill switch, LAN policy (`alle routes ls --json`). Includes the built-in LAN-direct block's fixed contents read-only (`lan.cidrs`, `lan.udp_ports`) — visible without toggling anything.            |
 | `GET /api/v1/locations?provider=<name>[&country=<name>]` | The provider's country/city catalog (API providers). `provider` is required.                                                                                                                                                |
 | `GET /api/v1/metrics[?channel=<ref>]`                    | Cumulative per-channel traffic totals (`sent`, `received`, `updated_at` per channel). A cheap read — probes nothing; unlike `POST /test` it touches no network.                                                             |
 | `GET /api/v1/logs[?lines=N]`                             | `{"text": "<last N log lines>"}`, N clamped to 1–1000, default 200.                                                                                                                                                         |
@@ -139,9 +139,9 @@ liveness probe.
 | `POST /api/v1/routes/move`                        | `{"ids": [...], "ruleset"}`      | Move matcher(s) into another ruleset in one transaction (they adopt its target; an emptied source ruleset dissolves).           |
 | `POST /api/v1/routes/reorder`                     | `{"ids": [...], "flat"?}`        | Reorder rules/rulesets.                                                                                                         |
 | `POST /api/v1/routes/killswitch`                  | `{"enabled"}`                    | Kill switch on/off. `enabled` is required — a missing field never silently disables it.                                         |
-| `GET /api/v1/routes/geo`                          | —                                | Geo data source and cache state, incl. `upstreams` — the plaintext category-browsing URLs.                                     |
-| `POST /api/v1/routes/geo`                          | `{"action", "source"?}`          | `refresh` re-downloads referenced categories; `source` switches the upstream (sagernet/metacubex). Never auto-updates.          |
-| `GET /api/v1/routes/geo/categories`                | `?kind=`, `?q=`                  | Search available category names offline (from the manifest recorded at refresh; empty until the first refresh).                 |
+| `GET /api/v1/routes/geo`                          | —                                | Geo data source and cache state, incl. `upstreams` — the plaintext category-browsing URLs.                                      |
+| `POST /api/v1/routes/geo`                         | `{"action", "source"?}`          | `refresh` re-downloads referenced categories; `source` switches the upstream (sagernet/metacubex). Never auto-updates.          |
+| `GET /api/v1/routes/geo/categories`               | `?kind=`, `?q=`                  | Search available category names offline (from the manifest recorded at refresh; empty until the first refresh).                 |
 | `POST /api/v1/routes/lan`                         | `{"enabled"}`                    | LAN-direct policy.                                                                                                              |
 | `POST /api/v1/tun`                                | `{"enabled"}`                    | TUN mode on/off. Privilege failures are a 400 whose message carries the platform recipe.                                        |
 

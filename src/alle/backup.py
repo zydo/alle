@@ -27,7 +27,7 @@ import stat
 import time
 from pathlib import Path
 
-from alle import applog, bundle, paths
+from alle import applog, bundle, fsio, paths
 from alle.state import Store
 
 DEFAULT_EVERY_HOURS = 24.0
@@ -82,24 +82,27 @@ def prepare_dir(directory: str | Path) -> Path:
 
 def backup_files(directory: Path) -> list[Path]:
     """This rotation's backup files, newest first. Only ``alle-backup-*.yaml``
-    is ever considered ours — retention must not touch anything else."""
+    is ever considered ours — retention must not touch anything else. A file
+    unlinked by another process between iterdir and the sort is skipped
+    silently rather than crashing the caller."""
     try:
         found = [
             p
             for p in directory.iterdir()
             if p.name.startswith(_PREFIX) and p.name.endswith(_SUFFIX) and p.is_file()
         ]
+        return sorted(found, key=_safe_mtime, reverse=True)
     except FileNotFoundError:
         return []
-    return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
-def _write_secret(path: Path, text: str) -> None:
-    # 0600 from the first byte; O_EXCL — the timestamped name never exists
-    # unless two exports collide within a second, and then losing one is right
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(text)
+def _safe_mtime(path: Path) -> float:
+    """mtime, or -1 if the file vanished between iterdir and sort (a race
+    with an external ``rm`` — skip it, don't crash)."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return -1.0
 
 
 def run(store: Store | None = None, *, force: bool = False) -> dict | None:
@@ -123,7 +126,7 @@ def run(store: Store | None = None, *, force: bool = False) -> dict | None:
     target = directory / name
     if target.exists():  # same-second rerun (force twice, tests): keep the first
         return {"path": str(target), "pruned": [], "kept": len(existing)}
-    _write_secret(target, text)
+    fsio.write_secret(target, text, overwrite=False)
     keep = max(1, conf["keep"])
     pruned: list[str] = []
     for old in backup_files(directory)[keep:]:

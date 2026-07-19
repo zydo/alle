@@ -121,6 +121,31 @@ def write_durably(
             os.unlink(tmp)
 
 
+def write_secret(path: Path, text: str, *, overwrite: bool = True) -> None:
+    """Write ``text`` as a 0600 secret (owner-only from the first byte).
+
+    ``overwrite=True`` (default): atomically and durably replaces an existing
+    file, resetting its mode to 0600 (a file left with a wider mode is
+    tightened). Used by ``alle export``.
+
+    ``overwrite=False``: refuses to overwrite — raises ``FileExistsError`` if
+    the path already exists. Used by timestamped backup names that must never
+    collide.
+    """
+    if overwrite:
+        write_durably(
+            path,
+            lambda f: f.write(text),
+            prefix=".secret-",
+            suffix=".tmp",
+            mode=0o600,
+        )
+    else:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+
+
 def generated_endpoint(
     path: Path,
     validate: Callable[[object], dict | None],

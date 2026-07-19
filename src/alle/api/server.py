@@ -675,6 +675,16 @@ def _dict_field(body: dict, key: str) -> dict:
     return v
 
 
+def _int_field(body: dict, key: str) -> int | None:
+    """A strict JSON integer (bool rejected — it's a subclass of int)."""
+    v = body.get(key)
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise _BadRequest(400, f"field {key!r} must be an integer")
+    return v
+
+
 def _str_list_field(body: dict, key: str, *, required: bool = False) -> list[str]:
     v = _require(body, key) if required else body.get(key)
     if v is None:
@@ -1276,7 +1286,9 @@ class _Handler(BaseHTTPRequestHandler):
             # On-demand only: the owning channel (tap for Homebrew, PyPI for
             # Python managers) is contacted because the user clicked, never on
             # a timer. Refusal channels surface through the usual 400 mapping.
-            ("upgrade", "check"): service.upgrade_check,
+            ("upgrade", "check"): lambda: service.upgrade_check(
+                prerelease=_query_first(self.path, "prerelease") == "true"
+            ),
             ("backup",): service.backup_status,
             ("routes", "geo"): service.routes_geo_status,
             # Offline browse/search of category names (from the manifest
@@ -1403,7 +1415,14 @@ class _Handler(BaseHTTPRequestHandler):
             )
         if method == "POST" and seg == ["channels"]:
             _fields(
-                body, "provider", "country", "city", "label", "conf_text", "conf_name"
+                body,
+                "provider",
+                "country",
+                "city",
+                "label",
+                "conf_text",
+                "conf_name",
+                "port",
             )
             return self._call(_add_channel, body)
         if (
@@ -1518,7 +1537,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._call(
                 service.routes_move,
                 _str_list_field(body, "ids", required=True),
-                _str_field(body, "ruleset"),
+                _str_field(body, "ruleset", required=True),
             )
         if method == "POST" and seg == ["routes", "reorder"]:
             _fields(body, "ids", "flat")
@@ -1587,7 +1606,7 @@ class _Handler(BaseHTTPRequestHandler):
             # Restart disposition is ownership-aware: native service work can
             # be scheduled after this response, while Homebrew reports its own
             # pending/required restart mode for the UI to render accurately.
-            _fields(body)
+            _fields(body, "prerelease")
             with _guarded("upgrade") as acquired:
                 if not acquired:
                     return self._json(503, {"error": "an upgrade is already running"})
@@ -1596,7 +1615,10 @@ class _Handler(BaseHTTPRequestHandler):
                 # returning from service.upgrade_run is too early because the
                 # old process still has to serialize and write the result.
                 with daemon_runtime.defer_upgrade_restart_until_response():
-                    result = self._call(service.upgrade_run)
+                    result = self._call(
+                        service.upgrade_run,
+                        prerelease=_bool_field(body, "prerelease"),
+                    )
                     self._flush_upgrade_response()
                     return result
         if method == "POST" and seg == ["backup"]:
@@ -1665,6 +1687,7 @@ def _add_channel(body: dict) -> dict:
         _opt_str_field(body, "city"),
         None,
         _str_field(body, "label"),
+        port=_int_field(body, "port") or 0,
     )
 
 

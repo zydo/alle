@@ -713,14 +713,16 @@ def test_provider_flag_off_strips_v6_even_if_config_has_it():
     assert ep["peers"][0]["allowed_ips"] == ["0.0.0.0/0"]
 
 
-def test_v6_fleet_drops_blanket_reject_and_lifts_dns():
+def test_v6_fleet_rejects_unmatched_v6_and_lifts_dns():
+    # With a v6-capable channel, the blanket pre-rule ::/0 reject is gone (v6
+    # must reach the capable channel), but unmatched v6 is still caught by a
+    # TRAILING tun-only ::/0 reject after user rules — no leak to direct.
     config, errors = Engine(_proton_store())._build_config()
     assert errors == {}
-    assert {
-        "inbound": ["in-tun"],
-        "ip_cidr": ["::/0"],
-        "action": "reject",
-    } not in config["route"]["rules"]
+    rules = config["route"]["rules"]
+    reject = {"inbound": ["in-tun"], "ip_cidr": ["::/0"], "action": "reject"}
+    assert reject in rules  # the trailing catch-all
+    assert rules[-1] == reject  # it's the last rule (before killswitch, which is off)
     assert config["dns"]["strategy"] == "prefer_ipv4"
 
 
@@ -750,19 +752,17 @@ def test_mixed_fleet_guards_v4_only_targets_with_same_matcher_reject():
     assert errors == {}
     rules = config["route"]["rules"]
     # the rule steering into the v4-only nordvpn channel is guarded by a
-    # same-matcher tun-only v6 reject compiled immediately before it
+    # same-matcher v6 reject compiled immediately before it — the guard now
+    # inherits both inbounds (router+tun), so v6 is rejected on both surfaces
     idx = next(
         i
         for i, r in enumerate(rules)
         if r.get("outbound") == "out-nordvpn-wg_us_1" and r.get("domain_suffix")
     )
     guard = rules[idx - 1]
-    assert guard == {
-        "inbound": ["in-tun"],
-        "domain_suffix": ["netflix.com"],
-        "ip_version": 6,
-        "action": "reject",
-    }
+    assert "in-tun" in guard["inbound"] and "in-router" in guard["inbound"]
+    assert guard["domain_suffix"] == ["netflix.com"]
+    assert guard["ip_version"] == 6 and guard["action"] == "reject"
     # the v6-capable catch-all has no guard
     catchall = next(
         r
@@ -773,8 +773,11 @@ def test_mixed_fleet_guards_v4_only_targets_with_same_matcher_reject():
         and len(r["inbound"]) > 1
     )
     assert "ip_version" not in catchall
-    # and no blanket reject
-    assert {"inbound": ["in-tun"], "ip_cidr": ["::/0"], "action": "reject"} not in rules
+    # unmatched v6 is still caught — by a trailing tun-only ::/0 reject placed
+    # AFTER the catch-all (so it only fires on v6 that matched nothing)
+    trailing = {"inbound": ["in-tun"], "ip_cidr": ["::/0"], "action": "reject"}
+    assert trailing in rules
+    assert rules.index(trailing) > rules.index(catchall)
 
 
 def test_v6_guard_only_when_tun_is_on():

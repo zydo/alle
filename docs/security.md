@@ -107,12 +107,15 @@ table is privileged. Two things change while TUN mode is on:
   worse — it is no longer "another user *may* reach your proxy port," it is
   "every user's traffic *is* on your tunnel by default." Do not enable tun
   mode on a shared machine.
-- **IPv6 is blocked, not leaked.** The supported providers' WireGuard configs
-  are IPv4-only, so IPv6 cannot ride the tunnel. Leaving it alone would let
-  every IPv6 connection bypass the VPN and expose the home address next to
-  the VPN'd IPv4 — so the tun seizes the IPv6 default route too and rejects
-  what it captures ("no IPv6 while on the VPN"). LAN-direct still passes
-  local IPv6 when enabled; everything returns to normal when tun is off.
+- **IPv6 — explicit per-provider, never leaked.** IPv6 is carried through the
+  tunnel only for providers that support it (Proton VPN) and only when the
+  server's config supplies a global v6 address; for providers that don't
+  (NordVPN), v6 is stripped at compile time so it never enters the tunnel. A
+  mixed fleet fails closed: every rule targeting a v4-only channel rejects
+  matching v6 ahead of itself, and unmatched v6 is rejected too — never
+  leaked to the physical interface. With no v6-capable channel, the blanket
+  block-all-v6 behavior holds. LAN-direct still passes local IPv6 when
+  enabled; everything returns to normal when tun is off.
 
 **Kill-switch honesty.** With TUN mode on, enforcement still lives in the
 sing-box process. If it crashes, the tun and its routes vanish and the kernel

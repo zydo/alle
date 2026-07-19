@@ -73,7 +73,7 @@ providers:
         country: United States             # required — the resolver needs it
         city: New York                     # optional — omit for "any city"
         label: Work                        # optional but recommended
-      sweden_1:                            # <country>_<n> when there's no city
+      wg_se_1:                            # <country>_<n> when there's no city
         country: Sweden
         label: Default
 ```
@@ -124,7 +124,7 @@ channels:
   wg_us_new_york_1:
     country: United States
     city: New York
-  sweden_1:
+  wg_se_1:
     country: Sweden
     enabled: false          # held, not dialled — enable it when needed
 ```
@@ -279,7 +279,7 @@ providers:
     credential: {token: "nordvpn-access-token"}
     channels:
       wg_us_new_york_1: {country: United States, city: New York, label: Work}
-      sweden_1: {country: Sweden, label: Default}
+      wg_se_1: {country: Sweden, label: Default}
   protonvpn:
     channels:
       wg_us_ca_842:
@@ -306,7 +306,7 @@ router:
       target: protonvpn/wg_us_ca_842
       matchers: [netflix.com]
     - name: Everything via Sweden
-      target: nordvpn/sweden_1
+      target: nordvpn/wg_se_1
       matchers: [all]
 ```
 

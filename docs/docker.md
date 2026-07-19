@@ -121,10 +121,10 @@ providers:
     credential:
       token_env: NORDVPN_TOKEN        # or: token_file: /run/secrets/nordvpn
     channels:
-      us_1:
+      wg_us_1:
         country: United States
         port: 20010                    # declared → stable → publishable
-      sweden_1:
+      wg_se_1:
         country: Sweden
         enabled: false                 # held, not dialled (no connection slot)
 router:
@@ -139,7 +139,7 @@ is **not listening** while disabled — a service pointing at it gets
 connection-refused until you enable it), `true` forces it on, and an
 **omitted** key means the re-applied bundle *keeps the channel's current
 state* — so flipping channels ad hoc (`docker compose exec alle alle
-channels disable us_1`, or the Web UI toggle) survives container restarts.
+channels disable wg_us_1`, or the Web UI toggle) survives container restarts.
 Under a provider connection cap, that lets the bundle declare the whole
 stable of servers while you rotate which ones are live at runtime. Disabled
 channels never touch the provider at import time (no server resolution — the

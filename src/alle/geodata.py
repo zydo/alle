@@ -153,6 +153,17 @@ def _http_get(url: str, *, accept: str | None = None) -> bytes:
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:  # noqa: S310
             data = r.read(_MAX_BYTES + 1)
     except urllib.error.HTTPError as e:
+        if e.code == 403 and e.headers.get("X-RateLimit-Remaining") == "0":
+            reset = e.headers.get("X-RateLimit-Reset")
+            hint = ""
+            if reset:
+                try:
+                    hint = f" — retry after {time.strftime('%H:%M:%S', time.localtime(int(reset)))}"
+                except (ValueError, OSError):
+                    pass
+            raise GeoDataError(
+                f"GitHub API rate limit exceeded (60/hour unauthenticated){hint}"
+            ) from e
         raise GeoDataError(f"HTTP {e.code} fetching {url}") from e
     except OSError as e:
         raise GeoDataError(f"could not fetch {url}: {e}") from e
@@ -307,10 +318,17 @@ def _fetch_manifest(spec: dict, commit: str) -> list[str]:
                 accept="application/vnd.github+json",
             )
         )
-    except (GeoDataError, ValueError):
+    except (GeoDataError, ValueError, KeyError, TypeError, AttributeError):
+        # best-effort: a malformed trees-API response (an API incident, a
+        # rate-limit body, a shape change) must degrade to "no manifest" —
+        # never crash the refresh (the documented contract).
+        return []
+    if not isinstance(listing, dict):
         return []
     names = []
-    for entry in listing.get("tree", []):
+    for entry in listing.get("tree") or []:
+        if not isinstance(entry, dict):
+            continue
         p = str(entry.get("path", ""))
         if p.startswith(head) and p.endswith(tail):
             names.append(p[len(head) : len(p) - len(tail)])
@@ -363,14 +381,22 @@ def _suggest(kind: str, name: str) -> str | None:
 
 
 def prune(store: Store) -> list[str]:
-    """Remove cache files no record references (post-refresh/apply cleanup)."""
+    """Remove cache files no record references (post-refresh/apply cleanup),
+    plus any orphaned ``.tmp`` files from a crashed ``_write_cache``."""
     keep = {_manifest_path().name}
     for kind in KINDS:
         for name, entry in (_record(store, kind).get("files") or {}).items():
             keep.add(_file_name(kind, name, str(entry.get("sha256"))))
     removed = []
     for path in cache_dir().iterdir():
-        if path.name not in keep and path.suffix == ".srs":
+        if path.name in keep:
+            continue
+        if path.suffix == ".srs":
+            path.unlink(missing_ok=True)
+            removed.append(path.name)
+        elif path.suffix == ".tmp":
+            # orphaned by a crash between write_bytes and replace — safe to
+            # remove (the next fetch recreates it atomically)
             path.unlink(missing_ok=True)
             removed.append(path.name)
     return sorted(removed)

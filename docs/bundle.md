@@ -76,7 +76,7 @@ providers:
         wg: { ... }               # OPTIONAL for token providers (see below)
   protonvpn:                      # config providers have no credential
     channels:
-      proton_us_1:                # the channel id (required)
+      wg_us_1:                # the channel id (required)
         country: United States    # optional display label ("" -> "(Unknown)")
         city: California          # optional display label
         wg:                       # REQUIRED for config providers

@@ -461,7 +461,7 @@ def channel_add(
     return {
         "provider": provider,
         "display_name": display_name(provider),
-        "channel": channel,
+        "channel": _channel_public(channel),
     }
 
 
@@ -553,7 +553,7 @@ def _import_conf(
     return {
         "provider": provider,
         "display_name": display_name(provider),
-        "channel": channel,
+        "channel": _channel_public(channel),
         "imported_from": filename,
         "updated": not created and not unchanged,
         "unchanged": unchanged,
@@ -577,23 +577,29 @@ def _conf_channel_unchanged(
     return not (label and label != existing.label)
 
 
+def _channel_public(channel) -> dict:
+    """The public projection of a channel — the fields every API surface and
+    the CLI render. Never includes ``wg`` (it carries the WireGuard private
+    key), so the raw :class:`~alle.state.Channel` dataclass must never be
+    serialized to a client. One projection for channel-list, add, import,
+    status, and test rows keeps the field set and names consistent."""
+    return {
+        "provider": channel.provider,
+        "display_name": display_name(channel.provider),
+        "name": channel.id,
+        "label": channel.label,
+        "port": f":{channel.port}",
+        "port_number": channel.port,
+        "country": _country_display(channel),
+        "city": _city_display(channel),
+        "enabled": channel.enabled,
+        "ipv6": channel_ipv6(channel),
+    }
+
+
 def channel_list() -> dict:
     store = Store.load()
-    channels = []
-    for channel in store.channels():
-        channels.append(
-            {
-                "provider": channel.provider,
-                "name": channel.id,
-                "label": channel.label,
-                "port": f":{channel.port}",
-                "port_number": channel.port,
-                "country": _country_display(channel),
-                "city": _city_display(channel),
-                "enabled": channel.enabled,
-                "ipv6": channel_ipv6(channel),
-            }
-        )
+    channels = [_channel_public(channel) for channel in store.channels()]
     return {"providers": store.provider_names(), "channels": channels}
 
 
@@ -2226,6 +2232,10 @@ def status_snapshot() -> dict:
         "channel_count": len(channels),
         "enabled_count": enabled_count,
         "disabled_count": len(channels) - enabled_count,
+        # config_revision lets a polling client (the Web UI dashboard) detect
+        # structural route changes from another client (a second tab, the CLI)
+        # and re-fetch /routes — without it the onStatus guard is dead code.
+        "config_revision": config_signature(store.data),
     }
 
 
@@ -2308,6 +2318,7 @@ def _test_row(channel, probe: dict, traffic: dict) -> dict:
         "sent": int(traffic.get("sent", 0)),
         "received": int(traffic.get("received", 0)),
         "traffic_updated_at": int(traffic.get("updated_at", 0)),
+        "ipv6": channel_ipv6(channel),
         "speed_result": None,
     }
 
@@ -2330,6 +2341,8 @@ def _disabled_test_row(channel, traffic: dict) -> dict:
         "state": "Disabled",
         "latency_ms": None,
         "ip": None,
+        "ipv6_exit": None,
+        "ipv6": channel_ipv6(channel),
         "error": None,
         "detail": None,
         "probe": {},

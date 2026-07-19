@@ -128,11 +128,17 @@ least one domain rule targeting it, this runbook read.
 9. **mDNSResponder interplay (Tier 3 focus).** After steps 1–8, Bonjour
    basics still work: `dns-sd -B _ssh._tcp` finds LAN services with tun on
    (multicast is LAN-direct) and after teardown.
-10. **IPv6 blocked, not leaked.** With tun on (on an IPv6-capable network):
-    `route -n get -inet6 2606:4700:4700::1111` resolves via the utun (the v6
-    default route was seized), and `curl -6 https://ifconfig.co` **fails**
-    (connection reset — the `::/0` reject) rather than printing your home
-    IPv6. `curl -4` still exits via the channel. After `tun off`, `curl -6`
-    works again on the physical interface. Rationale: the supported
-    providers' WireGuard is IPv4-only, so blocked-not-leaked is the honest
-    behavior; see cli-reference, TUN mode.
+10. **IPv6 — per-provider policy, never leaked.** With tun on (on an
+    IPv6-capable network):
+    - If **no** enabled channel is v6-capable (e.g. a NordVPN-only fleet):
+      `route -n get -inet6 2606:4700:4700::1111` resolves via the utun, and
+      `curl -6 https://ifconfig.co` **fails** (the blanket `::/0` reject)
+      rather than printing your home IPv6. `curl -4` still exits via the
+      channel. After `tun off`, `curl -6` works again on the physical
+      interface.
+    - If a v6-capable channel exists (e.g. a Proton VPN server with a global
+      v6 address): `curl -6` to a v6 destination that matches a rule → routes
+      through the capable channel; to a destination matching no rule → fails
+      (the trailing `::/0` reject, not a leak); through a v4-only channel's
+      rule → fails (the per-rule v6 guard). Verify with `alle test` — the
+      IPV6 column shows the channel's v6 exit when carried.

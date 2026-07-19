@@ -34,7 +34,7 @@ import threading
 import time
 from pathlib import Path
 
-from alle import __version__, applog, credentials, daemon, output, routes, service
+from alle import __version__, applog, credentials, daemon, fsio, output, routes, service
 from alle.providers import (
     ProviderError,
     auth_fields,
@@ -296,14 +296,14 @@ def cmd_channels_add(args):
         port=args.port or 0,
     )
     channel = result["channel"]
-    labelled = f' labelled "{channel.label}"' if channel.label else ""
+    labelled = f' labelled "{channel["label"]}"' if channel.get("label") else ""
     if result.get("unchanged"):
         # A byte-identical re-import of an existing .conf changes nothing — say so
         # rather than reporting a misleading "Updated".
         print(
-            f"Channel {channel.id}{labelled} already exists under "
+            f"Channel {channel['name']}{labelled} already exists under "
             f"{result['display_name']} with identical settings — nothing to do "
-            f"(on 127.0.0.1:{channel.port})."
+            f"(on 127.0.0.1:{channel['port_number']})."
         )
         return
     if result.get("imported_from"):
@@ -312,8 +312,8 @@ def cmd_channels_add(args):
     else:
         verb, source = "Added", ""
     print(
-        f"{verb} channel {channel.id}{labelled} under {result['display_name']}{source} "
-        f"on 127.0.0.1:{channel.port}."
+        f"{verb} channel {channel['name']}{labelled} under {result['display_name']}{source} "
+        f"on 127.0.0.1:{channel['port_number']}."
     )
     print("Applying… (see: alle status)")
 
@@ -481,6 +481,15 @@ def cmd_routes_ruleset_rename(args):
 def cmd_routes_ruleset_retarget(args):
     rs = service.routes_ruleset_retarget(args.ruleset, args.target)["ruleset"]
     print(f"Retargeted ruleset {rs['id']} {rs['name']!r} → {rs['target']}.")
+
+
+def cmd_routes_ruleset_update(args):
+    _print_ruleset_added(
+        service.routes_ruleset_update(
+            args.ruleset, args.name, args.target, _rule_entries(args)
+        ),
+        verb="Updated",
+    )
 
 
 def cmd_routes_ls(args):
@@ -746,10 +755,17 @@ def _test_strict_exit(args, result: dict) -> None:
     """`--fail`: nonzero exit when any probed channel is unhealthy — the
     per-channel counterpart of `alle health` (daemon liveness), for monitoring.
     Nothing probed also fails: a monitor that watched nothing must not report
-    success."""
+    success. Every channel administratively disabled also fails: the tunnel
+    was not exercised, so "green" would be a lie."""
     if not getattr(args, "fail", False):
         return
-    if not result.get("probed") or result.get("failed_count", 0) > 0:
+    total = result.get("channel_count", 0)
+    disabled = result.get("disabled_count", 0)
+    if (
+        not result.get("probed")
+        or result.get("failed_count", 0) > 0
+        or (total > 0 and disabled == total)
+    ):
         sys.exit(1)
 
 
@@ -863,15 +879,6 @@ def _read_bundle_file(path: str) -> str:
         raise service.ServiceError(f"could not read {path}: {e}") from e
 
 
-def _write_secret_file(path: Path, text: str) -> None:
-    """Write 0600 from the first byte; chmod too, since overwriting an
-    existing file would otherwise keep its old (possibly wider) mode."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(text)
-    os.chmod(path, 0o600)
-
-
 def _print_bundle_summary(result: dict) -> None:
     if result["mode"] == "import":
         ch = result["channels"]
@@ -941,7 +948,7 @@ def cmd_export(args):
     if out == "-":
         print(result["text"], end="")
         return
-    _write_secret_file(Path(out).expanduser(), result["text"])
+    fsio.write_secret(Path(out).expanduser(), result["text"])
     print(f"Exported {what} -> {out}")
     print(
         "This file contains WireGuard private keys and provider tokens — "
@@ -1653,6 +1660,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="exit for matched traffic: <provider>/<channel>, 'direct', or 'block'",
     )
     rst.set_defaults(func=cmd_routes_ruleset_retarget)
+    rsu = rs_sub.add_parser(
+        "update",
+        help="replace a ruleset's name, target, and matchers in one atomic call",
+    )
+    rsu.add_argument("ruleset", help="ruleset id shown by: alle routes ls")
+    rsu.add_argument("name", help="new display name")
+    rsu.add_argument(
+        "--via",
+        dest="target",
+        required=True,
+        help="exit for matched traffic: <provider>/<channel>, 'direct', or 'block'",
+    )
+    _add_matcher_args(rsu)
+    rsu.set_defaults(func=cmd_routes_ruleset_update)
     rls = ro_sub.add_parser("ls", help="list rulesets in evaluation order")
     rls.add_argument(
         "--channel", help="only rules targeting this channel (name or provider/name)"
