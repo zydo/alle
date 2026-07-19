@@ -13,6 +13,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "install.sh"
 
+# The release version the installer pins (and verifies after install). The
+# fake `alle` fixture must report the same string, so read it from the script
+# itself rather than hardcoding a literal a version bump would break.
+_pin = re.search(r'^ALLE_VERSION="([^"]+)"', INSTALLER.read_text(), re.MULTILINE)
+assert _pin is not None
+PINNED_VERSION = _pin.group(1)
+
 
 def _write_executable(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -124,7 +131,7 @@ exit 93
         bin_dir / "alle-fixture",
         """
 case "$1 ${2:-}" in
-  "version ") echo 0.1.10 ;;
+  "version ") echo @PINNED_VERSION@ ;;
   "daemon install")
     mkdir -p "${ALLE_HOME:-$HOME/.alle}"
     echo service >> "$MUTATION_LOG"
@@ -140,7 +147,7 @@ case "$1 ${2:-}" in
   "health ") exit 0 ;;
   *) exit 94 ;;
 esac
-""",
+""".replace("@PINNED_VERSION@", PINNED_VERSION),
     )
     _write_executable(bin_dir / "python-fixture", 'exit "${HEADLESS_FAIL:-0}"\n')
 
