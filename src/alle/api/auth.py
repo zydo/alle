@@ -121,7 +121,6 @@ class LoginTokenStore:
     def __init__(self, path: Path):
         self._path = path
         self._lock = path.with_name(path.name + ".lock")
-        self._consumed: dict[str, int] = {}
 
     def _load(self) -> dict[str, int]:
         try:
@@ -181,7 +180,6 @@ class LoginTokenStore:
                 self._persist(candidate)
             except OSError:
                 return False
-            self._consumed = candidate
             return True
 
 

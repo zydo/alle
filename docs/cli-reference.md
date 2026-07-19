@@ -29,6 +29,7 @@ omit the checkout prefix.
     - [`alle routes ruleset add <ruleset> --<matcher>...`](#alle-routes-ruleset-add-ruleset---matcher)
     - [`alle routes ruleset rm <ruleset> [--dry-run]`](#alle-routes-ruleset-rm-ruleset---dry-run)
     - [`alle routes ruleset rename <ruleset> <name>` / `retarget <ruleset> <target>`](#alle-routes-ruleset-rename-ruleset-name--retarget-ruleset-target)
+    - [`alle routes ruleset update <ruleset> <name> --via <target> --<matcher>...`](#alle-routes-ruleset-update-ruleset-name---via-target---matcher)
     - [`alle routes ls [--channel <ref>] [--flat] [--json]`](#alle-routes-ls---channel-ref---flat---json)
     - [`alle routes rm <id>...`](#alle-routes-rm-id)
     - [`alle routes mv <id>... <ruleset>`](#alle-routes-mv-id-ruleset)
@@ -49,6 +50,7 @@ omit the checkout prefix.
   - [`alle backup [on|off|now]`](#alle-backup-onoffnow)
   - [`alle import <file> [--replace] [--yes]`](#alle-import-file---replace---yes)
   - [`alle sync <file>`](#alle-sync-file)
+  - [`alle gateway init`](#alle-gateway-init)
   - [`alle validate <file>`](#alle-validate-file)
   - [`alle logs`](#alle-logs)
   - [`alle ui`](#alle-ui)
@@ -446,6 +448,12 @@ Remove a whole ruleset block. (A ruleset whose matchers are all removed via
 
 Rename a ruleset or change its exit target. Renaming is presentation-only and
 does not trigger a sing-box reconcile; retargeting does.
+
+### `alle routes ruleset update <ruleset> <name> --via <target> --<matcher>...`
+
+Replace a ruleset's name, target, and matchers in one atomic call, keeping its
+id and priority position — the per-ruleset editor's Apply (the Web UI uses the
+same operation). Matcher flags are the same as `ruleset create`.
 
 ### `alle routes ls [--channel <ref>] [--flat] [--json]`
 
@@ -1089,6 +1097,22 @@ an existing setup.
 ```bash
 alle sync my-setup.yaml     # converge: idempotent, prunes what the file dropped
 ```
+
+---
+
+## `alle gateway init`
+
+Declare the container **gateway profile**'s fail-closed data plane: privilege-
+check first (root mode, `/dev/net/tun`, `CAP_NET_ADMIN` — a gateway container
+missing any of them fails its start loudly), then force the kill switch **on**
+and enable TUN, so the first reconcile activates capture with reject-unmatched
+already in force. Idempotent across restarts.
+
+You normally never run this by hand — the container entrypoint runs it on every
+start when `ALLE_GATEWAY=1` is set (see [docs/docker.md](docker.md) and the
+gateway variant in [docs/docker-compose.md](docker-compose.md)). Readiness
+(`alle health` under the profile) stays red until the declared data plane
+actually holds.
 
 ---
 

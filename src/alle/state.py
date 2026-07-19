@@ -2101,8 +2101,6 @@ def config_signature(data: dict) -> str:
     probe results, so the daemon's probe writes don't trigger a needless
     reconcile. Router rules/kill-switch/port are included so a route edit
     reconciles like a channel edit."""
-    import hashlib
-
     relevant: dict = {}
     for provider, pdata in sorted((data.get("providers") or {}).items()):
         chans = {}

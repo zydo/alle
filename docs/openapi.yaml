@@ -889,6 +889,43 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /api/v1/routes/geo/refresh:
+    post:
+      tags: [routes]
+      summary: Refresh geo data (sub-path spelling)
+      description: >
+        Equivalent to `POST /api/v1/routes/geo` with `action: refresh`.
+        Takes no body fields.
+      operationId: geoRefresh
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/routes/geo/source:
+    post:
+      tags: [routes]
+      summary: Switch the geo upstream source (sub-path spelling)
+      description: >
+        Equivalent to `POST /api/v1/routes/geo` with `action: source`.
+      operationId: geoSource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [source]
+              properties:
+                source:
+                  type: string
+                  enum: [sagernet, metacubex]
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /api/v1/routes/geo/categories:
     get:
       tags: [routes]

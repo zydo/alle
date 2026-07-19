@@ -1564,8 +1564,6 @@ class _Handler(BaseHTTPRequestHandler):
             return self._call(
                 service.routes_trace, _str_field(body, "destination", required=True)
             )
-        if method == "GET" and seg == ["routes", "geo"]:
-            return self._call(service.routes_geo_status)
         if method == "POST" and seg == ["routes", "geo"]:
             _fields(body, "action", "source")
             action = _opt_str_field(body, "action")
