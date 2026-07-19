@@ -19,7 +19,7 @@ import re
 import sys
 import time
 
-from alle import applog, probe, routes, singbox
+from alle import applog, geodata, probe, routes, singbox
 from alle.constants import (
     OUTBOUND_PREFIX,
     ROUTER_INBOUND_TAG,
@@ -177,7 +177,8 @@ class Engine:
             endpoints.append(endpoint)
             rules.append({"inbound": [ch.inbound_tag], "outbound": ch.outbound_tag})
             built.add((ch.provider, ch.id))
-        self._router_config(inbounds, rules, built, errors)
+        rule_sets: list[dict] = []
+        self._router_config(inbounds, rules, built, errors, rule_sets)
         api = singbox.clash_api()
         config: dict = {
             "log": {"level": "warn", "timestamp": True},
@@ -192,6 +193,11 @@ class Engine:
             "endpoints": endpoints,
             "route": {"rules": rules, "final": "direct"},
         }
+        if rule_sets:
+            # Always type: local — alle downloaded and verified these files on
+            # an explicit user action; the engine itself must never fetch or
+            # auto-update rule-set data (no-background-traffic, end to end).
+            config["route"]["rule_set"] = rule_sets
         if self.store.router.get("tun"):
             # alle owns resolution in TUN mode: hijacked queries are answered
             # from this upstream, dialed direct (see constants.TUN_DNS_UPSTREAM
@@ -255,6 +261,7 @@ class Engine:
         rules: list[dict],
         built: set[tuple[str, str]],
         errors: dict[str, str],
+        rule_sets: list[dict],
     ) -> None:
         """Append the shared-rule entry inbounds (router, tun) and the one
         compiled rule table both share.
@@ -367,12 +374,35 @@ class Engine:
             "domain_suffix": "domain_suffix",
             "ip_cidr": "ip_cidr",
         }
+        rule_set_tags: dict[str, dict] = {}
         for rule in router.get("rules") or []:
             ref = f"rule {rule.get('id')}"
             compiled: dict = {"inbound": list(entry)}
             mtype = rule.get("type")
             if mtype in matcher_fields:
                 compiled[matcher_fields[mtype]] = [rule.get("value")]
+            elif mtype in routes.GEO_TYPES:
+                # Geo matchers reference a cached, digest-verified .srs file.
+                # Without the file the matcher cannot exist at all (sing-box
+                # rejects an unknown rule_set tag), so the rule is omitted —
+                # loudly — rather than compiled into a match-everything shape.
+                name = str(rule.get("value"))
+                path = geodata.cached_path(self.store, mtype, name)
+                if path is None:
+                    errors[ref] = (
+                        f"{mtype} category {name!r} is not cached (or failed "
+                        "its digest check) — the rule is omitted until it is "
+                        "fetched: alle routes geo refresh"
+                    )
+                    continue
+                tag = f"{mtype}-{name}"
+                rule_set_tags[tag] = {
+                    "type": "local",
+                    "tag": tag,
+                    "format": "binary",
+                    "path": str(path),
+                }
+                compiled["rule_set"] = [tag]
             elif mtype != "all":
                 errors[ref] = f"unknown matcher type {mtype!r}"
                 continue
@@ -393,6 +423,9 @@ class Engine:
                     continue
                 compiled["outbound"] = f"{OUTBOUND_PREFIX}{provider}-{cid}"
             rules.append(compiled)
+        # Geo rule-sets referenced above, deduped in stable order so the
+        # compiled config does not churn on a refresh that changed nothing.
+        rule_sets.extend(rule_set_tags[tag] for tag in sorted(rule_set_tags))
         if router.get("killswitch"):
             rules.append({"inbound": list(entry), "action": "reject"})
 

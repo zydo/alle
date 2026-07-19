@@ -35,6 +35,7 @@ omit the checkout prefix.
     - [`alle routes reorder <ruleset-id>... [--flat] [--json]`](#alle-routes-reorder-ruleset-id---flat---json)
     - [`alle routes killswitch [on|off]`](#alle-routes-killswitch-onoff)
     - [`alle routes lan [on|off]`](#alle-routes-lan-onoff)
+    - [`alle routes geo [refresh|source]`](#alle-routes-geo-refreshsource)
   - [`alle locations`](#alle-locations)
   - [`alle status`](#alle-status)
   - [`alle start` / `stop` / `restart`](#alle-start--stop--restart)
@@ -572,6 +573,26 @@ Notes:
   still runs ahead of the range exclusions.
 - `alle status` and `routes ls` append `— LAN direct off` to the router line
   while the protection is disabled.
+
+---
+
+### `alle routes geo [refresh|source]`
+
+Manage the community geosite/geoip databases that power `--geosite`/`--geoip`
+matchers. Run without an argument to show status; `refresh` re-downloads all
+referenced categories from the current upstream; `source <name>` switches the
+upstream (`sagernet` default, `metacubex` alternative).
+
+```bash
+alle routes geo                      # status: source, cache, what's referenced
+alle routes geo refresh              # re-pin and re-download all referenced categories
+alle routes geo source metacubex     # switch to the MetaCubeX upstream
+```
+
+Geo data is fetched on demand and never auto-updated (no-background-traffic).
+The first rule referencing a category downloads its `.srs` file; `refresh`
+updates them all. Each cached file is sha256-verified against a recorded digest
+on every use. See [routing.md](routing.md#geo-matchers) for the full design.
 
 ---
 

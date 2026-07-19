@@ -430,6 +430,10 @@ def _rule_entries(args) -> list[dict]:
         out.append({"type": None, "value": value})
     for value in args.cidr or []:
         out.append({"type": "ip_cidr", "value": value})
+    for value in getattr(args, "geosite", None) or []:
+        out.append({"type": "geosite", "value": value})
+    for value in getattr(args, "geoip", None) or []:
+        out.append({"type": "geoip", "value": value})
     if args.all:
         out.append({"type": "all", "value": ""})
     return out
@@ -575,6 +579,54 @@ def cmd_routes_killswitch(args):
         else "Applies to the router entrypoint only; per-channel ports are unaffected."
     )
     print(f"Kill-switch {state}.\n  {scope}")
+
+
+def cmd_routes_geo(args):
+    if args.action == "source":
+        result = service.routes_geo_source(args.name)
+        if args.json:
+            print(output.json_text(result))
+            return
+        _print_geo_status(result)
+        return
+    if args.action == "refresh":
+        result = service.routes_geo_refresh()
+        if args.json:
+            print(output.json_text(result))
+            return
+        for gkind, info in sorted(result["report"]["kinds"].items()):
+            n = len(info["fetched"])
+            print(
+                f"{gkind}: @{info['commit'][:12]}, "
+                f"{n} file(s) re-pinned, "
+                f"{info['categories_available']} categories available"
+            )
+        if result["report"]["pruned"]:
+            print(f"Pruned {len(result['report']['pruned'])} stale file(s).")
+        return
+    # no action: status
+    result = service.routes_geo_status()
+    if args.json:
+        print(output.json_text(result))
+        return
+    _print_geo_status(result)
+
+
+def _print_geo_status(result: dict) -> None:
+    print(f"Geo data source: {result['source']}")
+    print(f"  Available sources: {', '.join(result['sources_available'])}")
+    for gkind, info in sorted(result["kinds"].items()):
+        cached = info["cached"]
+        referenced = info["referenced"]
+        commit = (info["commit"] or "—")[:12]
+        print(
+            f"  {gkind}: upstream@{commit}, {len(cached)} cached, {info['categories_available']} available"
+        )
+        missing = [c for c in referenced if c not in cached]
+        if missing:
+            print(f"    referenced but not cached: {', '.join(missing)}")
+            print("    fetch with: alle routes geo refresh")
+    print("  Data is fetched on demand and never auto-updated.")
 
 
 def cmd_tun(args):
@@ -1520,6 +1572,20 @@ def build_parser() -> argparse.ArgumentParser:
             "--cidr", action="append", help="destination IP or CIDR block"
         )
         parser.add_argument(
+            "--geosite",
+            action="append",
+            metavar="CATEGORY",
+            help="geosite rule-set category (e.g. netflix, google, category-ads-all) "
+            "— fetched from the community database on first use",
+        )
+        parser.add_argument(
+            "--geoip",
+            action="append",
+            metavar="COUNTRY",
+            help="geoip rule-set country code (e.g. us, cn, de) — fetched from the "
+            "community database on first use",
+        )
+        parser.add_argument(
             "--all",
             action="store_true",
             help="match all traffic (catch-all — routes everything not matched earlier)",
@@ -1612,6 +1678,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="also list the built-in CIDR ranges",
     )
     rla.set_defaults(func=cmd_routes_lan)
+    rgeo = ro_sub.add_parser(
+        "geo",
+        help="manage geosite/geoip rule-set data — the community databases "
+        "that power --geosite/--geoip matchers (fetched on demand, never "
+        "auto-updated)",
+    )
+    rgeo.set_defaults(func=cmd_routes_geo, action=None)
+    rgeo.add_argument(
+        "action",
+        nargs="?",
+        choices=["refresh", "source"],
+        help="refresh: re-download all referenced categories from the current "
+        "upstream. source NAME: switch the upstream (sagernet, metacubex). "
+        "Omit to show status.",
+    )
+    rgeo.add_argument(
+        "name",
+        nargs="?",
+        help="the source name for 'source' (sagernet, metacubex)",
+    )
+    rgeo.add_argument("--json", action="store_true", help="print machine-readable JSON")
 
     # locations
     lo = sub.add_parser(

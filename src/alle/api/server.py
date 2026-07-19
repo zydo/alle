@@ -136,6 +136,9 @@ def _api_route_methods(seg: list[str]) -> set[str] | None:
         ("routes", "reorder"): {"POST"},
         ("routes", "killswitch"): {"POST"},
         ("routes", "lan"): {"POST"},
+        ("routes", "geo"): {"GET", "POST"},
+        ("routes", "geo", "refresh"): {"POST"},
+        ("routes", "geo", "source"): {"POST"},
         ("locations",): {"GET"},
         ("metrics",): {"GET"},
         ("logs",): {"GET"},
@@ -1274,6 +1277,7 @@ class _Handler(BaseHTTPRequestHandler):
             # a timer. Refusal channels surface through the usual 400 mapping.
             ("upgrade", "check"): service.upgrade_check,
             ("backup",): service.backup_status,
+            ("routes", "geo"): service.routes_geo_status,
         }
         fn = routes_.get(tuple(seg))
         if fn is None:
@@ -1528,6 +1532,25 @@ class _Handler(BaseHTTPRequestHandler):
             return self._call(
                 service.routes_lan_direct, _bool_field(body, "enabled", required=True)
             )
+        if method == "GET" and seg == ["routes", "geo"]:
+            return self._call(service.routes_geo_status)
+        if method == "POST" and seg == ["routes", "geo"]:
+            _fields(body, "action", "source")
+            action = _opt_str_field(body, "action")
+            if action == "refresh":
+                return self._call(service.routes_geo_refresh)
+            if action == "source":
+                source = _opt_str_field(body, "source")
+                if not source:
+                    raise _BadRequest(400, "'source' is required for action 'source'")
+                return self._call(service.routes_geo_source, source)
+            raise _BadRequest(400, "action must be 'refresh' or 'source'")
+        if method == "POST" and seg == ["routes", "geo", "refresh"]:
+            _fields(body)
+            return self._call(service.routes_geo_refresh)
+        if method == "POST" and seg == ["routes", "geo", "source"]:
+            _fields(body, "source")
+            return self._call(service.routes_geo_source, _opt_str_field(body, "source"))
         if method == "POST" and seg == ["tun"]:
             # `enabled` is required and strictly boolean, same contract as the
             # kill switch: a missing field must never silently flip TUN mode.

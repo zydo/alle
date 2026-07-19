@@ -9,7 +9,9 @@ because an earlier rule strictly covers it is flagged, not silently dead.
 
 Matcher vocabulary (one per rule): ``domain_suffix`` — the one domain matcher,
 matching the domain itself *and* its subdomains (dot-boundary, so
-``example.co.uk`` never bleeds into ``otherexample.co.uk``) — ``ip_cidr``, and
+``example.co.uk`` never bleeds into ``otherexample.co.uk``) — ``ip_cidr``,
+``geosite``/``geoip`` (community rule-set categories, compiled to sing-box
+``rule_set`` references; the data machinery lives in ``geodata``), and
 ``all`` (the catch-all that makes "VPN by default" a one-liner). There is
 deliberately no exact-only domain type: one semantic keeps rules predictable,
 and the legacy ``domain`` (exact) type is read as ``domain_suffix`` wherever
@@ -74,6 +76,13 @@ _LABEL = r"(?!-)[a-z0-9_-]{1,63}(?<!-)"
 # silently becoming a one-label suffix match.
 _DOMAIN_RE = re.compile(rf"^{_LABEL}(\.{_LABEL})+$")
 
+# geosite/geoip category names as the upstreams spell them in filenames:
+# lowercase, may carry attribute forms (apple@cn) and list names
+# (category-ads-all). Kept permissive-but-bounded; existence is validated by
+# the fetch itself, not this regex.
+_GEO_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._@!+-]{0,127}$")
+GEO_TYPES = ("geosite", "geoip")
+
 
 class RuleError(Exception):
     """A routing rule the user typed is not usable."""
@@ -89,10 +98,26 @@ def normalize_domain(value: str) -> str:
     return v
 
 
+def normalize_geo(kind: str, value: str) -> str:
+    """Canonicalize a geosite/geoip category name (forgiving the upstream
+    filename spelling ``geosite-netflix.srs``)."""
+    v = value.strip().lower()
+    prefix = f"{kind}-"
+    if v.startswith(prefix):
+        v = v[len(prefix) :]
+    if v.endswith(".srs"):
+        v = v[: -len(".srs")]
+    if not _GEO_NAME_RE.match(v):
+        raise RuleError(f"{value!r} is not a valid {kind} category name")
+    return v
+
+
 def normalize_value(matcher_type: str, value: str) -> str:
     """Canonicalize a matcher value (or raise :class:`RuleError`)."""
     if matcher_type == "all":
         return ""
+    if matcher_type in GEO_TYPES:
+        return normalize_geo(matcher_type, value)
     if matcher_type == "domain_suffix":
         return normalize_domain(value)
     if matcher_type == "ip_cidr":
@@ -122,6 +147,11 @@ def infer_matcher(value: str, matcher_type: str | None = None) -> tuple[str, str
         return matcher_type, normalize_value(matcher_type, raw)
     if raw.lower() == "all":
         return "all", ""
+    # the prefixed string spelling ("geosite:netflix") — how the Web UI's
+    # one-per-line matcher box and hand-written bundles express geo matchers
+    kind, _, rest = raw.partition(":")
+    if kind.lower() in GEO_TYPES and rest:
+        return kind.lower(), normalize_geo(kind.lower(), rest)
     try:
         return "ip_cidr", str(ipaddress.ip_network(raw, strict=False))
     except ValueError:
@@ -185,6 +215,9 @@ def covers(a: dict, b: dict) -> bool:
         return True
     if tb == "all":
         return False
+    if ta in GEO_TYPES or tb in GEO_TYPES:
+        # opaque category contents: only an identical category provably covers
+        return ta == tb and a["value"] == b["value"]
     if ta == "domain_suffix" and tb == "domain_suffix":
         # dot-boundary suffix semantics: google.com covers google.com + *.google.com
         return b["value"] == a["value"] or b["value"].endswith("." + a["value"])

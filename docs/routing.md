@@ -24,8 +24,10 @@ alle routes ls
 - **Matchers** inside a ruleset are unordered because same-target matchers
   commute. Use `--domain` for a destination domain — it matches the domain
   *and all of its subdomains* (dot-boundary) — `--cidr` for destination
-  IP/CIDR, and `--all` for a catch-all. A matcher that can never win because
-  an earlier ruleset covers it is flagged as *shadowed* in `routes ls`.
+  IP/CIDR, `--geosite`/`--geoip` for community rule-set categories (see
+  [Geo matchers](#geo-matchers) below), and `--all` for a catch-all. A
+  matcher that can never win because an earlier ruleset covers it is flagged
+  as *shadowed* in `routes ls`.
 - **Unmatched traffic goes direct** — without a VPN — like other modern VPN
   clients. To block unmatched traffic instead (a kill-switch for the router
   entrypoint), turn it on explicitly: `alle routes killswitch on`. Per-channel
@@ -93,3 +95,52 @@ user-added entries.
 - Command syntax: [`alle routes`](cli-reference.md) in the CLI reference.
 - Fail-closed semantics (what happens when a rule's channel is missing) are
   in [security.md](security.md).
+
+## Geo matchers
+
+`--geosite` and `--geoip` match traffic against community-maintained databases:
+
+- **geosite** matches by destination domain category — e.g. `netflix`,
+  `google`, `category-ads-all`, `apple@cn`. The data comes from the
+  [v2fly/domain-list-community](https://github.com/v2fly/domain-list-community)
+  project, compiled to sing-box rule-set format by
+  [SagerNet/sing-geosite](https://github.com/SagerNet/sing-geosite).
+- **geoip** matches by destination IP's country — e.g. `us`, `cn`, `de`. The
+  data comes from GeoLite2, compiled by
+  [SagerNet/sing-geoip](https://github.com/SagerNet/sing-geoip).
+
+```bash
+# Route Netflix through a US channel
+alle routes ruleset create Streaming --via nordvpn/us_1 --geosite netflix
+
+# Block known ad/tracker domains
+alle routes ruleset create "Ad block" --via block --geosite category-ads-all
+
+# Route all Chinese IPs direct (no VPN)
+alle routes ruleset create "CN direct" --via direct --geoip cn
+```
+
+### Data fetching and updates
+
+Geo data is **fetched on demand, never auto-updated** — consistent with alle's
+no-background-traffic posture:
+
+- The first time you add a rule referencing a category, alle downloads the
+  matching `.srs` file from the upstream and caches it locally
+  (`<state>/rulesets/`). Each file is a few KB; only referenced categories are
+  fetched, not a monolithic database.
+- Bundle imports that reference uncached categories also fetch them at apply
+  time — this is the second networked step (besides token provider resolution).
+- To update: `alle routes geo refresh` re-pins both databases to the current
+  upstream and re-downloads every referenced category. Run this when you want
+  fresh ad-block lists or newer IP data.
+
+Integrity: each cached file is sha256-verified against a recorded digest on
+every use. The upstream publishes no signatures, so the model is commit-pinning
+— the branch head commit is resolved at fetch time, and the immutable
+commit-pinned raw URL is used for the download.
+
+Switching the upstream: `alle routes geo source metacubex` (alternative:
+[MetaCubeX/meta-rules-dat](https://github.com/MetaCubeX/meta-rules-dat), which
+includes `-lite` variants). Categories will be re-fetched on the next
+`refresh`.

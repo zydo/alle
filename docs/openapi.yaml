@@ -817,6 +817,43 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /api/v1/routes/geo:
+    get:
+      tags: [routes]
+      summary: Geo data source and cache state
+      operationId: geoStatus
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [routes]
+      summary: Refresh geo data or switch the upstream source
+      description: >
+        `action: refresh` re-downloads all referenced categories from the
+        current upstream. `action: source` switches the upstream (requires
+        `source: sagernet|metacubex`). Explicit-invocation only — geo data is
+        never fetched or auto-updated in the background.
+      operationId: geoAction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [refresh, source]
+                source:
+                  type: string
+                  enum: [sagernet, metacubex]
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /api/v1/routes/{id}:
     delete:
       tags: [routes]

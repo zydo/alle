@@ -302,6 +302,75 @@ def test_tun_without_router_port_still_gets_the_rule_table():
     } in rules
 
 
+# ---- geo matchers -----------------------------------------------------------
+
+
+def test_geosite_rule_compiles_to_a_local_rule_set(monkeypatch):
+    from alle import geodata
+    from pathlib import Path
+
+    fake_path = Path("/fake/cache/geosite-netflix.abc.srs")
+    monkeypatch.setattr(
+        geodata,
+        "cached_path",
+        lambda store, kind, name: (
+            fake_path if kind == "geosite" and name == "netflix" else None
+        ),
+    )
+    store = _store(router=_router(("geosite", "netflix", "direct")))
+    config, errors = Engine(store)._build_config()
+    assert errors == {}
+    # the rule references the rule_set tag, not an inline matcher
+    rules = config["route"]["rules"]
+    geo_rule = next(r for r in rules if r.get("rule_set") == ["geosite-netflix"])
+    assert geo_rule["outbound"] == "direct"
+    # the rule_set entry is type: local with the cached path
+    assert config["route"]["rule_set"] == [
+        {
+            "type": "local",
+            "tag": "geosite-netflix",
+            "format": "binary",
+            "path": str(fake_path),
+        }
+    ]
+
+
+def test_geo_rule_with_missing_cache_is_omitted_with_an_error(monkeypatch):
+    from alle import geodata
+
+    monkeypatch.setattr(geodata, "cached_path", lambda *a: None)
+    store = _store(router=_router(("geosite", "netflix", "direct")))
+    config, errors = Engine(store)._build_config()
+    # the rule is omitted — no geo rule in the table, no rule_set entry
+    assert all("rule_set" not in r for r in config["route"]["rules"])
+    assert "rule_set" not in config["route"]
+    assert any("not cached" in str(v) for v in errors.values())
+
+
+def test_multiple_geo_rules_dedup_rule_set_entries(monkeypatch):
+    from alle import geodata
+    from pathlib import Path
+
+    monkeypatch.setattr(
+        geodata,
+        "cached_path",
+        lambda store, kind, name: (
+            Path(f"/fake/{kind}-{name}.srs") if kind in routes.GEO_TYPES else None
+        ),
+    )
+    store = _store(
+        router=_router(
+            ("geosite", "netflix", "direct"),
+            ("geosite", "google", "direct"),
+            ("geoip", "us", "block"),
+        )
+    )
+    config, errors = Engine(store)._build_config()
+    assert errors == {}
+    tags = sorted(rs["tag"] for rs in config["route"]["rule_set"])
+    assert tags == ["geoip-us", "geosite-google", "geosite-netflix"]
+
+
 def test_tun_interface_name_is_platform_aware(monkeypatch):
     import alle.engine as engine_mod
 

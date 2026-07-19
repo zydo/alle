@@ -22,6 +22,7 @@ from alle import (
     daemonctl,
     fsio,
     geo,
+    geodata,
     locations,
     metrics,
     paths,
@@ -978,6 +979,16 @@ def _normalize_matchers(entries: list) -> list[tuple[str, str]]:
     return out
 
 
+def _ensure_geo_matchers(normalized: list[tuple[str, str]]) -> None:
+    """Fetch any uncached geosite/geoip categories *before* a rule mutation,
+    so a bad name or an unreachable upstream fails the whole operation
+    cleanly — before any state has changed."""
+    try:
+        geodata.ensure_matchers(normalized)
+    except geodata.GeoDataError as e:
+        raise ServiceError(str(e)) from e
+
+
 def _decorate_ruleset(block: dict, shadows: dict[str, str]) -> dict:
     rules_ = [_decorate_rule(rule, shadows) for rule in block["rules"]]
     return {
@@ -1037,6 +1048,7 @@ def routes_ruleset_create(name: str, target: str, matchers: list) -> dict:
         raise ServiceError("ruleset name cannot be empty.")
     target = _normalize_target(target)
     normalized = _normalize_matchers(matchers)
+    _ensure_geo_matchers(normalized)
     store = Store.load()
     try:
         block = store.create_ruleset(name, target, normalized)
@@ -1054,6 +1066,7 @@ def routes_ruleset_create(name: str, target: str, matchers: list) -> dict:
 
 def routes_ruleset_add(ruleset_id: str, matchers: list) -> dict:
     normalized = _normalize_matchers(matchers)
+    _ensure_geo_matchers(normalized)
     store = Store.load()
     try:
         block = store.add_ruleset_matchers(ruleset_id, normalized)
@@ -1117,6 +1130,7 @@ def routes_ruleset_update(
     """Update one ruleset's name, target, and matchers (id/position kept)."""
     target = _normalize_target(target)
     normalized = _normalize_matchers(matchers)
+    _ensure_geo_matchers(normalized)
     name = (name or "").strip()
     store = Store.load()
     try:
@@ -1263,6 +1277,56 @@ def routes_killswitch(enable: bool | None = None) -> dict:
         )
         daemon.ensure_running()
     return {"changed": enable is not None, "router": _router_info(store)}
+
+
+def routes_geo_status() -> dict:
+    """The geo data source and cache state: per-kind upstream commit, which
+    categories are cached, and the available manifest (offline-derivable)."""
+    store = Store.load()
+    source = geodata.source_name(store)
+    refs = geodata.referenced(store)
+    manifest = geodata.manifest()
+    kinds: dict[str, dict] = {}
+    for gkind in geodata.KINDS:
+        record = (store.data.get("geodata") or {}).get(gkind) or {}
+        files = record.get("files") or {}
+        kinds[gkind] = {
+            "commit": record.get("commit"),
+            "cached": sorted(files),
+            "referenced": sorted(refs[gkind]),
+            "categories_available": len((manifest.get(gkind) or {}).get("names") or []),
+        }
+    return {
+        "source": source,
+        "sources_available": sorted(geodata.SOURCES),
+        "kinds": kinds,
+    }
+
+
+def routes_geo_refresh() -> dict:
+    """Re-pin both kinds to the current branch heads and re-download every
+    referenced category. Explicit-invocation-only — the no-background-traffic
+    posture holds: this runs because the user asked, never on a timer."""
+    try:
+        report = geodata.refresh()
+    except geodata.GeoDataError as e:
+        raise ServiceError(str(e)) from e
+    daemon.ensure_running()
+    return {"report": report, "geo": routes_geo_status()}
+
+
+def routes_geo_source(name: str | None = None) -> dict:
+    """Set (or with ``None`` just report) the geo data source."""
+    store = Store.load()
+    if name is not None:
+        if name not in geodata.SOURCES:
+            raise ServiceError(
+                f"unknown geo source {name!r} "
+                f"(known: {', '.join(sorted(geodata.SOURCES))})"
+            )
+        store.set_geodata_source(name)
+        applog.log(f"geo source set to {name}")
+    return routes_geo_status()
 
 
 def _process_uid(pid: int) -> int | None:
@@ -1907,6 +1971,33 @@ def backup_now() -> dict:
     return {"backup": _backup_payload(store), **report}
 
 
+def _ensure_geo_from_bundle(text: str) -> None:
+    """Pre-fetch any geo categories a bundle references, before the apply
+    commits — so a bad name or an unreachable upstream fails the whole
+    operation cleanly. Best-effort parse: malformed YAML falls through to
+    the apply's own validator."""
+    try:
+        data = bundle.loads(text)
+    except Exception:  # noqa: BLE001 — the apply's validator reports it
+        return
+    matchers: list[tuple[str, str]] = []
+    for rs in (data.get("router") or {}).get("rulesets") or []:
+        for entry in rs.get("matchers") or []:
+            if isinstance(entry, dict):
+                value = str(entry.get("value") or "")
+                explicit = entry.get("type") or entry.get("matcher_type")
+                mtype = str(explicit) if explicit else None
+            elif isinstance(entry, str):
+                value, mtype = entry, None
+            else:
+                continue
+            try:
+                matchers.append(routes.infer_matcher(value, mtype))
+            except routes.RuleError:
+                pass  # the apply's validator reports it with line numbers
+    _ensure_geo_matchers(matchers)
+
+
 def setup_import(text: str) -> dict:
     """Merge a bundle into the current setup (validate-all, then apply).
 
@@ -1917,6 +2008,7 @@ def setup_import(text: str) -> dict:
     """
     lookup, notes = _bundle_location_lookup()
     try:
+        _ensure_geo_from_bundle(text)
         summary = bundle.apply_import(text, location_lookup=lookup)
     except bundle.BundleError as e:
         raise ServiceError(str(e)) from e
@@ -1944,6 +2036,7 @@ def setup_sync(text: str) -> dict:
     """
     lookup, notes = _bundle_location_lookup()
     try:
+        _ensure_geo_from_bundle(text)
         summary = bundle.apply_sync(text, location_lookup=lookup)
     except bundle.BundleError as e:
         raise ServiceError(str(e)) from e
@@ -1980,6 +2073,7 @@ def setup_restore(text: str) -> dict:
     (the CLI prompts / requires ``--yes``; the Web UI shows a dialog)."""
     lookup, notes = _bundle_location_lookup()
     try:
+        _ensure_geo_from_bundle(text)
         summary = bundle.apply_restore(text, location_lookup=lookup)
     except bundle.BundleError as e:
         raise ServiceError(str(e)) from e

@@ -848,6 +848,45 @@ def test_routes_api_create_reorder_killswitch_delete(live):
     assert Store.load().rules() == []
 
 
+def test_routes_geo_status_reports_source_and_empty_cache(live):
+    base, secret = live
+    st, body, _ = _req(base + "/api/v1/routes/geo", headers=_bearer(secret))
+    data = json.loads(body)
+    assert st == 200
+    assert data["source"] == "sagernet"
+    assert "metacubex" in data["sources_available"]
+    for kind in ("geosite", "geoip"):
+        assert data["kinds"][kind]["cached"] == []
+        assert data["kinds"][kind]["referenced"] == []
+
+    # source switch rejects unknown names
+    st, body, _ = _req(
+        base + "/api/v1/routes/geo",
+        method="POST",
+        headers=_bearer(secret),
+        data={"action": "source", "source": "bogus"},
+    )
+    assert st == 400 and "unknown geo source" in json.loads(body)["error"]
+
+    # source switch to a valid name persists
+    st, body, _ = _req(
+        base + "/api/v1/routes/geo",
+        method="POST",
+        headers=_bearer(secret),
+        data={"action": "source", "source": "metacubex"},
+    )
+    assert st == 200 and json.loads(body)["source"] == "metacubex"
+
+    # bad action
+    st, body, _ = _req(
+        base + "/api/v1/routes/geo",
+        method="POST",
+        headers=_bearer(secret),
+        data={"action": "bogus"},
+    )
+    assert st == 400
+
+
 def test_backup_endpoints_configure_run_and_report(live):
     base, secret = live
     origin = _bearer(secret)

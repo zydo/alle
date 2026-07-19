@@ -1411,6 +1411,39 @@ class Store:
             data.setdefault("router", _router_blank())["tun"] = bool(enabled)
         self.data = _read_raw()
 
+    def update_geodata(
+        self,
+        kind: str,
+        *,
+        source: str,
+        commit: str,
+        files: dict[str, dict],
+        replace: bool = False,
+    ) -> None:
+        """Record fetched geo rule-set files (top-level ``geodata`` key).
+
+        ``replace`` swaps the kind's whole file table (a refresh); otherwise
+        entries merge (a single-category fetch). The record is config-relevant
+        — :func:`config_signature` includes it, so a refresh that changed any
+        digest reconciles sing-box onto the new files.
+        """
+        with transaction() as data:
+            geo = data.setdefault("geodata", {})
+            geo["source"] = source
+            entry = geo.setdefault(kind, {})
+            entry["commit"] = commit
+            entry["source"] = source
+            if replace:
+                entry["files"] = dict(files)
+            else:
+                entry.setdefault("files", {}).update(files)
+        self.data = _read_raw()
+
+    def set_geodata_source(self, name: str) -> None:
+        with transaction() as data:
+            data.setdefault("geodata", {})["source"] = name
+        self.data = _read_raw()
+
     def set_backup(
         self,
         *,
@@ -2097,5 +2130,20 @@ def config_signature(data: dict) -> str:
                 for rule in (router.get("rules") or [])
             ],
         }
+    geodata = data.get("geodata") or {}
+    geo_relevant = {
+        kind: {
+            "commit": entry.get("commit"),
+            "files": {
+                name: f.get("sha256") for name, f in (entry.get("files") or {}).items()
+            },
+        }
+        for kind, entry in geodata.items()
+        if isinstance(entry, dict) and entry.get("files")
+    }
+    if geo_relevant:
+        # geo rule-set content feeds the compiled config via local rule_set
+        # paths, so a refresh that changed any digest must reconcile.
+        relevant["_geodata"] = geo_relevant
     blob = json.dumps(relevant, sort_keys=True, ensure_ascii=False).encode()
     return hashlib.sha256(blob).hexdigest()
