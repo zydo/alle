@@ -1300,6 +1300,20 @@ def routes_geo_status() -> dict:
         "source": source,
         "sources_available": sorted(geodata.SOURCES),
         "kinds": kinds,
+        "upstreams": {k: geodata.upstream_url(k) for k in geodata.KINDS},
+    }
+
+
+def routes_geo_categories(kind: str | None = None, query: str | None = None) -> dict:
+    """Available category names from the cached manifest (offline, no network).
+    ``kind`` filters to one; ``query`` case-insensitive-substring-filters."""
+    if kind is not None and kind not in geodata.KINDS:
+        raise ServiceError(f"unknown kind {kind!r} (known: {', '.join(geodata.KINDS)})")
+    cats = geodata.categories(kind=kind, query=query)
+    return {
+        "categories": cats,
+        "counts": {k: len(v) for k, v in cats.items()},
+        "manifest_populated": bool(geodata.manifest()),
     }
 
 

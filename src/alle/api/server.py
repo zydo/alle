@@ -137,6 +137,7 @@ def _api_route_methods(seg: list[str]) -> set[str] | None:
         ("routes", "killswitch"): {"POST"},
         ("routes", "lan"): {"POST"},
         ("routes", "geo"): {"GET", "POST"},
+        ("routes", "geo", "categories"): {"GET"},
         ("routes", "geo", "refresh"): {"POST"},
         ("routes", "geo", "source"): {"POST"},
         ("locations",): {"GET"},
@@ -1278,6 +1279,12 @@ class _Handler(BaseHTTPRequestHandler):
             ("upgrade", "check"): service.upgrade_check,
             ("backup",): service.backup_status,
             ("routes", "geo"): service.routes_geo_status,
+            # Offline browse/search of category names (from the manifest
+            # recorded at refresh) — ?kind=geosite|geoip, ?q=<substring>.
+            ("routes", "geo", "categories"): lambda: service.routes_geo_categories(
+                kind=_query_first(self.path, "kind"),
+                query=_query_first(self.path, "q"),
+            ),
         }
         fn = routes_.get(tuple(seg))
         if fn is None:

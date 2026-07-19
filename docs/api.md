@@ -139,8 +139,9 @@ liveness probe.
 | `POST /api/v1/routes/move`                        | `{"ids": [...], "ruleset"}`      | Move matcher(s) into another ruleset in one transaction (they adopt its target; an emptied source ruleset dissolves).           |
 | `POST /api/v1/routes/reorder`                     | `{"ids": [...], "flat"?}`        | Reorder rules/rulesets.                                                                                                         |
 | `POST /api/v1/routes/killswitch`                  | `{"enabled"}`                    | Kill switch on/off. `enabled` is required — a missing field never silently disables it.                                         |
-| `GET /api/v1/routes/geo`                          | —                                | Geo data source and cache state.                                                                                               |
+| `GET /api/v1/routes/geo`                          | —                                | Geo data source and cache state, incl. `upstreams` — the plaintext category-browsing URLs.                                     |
 | `POST /api/v1/routes/geo`                          | `{"action", "source"?}`          | `refresh` re-downloads referenced categories; `source` switches the upstream (sagernet/metacubex). Never auto-updates.          |
+| `GET /api/v1/routes/geo/categories`                | `?kind=`, `?q=`                  | Search available category names offline (from the manifest recorded at refresh; empty until the first refresh).                 |
 | `POST /api/v1/routes/lan`                         | `{"enabled"}`                    | LAN-direct policy.                                                                                                              |
 | `POST /api/v1/tun`                                | `{"enabled"}`                    | TUN mode on/off. Privilege failures are a 400 whose message carries the platform recipe.                                        |
 

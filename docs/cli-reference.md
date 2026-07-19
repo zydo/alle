@@ -35,7 +35,7 @@ omit the checkout prefix.
     - [`alle routes reorder <ruleset-id>... [--flat] [--json]`](#alle-routes-reorder-ruleset-id---flat---json)
     - [`alle routes killswitch [on|off]`](#alle-routes-killswitch-onoff)
     - [`alle routes lan [on|off]`](#alle-routes-lan-onoff)
-    - [`alle routes geo [refresh|source]`](#alle-routes-geo-refreshsource)
+    - [`alle routes geo [ls|refresh|source]`](#alle-routes-geo-lsrefreshsource)
   - [`alle locations`](#alle-locations)
   - [`alle status`](#alle-status)
   - [`alle start` / `stop` / `restart`](#alle-start--stop--restart)
@@ -576,18 +576,28 @@ Notes:
 
 ---
 
-### `alle routes geo [refresh|source]`
+### `alle routes geo [ls|refresh|source]`
 
 Manage the community geosite/geoip databases that power `--geosite`/`--geoip`
-matchers. Run without an argument to show status; `refresh` re-downloads all
-referenced categories from the current upstream; `source <name>` switches the
-upstream (`sagernet` default, `metacubex` alternative).
+matchers. Run without an argument to show status; `ls [QUERY]` searches
+available category names (offline, from the manifest recorded at refresh);
+`refresh` re-downloads all referenced categories from the current upstream;
+`source <name>` switches the upstream (`sagernet` default, `metacubex`
+alternative).
 
 ```bash
 alle routes geo                      # status: source, cache, what's referenced
+alle routes geo ls netflix           # search category names (offline)
+alle routes geo ls --kind geosite    # list one kind
 alle routes geo refresh              # re-pin and re-download all referenced categories
 alle routes geo source metacubex     # switch to the MetaCubeX upstream
 ```
+
+To see what a category *contains* in plaintext, read its file in
+[v2fly/domain-list-community's `data/`](https://github.com/v2fly/domain-list-community/tree/master/data)
+(geosite; the filename is the category name) — geoip categories are ISO
+3166-1 alpha-2 country codes. Details:
+[routing.md](routing.md#looking-up-categories-and-their-contents-plaintext).
 
 Geo data is fetched on demand and never auto-updated (no-background-traffic).
 The first rule referencing a category downloads its `.srs` file; `refresh`

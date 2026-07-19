@@ -855,9 +855,25 @@ def test_routes_geo_status_reports_source_and_empty_cache(live):
     assert st == 200
     assert data["source"] == "sagernet"
     assert "metacubex" in data["sources_available"]
+    # the plaintext browse links ride along for UI/docs discoverability
+    assert "domain-list-community" in data["upstreams"]["geosite"]
     for kind in ("geosite", "geoip"):
         assert data["kinds"][kind]["cached"] == []
         assert data["kinds"][kind]["referenced"] == []
+
+    # offline category search: empty (but well-formed) before the first refresh
+    st, body, _ = _req(
+        base + "/api/v1/routes/geo/categories?kind=geosite&q=netflix",
+        headers=_bearer(secret),
+    )
+    data = json.loads(body)
+    assert st == 200
+    assert data["categories"] == {"geosite": []}
+    assert data["manifest_populated"] is False
+    st, body, _ = _req(
+        base + "/api/v1/routes/geo/categories?kind=bogus", headers=_bearer(secret)
+    )
+    assert st == 400 and "unknown kind" in json.loads(body)["error"]
 
     # source switch rejects unknown names
     st, body, _ = _req(

@@ -186,6 +186,7 @@ def _fetch_file(spec: dict, commit: str, kind: str, name: str) -> bytes:
             raise GeoDataError(
                 f"no {kind} category {name!r} at {spec['repo']}@{commit[:12]}"
                 + (f" — did you mean: {hint}?" if hint else "")
+                + f" (browse names: {upstream_url(kind)})"
             ) from e
         raise
     if not data.startswith(_MAGIC):
@@ -322,6 +323,35 @@ def manifest() -> dict:
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def categories(
+    kind: str | None = None, query: str | None = None
+) -> dict[str, list[str]]:
+    """Available category names from the manifest (offline — no network).
+
+    Returns ``{kind: [name, …]}``. ``kind`` filters to one; ``query``
+    case-insensitive-substring-filters the names within each kind. The
+    manifest is populated at refresh; before the first refresh the lists are
+    empty (and the user is guided to browse the upstream source — see the
+    docs — or run ``alle routes geo refresh``).
+    """
+    man = manifest()
+    kinds = [kind] if kind else list(KINDS)
+    q = (query or "").lower()
+    out: dict[str, list[str]] = {}
+    for k in kinds:
+        names = (man.get(k) or {}).get("names") or []
+        out[k] = [n for n in names if not q or q in n.lower()]
+    return out
+
+
+def upstream_url(kind: str) -> str:
+    """The plaintext source repo where a user can browse category names and
+    (for geosite) the domains inside each category."""
+    if kind == "geosite":
+        return "https://github.com/v2fly/domain-list-community/tree/master/data"
+    return "https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2"
 
 
 def _suggest(kind: str, name: str) -> str | None:

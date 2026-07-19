@@ -120,6 +120,37 @@ alle routes ruleset create "Ad block" --via block --geosite category-ads-all
 alle routes ruleset create "CN direct" --via direct --geoip cn
 ```
 
+### Looking up categories and their contents (plaintext)
+
+The `.srs` files alle downloads are binary, but everything in them is
+browsable as plaintext at the source:
+
+- **geosite** — category names and their full domain lists live in
+  [v2fly/domain-list-community's `data/` directory](https://github.com/v2fly/domain-list-community/tree/master/data):
+  one file per category, one domain per line. The filename is the category
+  name (`data/netflix` → `--geosite netflix`); a file can `include:` other
+  files, and lines tagged `@ads` etc. power attribute forms like
+  `google@ads`. To see exactly which domains `geosite:netflix` matches, read
+  [`data/netflix`](https://github.com/v2fly/domain-list-community/blob/master/data/netflix).
+- **geoip** — categories are simply lowercase
+  [ISO 3166-1 alpha-2 country codes](https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2)
+  (`us`, `de`, `cn`, …), plus `private` for RFC1918/link-local space. The IP
+  ranges come from GeoLite2 and change with its updates; there is no
+  stable per-country plaintext to link, but the code *is* the category name.
+
+Offline, after at least one `alle routes geo refresh`, the recorded manifest
+answers "what names exist" without any network:
+
+```bash
+alle routes geo ls netflix           # search categories matching "netflix"
+alle routes geo ls --kind geosite    # list geosite categories (first 50)
+alle routes geo ls cn --json         # scripting form
+```
+
+The same list backs `GET /api/v1/routes/geo/categories?q=…`, typo
+suggestions on failed adds ("did you mean: …"), and the upstream links shown
+in the Web UI's rule editor and in `alle routes geo` status output.
+
 ### Data fetching and updates
 
 Geo data is **fetched on demand, never auto-updated** — consistent with alle's

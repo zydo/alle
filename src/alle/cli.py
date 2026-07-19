@@ -582,6 +582,31 @@ def cmd_routes_killswitch(args):
 
 
 def cmd_routes_geo(args):
+    if args.action == "ls":
+        result = service.routes_geo_categories(
+            kind=getattr(args, "kind", None), query=args.name
+        )
+        if args.json:
+            print(output.json_text(result))
+            return
+        if not result["manifest_populated"]:
+            status = service.routes_geo_status()
+            print(
+                "No category list cached yet — run `alle routes geo refresh` "
+                "once to record it.\nBrowse the upstream data in plaintext "
+                "meanwhile:"
+            )
+            for gkind, url in sorted(status["upstreams"].items()):
+                print(f"  {gkind}: {url}")
+            return
+        for gkind, names in sorted(result["categories"].items()):
+            shown = names[:50]
+            print(f"{gkind} ({len(names)} match{'es' if len(names) != 1 else ''}):")
+            for name in shown:
+                print(f"  {name}")
+            if len(names) > len(shown):
+                print(f"  … {len(names) - len(shown)} more (narrow with a query)")
+        return
     if args.action == "source":
         result = service.routes_geo_source(args.name)
         if args.json:
@@ -627,6 +652,9 @@ def _print_geo_status(result: dict) -> None:
             print(f"    referenced but not cached: {', '.join(missing)}")
             print("    fetch with: alle routes geo refresh")
     print("  Data is fetched on demand and never auto-updated.")
+    print("  Browse the data in plaintext (category names + contents):")
+    for gkind, url in sorted(result.get("upstreams", {}).items()):
+        print(f"    {gkind}: {url}")
 
 
 def cmd_tun(args):
@@ -1688,15 +1716,22 @@ def build_parser() -> argparse.ArgumentParser:
     rgeo.add_argument(
         "action",
         nargs="?",
-        choices=["refresh", "source"],
-        help="refresh: re-download all referenced categories from the current "
-        "upstream. source NAME: switch the upstream (sagernet, metacubex). "
-        "Omit to show status.",
+        choices=["ls", "refresh", "source"],
+        help="ls [QUERY]: search available category names (offline, from the "
+        "manifest recorded at refresh). refresh: re-download all referenced "
+        "categories from the current upstream. source NAME: switch the "
+        "upstream (sagernet, metacubex). Omit to show status.",
     )
     rgeo.add_argument(
         "name",
         nargs="?",
-        help="the source name for 'source' (sagernet, metacubex)",
+        help="for 'ls': a substring to search; for 'source': the source name "
+        "(sagernet, metacubex)",
+    )
+    rgeo.add_argument(
+        "--kind",
+        choices=["geosite", "geoip"],
+        help="for 'ls': restrict to one kind",
     )
     rgeo.add_argument("--json", action="store_true", help="print machine-readable JSON")
 

@@ -203,3 +203,46 @@ def test_source_switching_clears_old_files(store):
     store.set_geodata_source("metacubex")
     assert store.data["geodata"]["source"] == "metacubex"
     assert geodata.source_name(store) == "metacubex"
+
+
+# ---- category lookup (offline) -----------------------------------------------
+
+
+def test_categories_empty_before_first_refresh():
+    out = geodata.categories()
+    assert out == {"geosite": [], "geoip": []}
+    assert geodata.manifest() == {}
+
+
+def test_categories_search_from_recorded_manifest():
+    geodata._manifest_path().write_text(
+        json.dumps(
+            {
+                "source": "sagernet",
+                "geosite": {
+                    "commit": "c" * 40,
+                    "names": ["netflix", "google", "apple@cn"],
+                },
+                "geoip": {"commit": "c" * 40, "names": ["us", "cn", "de"]},
+            }
+        )
+    )
+    assert geodata.categories(query="netflix") == {"geosite": ["netflix"], "geoip": []}
+    assert geodata.categories(kind="geoip") == {"geoip": ["us", "cn", "de"]}
+    assert geodata.categories(kind="geosite", query="CN") == {"geosite": ["apple@cn"]}
+
+
+def test_upstream_urls_are_plaintext_browsable():
+    assert "domain-list-community" in geodata.upstream_url("geosite")
+    assert "ISO_3166" in geodata.upstream_url("geoip")
+
+
+def test_404_error_names_the_plaintext_upstream(store):
+    def fake_get(url, *, accept=None):
+        if "/branches/" in url:
+            return json.dumps({"commit": {"sha": "d" * 40}}).encode()
+        raise geodata.GeoDataError("HTTP 404 fetching https://example.com/x.srs")
+
+    with patch.object(geodata, "_http_get", fake_get):
+        with pytest.raises(geodata.GeoDataError, match="browse names: https://"):
+            geodata.ensure_matchers([("geosite", "nosuchcategory")])

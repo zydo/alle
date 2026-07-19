@@ -821,6 +821,10 @@ paths:
     get:
       tags: [routes]
       summary: Geo data source and cache state
+      description: >
+        Includes `upstreams` — the plaintext sources where category names and
+        contents can be browsed (v2fly/domain-list-community `data/` for
+        geosite; ISO 3166-1 alpha-2 for geoip).
       operationId: geoStatus
       responses:
         "200": { $ref: "#/components/responses/GenericResult" }
@@ -849,6 +853,29 @@ paths:
                 source:
                   type: string
                   enum: [sagernet, metacubex]
+      responses:
+        "200": { $ref: "#/components/responses/GenericResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/routes/geo/categories:
+    get:
+      tags: [routes]
+      summary: Search available geo category names (offline)
+      description: >
+        Served from the manifest recorded at the last refresh — no network
+        call. Empty until the first `refresh`.
+      operationId: geoCategories
+      parameters:
+        - name: kind
+          in: query
+          required: false
+          schema: { type: string, enum: [geosite, geoip] }
+        - name: q
+          in: query
+          required: false
+          description: case-insensitive substring filter
+          schema: { type: string }
       responses:
         "200": { $ref: "#/components/responses/GenericResult" }
         "400": { $ref: "#/components/responses/BadRequest" }

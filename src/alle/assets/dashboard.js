@@ -1129,7 +1129,7 @@ function matcherInputHTML(buttonText) {
   return `<div class="match-group">
       <label class="field check" id="match-all"><input type="checkbox" id="all-traffic"><span><b>All traffic</b> — match everything (catch-all).</span></label>
       <div class="or-divider" aria-hidden="true"><span>or</span></div>
-      <label class="field" id="match-list"><span>Specific domains / IPs (one per line)</span><textarea id="matchers" placeholder="netflix.com\napi.openai.com\n10.8.0.0/16"></textarea>
+      <label class="field" id="match-list"><span>Specific domains / IPs / geo categories (one per line)</span><textarea id="matchers" placeholder="netflix.com\napi.openai.com\n10.8.0.0/16\ngeosite:netflix\ngeoip:us"></textarea>
         <div class="match-examples">
           <div class="mx-title">Examples (a domain matches itself and all its subdomains):</div>
           <div class="mx-item"><code>netflix.com</code>the domain plus any <code>*.netflix.com</code></div>
@@ -1138,6 +1138,8 @@ function matcherInputHTML(buttonText) {
           <div class="mx-item"><code>185.81.1.1/16</code>the whole 185.81.0.0/16 IPv4 CIDR range</div>
           <div class="mx-item"><code>2001:db8::1</code>that exact IPv6 address</div>
           <div class="mx-item"><code>2001:db8::/32</code>the 2001:db8::/32 IPv6 CIDR range</div>
+          <div class="mx-item"><code>geosite:netflix</code>a community domain category — <a href="https://github.com/v2fly/domain-list-community/tree/master/data" target="_blank" rel="noopener">browse names &amp; contents ↗</a></div>
+          <div class="mx-item"><code>geoip:us</code>destination IPs in a country (<a href="https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2" target="_blank" rel="noopener">ISO codes ↗</a>)</div>
         </div></label>
     </div>
     <p class="form-err" id="err"></p><button class="btn primary" type="submit">${esc(buttonText)}</button>`;
