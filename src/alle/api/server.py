@@ -1106,13 +1106,31 @@ class _Handler(BaseHTTPRequestHandler):
         Proves possession of the installation secret without ever sending it;
         the ``health:`` domain separation means the answer can never be
         replayed as a login token or session cookie.
+
+        Also reports the data plane: an API that answers proves only that the
+        daemon is alive, and a consumer watching just that stayed blind
+        through a whole sing-box outage (every proxy down, "health" green).
+        ``ok``/``sing_box`` make the one endpoint consumers poll tell the
+        truth; ``runtime`` carries the daemon's published sing-box status
+        ("degraded", "crash_looping", …). Cheap and unauthenticated: a
+        pidfile liveness check plus one small info-file read — no probes, and
+        nothing an unauthenticated caller shouldn't see.
         """
         nonce = (query.get("nonce") or [""])[0]
         if not nonce or len(nonce) > 128:
             raise _BadRequest(400, "a nonce query parameter (<=128 chars) is required")
+        from alle import daemon, singbox
+
+        up = singbox.Runner().is_running()
+        info = daemon.daemon_info() or {}
         self._json(
             200,
-            {"proof": auth.health_proof(self.secret, nonce)},
+            {
+                "proof": auth.health_proof(self.secret, nonce),
+                "ok": up,
+                "sing_box": "running" if up else "stopped",
+                "runtime": info.get("runtime"),
+            },
             {"Cache-Control": "no-store"},
         )
 

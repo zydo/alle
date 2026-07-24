@@ -63,10 +63,15 @@ contract** for API clients.
 ### Readiness without the secret
 
 `GET /health?nonce=<string≤128>` is unauthenticated and answers
-`{"proof": <HMAC(secret, "health:"+nonce)>}` — proof the process behind the
-port is alle, without transporting the secret. Use it (or the Docker image's
-built-in `HEALTHCHECK`) to gate dependents; a plain `HEAD /health` works as a
-liveness probe.
+`{"proof": <HMAC(secret, "health:"+nonce)>, "ok": <bool>, "sing_box":
+"running"|"stopped", "runtime": {…}|null}` — proof the process behind the
+port is alle, without transporting the secret, plus the data plane's state.
+An answering API only proves the *daemon* is alive; `ok` is true only while
+sing-box is also running — while it is `false`, every channel proxy port is
+down, so consumers should alert on it (`runtime` carries the daemon's
+published sing-box status: `degraded`, `crash_looping`, …). Use it (or the
+Docker image's built-in `HEALTHCHECK`, which fails on the same condition) to
+gate dependents; a plain `HEAD /health` works as a liveness probe.
 
 ## Conventions
 

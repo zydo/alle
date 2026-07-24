@@ -52,7 +52,10 @@ paths:
       description: >
         Answers an HMAC proof over the caller's nonce — proves the process
         behind the port is alle without transporting the secret. Use it to
-        gate dependents; a plain HEAD works as a liveness probe.
+        gate dependents; a plain HEAD works as a liveness probe. The response
+        also reflects the data plane (`ok`/`sing_box`): an answering API only
+        proves the daemon is alive, so consumers should alert on `ok: false`
+        — every channel proxy is down while sing-box is not running.
       operationId: health
       parameters:
         - name: nonce
@@ -61,7 +64,7 @@ paths:
           schema: { type: string, maxLength: 128, minLength: 1 }
       responses:
         "200":
-          description: Proof of secret possession
+          description: Proof of secret possession, plus data-plane status
           content:
             application/json:
               schema:
@@ -72,6 +75,23 @@ paths:
                       type: string,
                       description: 'HMAC-SHA256(secret, "health:"+nonce), urlsafe-base64',
                     }
+                  ok:
+                    {
+                      type: boolean,
+                      description: "True only while sing-box (the data plane) is running",
+                    }
+                  sing_box:
+                    { type: string, enum: [running, stopped] }
+                  runtime:
+                    type: [object, "null"]
+                    description: >
+                      The daemon's published sing-box runtime status when one
+                      is recorded ("ok", "degraded", "crashed",
+                      "crash_looping", "config_rejected", …) with a one-line
+                      detail.
+                    properties:
+                      singbox: { type: string }
+                      detail: { type: string }
         "400": { $ref: "#/components/responses/BadRequest" }
 
   /api/v1/status:

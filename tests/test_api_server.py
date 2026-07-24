@@ -1679,6 +1679,25 @@ def test_health_answers_the_nonce_challenge(live):
     assert st == 400
 
 
+def test_health_reports_the_data_plane(live, monkeypatch):
+    """/health must go red when sing-box is down: an answering API only proves
+    the daemon is alive, and a consumer polling just that stayed blind through
+    a whole proxy outage (every channel down, health still green)."""
+    base, _ = live
+    st, body, _ = _req(base + "/health?nonce=n1")
+    payload = json.loads(body)
+    # no sing-box runs in this test env — the truthful answer is "down"
+    assert payload["ok"] is False
+    assert payload["sing_box"] == "stopped"
+    assert "runtime" in payload
+
+    monkeypatch.setattr("alle.singbox.Runner.is_running", lambda self: True)
+    st, body, _ = _req(base + "/health?nonce=n2")
+    payload = json.loads(body)
+    assert payload["ok"] is True
+    assert payload["sing_box"] == "running"
+
+
 def test_wait_until_serving_verifies_the_listener(live, monkeypatch):
     base, _ = live
     api = server.control_api()
