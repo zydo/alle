@@ -2,7 +2,7 @@
 # One-command, user-level installer for alle on macOS and systemd Linux.
 set -eu
 
-ALLE_VERSION="0.1.11"
+ALLE_VERSION="0.1.12"
 UV_VERSION="0.11.29"
 UV_INSTALLER_SHA256="504a79fd2ed0dcd47e7f04f0792cfd0871f62e24a7fe40fa8ae0f563a369f2bd"
 UV_INSTALLER_URL="https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-installer.sh"
