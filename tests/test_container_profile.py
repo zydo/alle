@@ -83,6 +83,25 @@ def test_port_base_skips_explicitly_claimed_ports(monkeypatch):
     assert (a.port, b.port) == (21000, 21002)
 
 
+def test_port_base_skips_ports_the_os_reports_busy(monkeypatch):
+    """Under channel churn a just-removed channel's port stays bound by the
+    live sing-box until the next reconcile lands — the store can't see that,
+    so allocation must also ask the OS, or the new channel gets exactly the
+    port whose bind will kill the whole config."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as held:
+        held.bind(("127.0.0.1", 0))
+        held.listen(1)
+        busy = held.getsockname()[1]
+        monkeypatch.setenv("ALLE_PORT_BASE", str(busy))
+        store = Store.load()
+        store.add_provider("nordvpn")
+        ch = store.add_channel("nordvpn", "US", "", dict(WG))
+    assert ch.port != busy
+    assert ch.port > busy  # sequential allocation moved past the busy port
+
+
 def test_port_base_invalid_value_errors(monkeypatch):
     monkeypatch.setenv("ALLE_PORT_BASE", "not-a-port")
     store = Store.load()

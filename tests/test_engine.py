@@ -546,15 +546,23 @@ def test_reconcile_raises_on_unrecoverable_runtime_failure():
 
 
 class _PortStealRunner:
-    """Fails the first apply with sing-box's address-in-use error, then works."""
+    """Fails every apply whose config still uses the stolen port — models a
+    foreign process squatting on it for good (a transient holder that releases
+    is `_TransientBindRunner` below)."""
 
     def __init__(self, stolen_port):
         self.stolen_port = stolen_port
         self.applied = []
 
+    def _uses_stolen(self, config):
+        if any(i.get("listen_port") == self.stolen_port for i in config["inbounds"]):
+            return True
+        api = config["experimental"]["clash_api"]["external_controller"]
+        return int(api.rsplit(":", 1)[1]) == self.stolen_port
+
     def apply(self, config):
         self.applied.append(config)
-        if len(self.applied) == 1:
+        if self._uses_stolen(config):
             return singbox.ApplyResult(
                 singbox.ApplyOutcome.RUNTIME_FAILED,
                 "sing-box exited immediately (code 1); last log lines:\n"
@@ -567,7 +575,8 @@ class _PortStealRunner:
         return True
 
 
-def test_reconcile_reallocates_a_stolen_channel_port():
+def test_reconcile_reallocates_a_stolen_channel_port(monkeypatch):
+    monkeypatch.setattr("alle.engine._BIND_RETRY_DELAYS", (0.0, 0.0))
     store = Store.load()
     store.add_provider("nordvpn")
     ch = store.add_channel("nordvpn", "US", "", dict(WG))
@@ -576,13 +585,15 @@ def test_reconcile_reallocates_a_stolen_channel_port():
     eng.runner = cast(singbox.Runner, runner)
 
     assert eng.reconcile() == {}
-    assert len(runner.applied) == 2  # failed once, retried after reallocation
+    # failed + two same-config retries (still held), then reallocated + retried
+    assert len(runner.applied) == 4
     moved = Store.load().get_channel("nordvpn", ch.id)
     assert moved is not None and moved.port != ch.port
-    assert runner.applied[1]["inbounds"][0]["listen_port"] == moved.port
+    assert runner.applied[-1]["inbounds"][0]["listen_port"] == moved.port
 
 
-def test_reconcile_regenerates_a_stolen_clash_api_port():
+def test_reconcile_regenerates_a_stolen_clash_api_port(monkeypatch):
+    monkeypatch.setattr("alle.engine._BIND_RETRY_DELAYS", (0.0, 0.0))
     before = singbox.clash_api()
     stolen = int(before["address"].rsplit(":", 1)[1])
     eng = Engine(Store.load())
@@ -592,7 +603,44 @@ def test_reconcile_regenerates_a_stolen_clash_api_port():
     eng.reconcile()
     after = singbox.clash_api()
     assert after["secret"] != before["secret"]  # endpoint was regenerated
-    assert runner.applied[1]["experimental"]["clash_api"]["secret"] == after["secret"]
+    assert runner.applied[-1]["experimental"]["clash_api"]["secret"] == after["secret"]
+
+
+def test_reconcile_waits_out_a_transiently_held_port(monkeypatch):
+    """An address-in-use start failure right after a crash is usually alle's
+    own previous sing-box not having released its sockets yet: the SAME config
+    is retried and the port must NOT move — consumers wire themselves to the
+    published ports, and reallocating per crash was seen assigning one channel
+    two different ports across a single outage."""
+    monkeypatch.setattr("alle.engine._BIND_RETRY_DELAYS", (0.0, 0.0))
+    store = Store.load()
+    store.add_provider("nordvpn")
+    ch = store.add_channel("nordvpn", "US", "", dict(WG))
+
+    class _TransientBindRunner:
+        applied: list = []
+
+        def apply(self, config):
+            self.applied.append(config)
+            if len(self.applied) == 1:
+                return singbox.ApplyResult(
+                    singbox.ApplyOutcome.RUNTIME_FAILED,
+                    "FATAL[0000] start service: start inbound/mixed[in-x]: listen "
+                    f"tcp 127.0.0.1:{ch.port}: bind: address already in use",
+                )
+            return singbox.ApplyResult(singbox.ApplyOutcome.APPLIED)
+
+        def is_running(self):
+            return True
+
+    eng = Engine(Store.load())
+    runner = _TransientBindRunner()
+    eng.runner = cast(singbox.Runner, runner)
+    assert eng.reconcile() == {}
+    assert len(runner.applied) == 2  # same config, retried in place
+    kept = Store.load().get_channel("nordvpn", ch.id)
+    assert kept is not None and kept.port == ch.port  # port did not move
+    assert runner.applied[1]["inbounds"][0]["listen_port"] == ch.port
 
 
 def test_reconcile_propagates_non_port_failures():

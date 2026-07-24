@@ -41,6 +41,13 @@ PROBE_POOL_SIZE = 8
 # recorded as failed so the pass can never stall the daemon's probe cadence.
 PROBE_PASS_DEADLINE = 60.0
 
+# Waits between same-config retries of an address-in-use start failure. Right
+# after a crash (or a restart that replaced a wedged process) the usual holder
+# of the port is alle's own previous sing-box whose sockets the kernel has not
+# released yet — a transient, not a theft. Two short waits cover the release;
+# only a port still held after them is treated as stolen.
+_BIND_RETRY_DELAYS = (0.5, 1.5)
+
 # What a sing-box startup failure over a stolen port looks like in its log:
 # "start inbound/mixed[in-…]: listen tcp 127.0.0.1:<port>: bind: address already in use"
 # The host part follows the configured listen address (see _listen_addr), so
@@ -555,9 +562,13 @@ class Engine:
 
         Ports are allocated when a channel is added, so another process can
         grab one before a later sing-box (re)start — and sing-box treats a
-        single unbindable inbound as fatal for the whole config. When a start
-        fails that way, the stolen ports are reallocated and the apply retried
-        once.
+        single unbindable inbound as fatal for the whole config. An
+        address-in-use start failure is first retried on the SAME config after
+        short waits (right after a crash the holder is usually our own
+        previous sing-box whose sockets aren't released yet — reallocating
+        then would churn every consumer's port mapping per crash); only ports
+        still held after the retries are treated as stolen, reallocated, and
+        the apply retried once.
 
         Raises :class:`singbox.ConfigRejectedError` when sing-box refuses the
         generated config (deterministic — a timer retry cannot help, only a
@@ -569,6 +580,18 @@ class Engine:
         for ref, err in sorted(errors.items()):
             applog.log(f"reconcile: {ref}: {err}")
         result = self.runner.apply(config)
+        for delay in _BIND_RETRY_DELAYS:
+            if not (
+                result.outcome is singbox.ApplyOutcome.RUNTIME_FAILED
+                and _ports_in_use(result.detail)
+            ):
+                break
+            applog.log(
+                "reconcile: start hit an in-use port — retrying the same "
+                f"config in {delay:g}s before treating it as stolen"
+            )
+            time.sleep(delay)
+            result = self.runner.apply(config)
         if result.outcome is singbox.ApplyOutcome.RUNTIME_FAILED and (
             self._recover_stolen_ports(result.detail)
         ):

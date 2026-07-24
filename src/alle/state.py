@@ -98,6 +98,21 @@ def _claim_port(
     return port
 
 
+def _os_port_free(port: int) -> bool:
+    """Whether the OS would let a listener bind ``port`` right now.
+
+    Wildcard bind, no SO_REUSEADDR — the strictest check, so it also catches a
+    holder bound to a single address. Best-effort: the socket is closed before
+    sing-box binds, so a racing process can still steal the port — this only
+    narrows the window, the reconcile retry/recovery handles a loss."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("", port))
+        except OSError:
+            return False
+    return True
+
+
 def _next_free_port(data: dict) -> int:
     """Allocate an unclaimed local proxy port against the locked state.
 
@@ -107,6 +122,13 @@ def _next_free_port(data: dict) -> int:
     (``ALLE_PORT_BASE=<n>``): allocate sequentially from ``n`` upward instead —
     deterministic ports for environments that must publish them ahead of time
     (the container image); unset means exactly the OS-assigned behavior.
+
+    Base mode additionally skips ports the OS reports busy: under channel
+    churn, a just-removed channel's port stays bound by the live sing-box
+    until the next reconcile lands, and first-free-above-base would hand
+    exactly that port to a new channel — making the very reconcile that should
+    apply it die on ``bind: address already in use`` (sing-box treats one
+    unbindable inbound as fatal). The store check alone can't see live binds.
     """
     used = set(_used_ports(data))
     base = os.environ.get("ALLE_PORT_BASE")
@@ -118,7 +140,7 @@ def _next_free_port(data: dict) -> int:
         if not 0 < start <= 65535:
             raise RuntimeError(f"ALLE_PORT_BASE must be 1-65535, got {start}")
         for port in range(start, 65536):
-            if port not in used:
+            if port not in used and _os_port_free(port):
                 return port
         raise RuntimeError(f"no free port at or above ALLE_PORT_BASE={start}")
     for _ in range(100):
