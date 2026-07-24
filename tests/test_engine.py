@@ -79,6 +79,9 @@ def test_inbound_and_endpoint_shape():
     }
     ep = config["endpoints"][0]
     assert ep["type"] == "wireguard" and ep["system"] is False
+    # explicit conservative MTU — sing-box's 1408 default crashes wireguard-go
+    # ("sendmmsg: message too long") on sub-1500 paths (Docker on a GCP VM)
+    assert ep["mtu"] == 1280
     assert ep["private_key"] == "PRIV=" and ep["address"] == ["10.5.0.2/32"]
     peer = ep["peers"][0]
     assert peer["address"] == "1.2.3.4" and peer["port"] == 51820
@@ -86,6 +89,24 @@ def test_inbound_and_endpoint_shape():
     # never be routed into a tunnel whose provider doesn't support it
     assert peer["allowed_ips"] == ["0.0.0.0/0"]
     assert "pre_shared_key" not in peer  # absent when the conf had none
+
+
+def test_wireguard_mtu_override(monkeypatch):
+    monkeypatch.setenv("ALLE_WG_MTU", "1380")
+    config, _ = Engine(
+        _store(("nordvpn", "us_1", 9000, "US", "", dict(WG)))
+    )._build_config()
+    assert config["endpoints"][0]["mtu"] == 1380
+
+
+def test_wireguard_mtu_invalid_override_falls_back(monkeypatch):
+    for bad in ("nope", "100", "70000"):
+        monkeypatch.setenv("ALLE_WG_MTU", bad)
+        config, _ = Engine(
+            _store(("nordvpn", "us_1", 9000, "US", "", dict(WG)))
+        )._build_config()
+        assert config["endpoints"][0]["mtu"] == 1280
+    assert "ALLE_WG_MTU" in applog.tail()
 
 
 def test_preshared_key_passed_through_when_present():

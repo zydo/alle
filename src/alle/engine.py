@@ -29,6 +29,7 @@ from alle.constants import (
     TUN_DNS_UPSTREAM,
     TUN_INBOUND_TAG,
     TUN_MTU,
+    WG_MTU,
 )
 from alle.providers import ProviderError, supports_ipv6
 from alle.state import Channel, Store, channel_fingerprint
@@ -72,6 +73,26 @@ def _listen_addr() -> str:
         applog.log(f"ALLE_LISTEN={value!r} is not an IP address — using 127.0.0.1")
         return "127.0.0.1"
     return value
+
+
+def _wg_mtu() -> int:
+    """Tunnel MTU emitted on every WireGuard endpoint. Default: the
+    can't-crash conservative ``constants.WG_MTU`` (see the rationale there).
+    ``ALLE_WG_MTU`` overrides it for operators who know their path; an
+    invalid value is logged and ignored rather than killing the daemon.
+    1280 is the floor (IPv6's minimum — WireGuard carries v6 inside)."""
+    value = (os.environ.get("ALLE_WG_MTU") or "").strip()
+    if not value:
+        return WG_MTU
+    try:
+        mtu = int(value)
+    except ValueError:
+        applog.log(f"ALLE_WG_MTU={value!r} is not a number — using {WG_MTU}")
+        return WG_MTU
+    if not 1280 <= mtu <= 9000:
+        applog.log(f"ALLE_WG_MTU={mtu} is outside 1280-9000 — using {WG_MTU}")
+        return WG_MTU
+    return mtu
 
 
 def _probe_detail(ref: str, result: dict) -> str:
@@ -190,6 +211,7 @@ class Engine:
             "tag": ch.outbound_tag,
             "system": False,
             "address": address,
+            "mtu": _wg_mtu(),
             "private_key": wg["private_key"],
             "peers": [wg_peer],
         }

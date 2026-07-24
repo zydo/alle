@@ -82,6 +82,11 @@ UI), or set `ALLE_BUNDLE=none` to declare the no-bundle profile explicitly.
   control, declare `port:` per channel (and `router: {port: …}`) in the
   bundle — declared ports are honored as written and collide loudly instead
   of silently moving.
+- **Tunnel MTU:** generated WireGuard endpoints carry an explicit `mtu: 1280`
+  — safe under any encapsulation. This matters in containers: cloud VMs often
+  have sub-1500 host MTUs (GCP: 1460), where sing-box's larger default makes
+  wireguard-go crash with `sendmmsg: message too long`. Operators who know
+  their end-to-end path can raise it with `ALLE_WG_MTU`.
 - **HEALTHCHECK** runs `alle health` with a strict exit code. Proxy mode checks
   daemon + sing-box liveness. The gateway profile additionally gates on its
   declared fail-closed policy, accepted runtime generation, TUN interface,

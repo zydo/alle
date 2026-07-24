@@ -53,6 +53,16 @@ TUN_ADDRESS_V6 = "fdfe:dcba:9876::1/126"
 # sing-box default and risking fragmentation through WireGuard endpoints.
 TUN_MTU = 1400
 
+# Tunnel MTU for every generated WireGuard endpoint. sing-box's default (1408)
+# assumes a clean 1500-byte path; behind any extra encapsulation (Docker bridge
+# on a GCP VM: host MTU 1460) the encrypted outer packet exceeds the path MTU
+# and wireguard-go dies with "sendmmsg: message too long" — a hard sing-box
+# crash that takes every channel down. 1280 (the IPv6 minimum) plus WireGuard
+# overhead fits any real path, so it can never trigger that crash; the small
+# per-packet cost is the price of never crashing. ``ALLE_WG_MTU`` overrides it
+# for operators who know their path (see engine._wg_mtu).
+WG_MTU = 1280
+
 # Where hijacked DNS goes in TUN mode. Decision: plain UDP
 # to a well-known public resolver, dialed directly (sing-box's default for a
 # DNS server with no detour) — never a LAN resolver (privacy stance: DNS is
