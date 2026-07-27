@@ -50,10 +50,13 @@ line-length = 88
 target-version = "py310"
 
 [tool.ruff.lint]
+# Keep the established baseline stable across Ruff releases. Ruff 0.16
+# expanded its defaults beyond E4/E7/E9/F, so relying on implicit defaults
+# would turn a tool update into an unrelated repository-wide policy change.
 # flake8-bandit (S) is the in-repo Python security scan (dependency scanning
 # lives in supply-chain.yml: OSV/Trivy/gitleaks). Existing accepted patterns
 # carry per-line noqa with a reason; new code meets the rules or explains.
-extend-select = ["S"]
+select = ["E4", "E7", "E9", "F", "S"]
 # S603 flags every list-form subprocess call unconditionally — that IS the
 # safe (no-shell) form, and alle builds argv from constants/resolved paths.
 ignore = ["S603"]
