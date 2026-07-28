@@ -290,14 +290,135 @@ def covers(a: dict, b: dict) -> bool:
     return False
 
 
+def _parse_network(value: str):
+    """``(version, prefixlen, network address as int)``, or ``None``.
+
+    ``None`` for anything :func:`covers` could not reason about either — the
+    lint degrades to "not shadowed" rather than raising, because a rule table
+    that cannot be linted must still render.
+    """
+    try:
+        net = ipaddress.ip_network(value)
+    except ValueError:
+        return None
+    return (net.version, net.prefixlen, int(net.network_address))
+
+
+class _Labels:
+    """One node of the reverse-label domain trie."""
+
+    __slots__ = ("children", "index")
+
+    def __init__(self) -> None:
+        self.children: dict[str, _Labels] = {}
+        self.index: int | None = None  # a rule ends here, at this position
+
+
+def _earliest(current: int | None, candidate: int | None) -> int | None:
+    if candidate is None:
+        return current
+    return candidate if current is None or candidate < current else current
+
+
+class _CoverIndex:
+    """Which of the rules added so far first covers a given matcher.
+
+    :func:`shadowed_by` walks the table once, asking this about each rule and
+    then adding it — so "added so far" is exactly "earlier in the table", and
+    the answer is the first-match identity the lint reports.
+
+    Each matcher family gets the narrowest index that answers its own
+    containment question, because the pairwise scan this replaces re-derived
+    every answer from scratch: 2,000 rules meant two million :func:`covers`
+    calls, and every CIDR/CIDR pair among them re-parsed both networks.
+    Semantics are unchanged — this is the same relation, looked up instead of
+    searched.
+    """
+
+    def __init__(self) -> None:
+        self._all: int | None = None
+        self._geo: dict[tuple[str, str], int] = {}
+        self._domains = _Labels()
+        self._networks: dict[tuple[int, int, int], int] = {}
+        # Only the prefix lengths actually present are probed on lookup: a real
+        # table uses a handful, and the loop stays bounded by 33/129 regardless.
+        self._prefixlens: dict[int, set[int]] = {4: set(), 6: set()}
+
+    def add(self, position: int, rule: dict) -> None:
+        """Remember that ``rule`` sits at ``position`` and covers what it covers.
+
+        Only ever records the *earliest* position for a given key, so a
+        duplicate can never displace the rule that first claimed the ground.
+        A matcher type this cannot reason about is deliberately not indexed:
+        :func:`covers` says such a rule covers nothing, so it must stay
+        invisible here too.
+        """
+        mtype = rule["type"]
+        if mtype == "all":
+            if self._all is None:
+                self._all = position
+        elif mtype in GEO_TYPES:
+            self._geo.setdefault((mtype, rule["value"]), position)
+        elif mtype == "domain_suffix":
+            node = self._domains
+            for label in reversed(str(rule["value"]).split(".")):
+                node = node.children.setdefault(label, _Labels())
+            if node.index is None:
+                node.index = position
+        elif mtype == "ip_cidr":
+            parsed = _parse_network(rule["value"])
+            if parsed is not None:
+                version, prefixlen, address = parsed
+                self._networks.setdefault((version, prefixlen, address), position)
+                self._prefixlens[version].add(prefixlen)
+
+    def first_cover(self, rule: dict) -> int | None:
+        """Position of the earliest added rule that makes ``rule`` unreachable."""
+        best = self._all  # `all` covers everything, another `all` included
+        if best == 0:
+            return 0  # nothing can be earlier, so no index needs consulting
+        mtype = rule["type"]
+        if mtype in GEO_TYPES:
+            # Category contents are opaque: only the identical category covers.
+            best = _earliest(best, self._geo.get((mtype, rule["value"])))
+        elif mtype == "domain_suffix":
+            node = self._domains
+            for label in reversed(str(rule["value"]).split(".")):
+                child = node.children.get(label)
+                if child is None:
+                    break
+                # Every rule terminating on this path is a suffix of the domain
+                # on a dot boundary — the containment `covers` computes, walked
+                # instead of tested. The last label reached is the domain
+                # itself, so an exact duplicate is found here too.
+                best = _earliest(best, child.index)
+                node = child
+        elif mtype == "ip_cidr":
+            parsed = _parse_network(rule["value"])
+            if parsed is not None:
+                version, prefixlen, address = parsed
+                bits = 32 if version == 4 else 128
+                for length in self._prefixlens[version]:
+                    if length > prefixlen:
+                        continue  # a longer prefix is a smaller net: can't contain
+                    supernet = address & (((1 << length) - 1) << (bits - length))
+                    best = _earliest(
+                        best, self._networks.get((version, length, supernet))
+                    )
+        # Anything else — a future matcher type, the legacy `domain` spelling —
+        # is undecidable and therefore covered only by `all`, as before.
+        return best
+
+
 def shadowed_by(rules: list[dict]) -> dict[str, str]:
     """Map each unreachable rule's id to the earliest earlier rule covering it."""
     out: dict[str, str] = {}
-    for i, rule in enumerate(rules):
-        for earlier in rules[:i]:
-            if covers(earlier, rule):
-                out[rule["id"]] = earlier["id"]
-                break
+    index = _CoverIndex()
+    for position, rule in enumerate(rules):
+        covering = index.first_cover(rule)
+        if covering is not None:
+            out[rule["id"]] = rules[covering]["id"]
+        index.add(position, rule)
     return out
 
 
