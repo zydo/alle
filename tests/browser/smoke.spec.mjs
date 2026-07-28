@@ -1,7 +1,7 @@
 // The focused real-browser smoke layer: real stdlib server, synthetic state.
 // Each test drives a real contract end to end (login exchange, status poll,
 // stream framing, bundle round-trip) — no route mocking, no component stubs.
-import { test, expect } from "./support/fixtures.mjs";
+import { test, expect, STATUS_TICK_MS } from "./support/fixtures.mjs";
 
 const US = '.row.dashchan.body[data-id="wg_us_new_york_1"]';
 const DE = '.row.dashchan.body[data-id="wg_de_1"]';
@@ -404,4 +404,98 @@ test("speed test streams rows incrementally, then completes", async ({ app }) =>
   // busy state fully cleared: the header buttons are usable again
   await expect(page.locator("#speed-all")).toBeEnabled();
   await expect(page.locator("#probe-all")).toBeEnabled();
+});
+
+test("stable polling leaves the channel grid alone", async ({ app }) => {
+  const { page } = app;
+  await expect(page.locator(US)).toBeVisible();
+
+  // Count childList mutations on the grid from here on. This is the direct
+  // evidence: a poll that changed nothing must not touch the DOM at all.
+  await page.evaluate(() => {
+    window.__gridMutations = 0;
+    window.__gridObserver = new MutationObserver((records) => {
+      window.__gridMutations += records.length;
+    });
+    window.__gridObserver.observe(document.querySelector(".grid"), { childList: true });
+  });
+
+  // Focus a control inside a row. replaceChildren() detaches and re-appends
+  // every row even when each is the same node, and a detached element loses
+  // focus — so this is what the user actually felt every three seconds.
+  const port = page.locator(`${US} .port`);
+  await port.focus();
+  await expect(port).toBeFocused();
+
+  // Two full poll cycles with nothing changing.
+  await page.waitForTimeout(STATUS_TICK_MS * 2 + 1000);
+
+  expect(await page.evaluate(() => window.__gridMutations)).toBe(0);
+  await expect(port).toBeFocused();
+
+  // A real change still reconciles — and replaces only the row that changed.
+  await page.evaluate(() => {
+    window.__gridMutations = 0;
+    window.__rows = [...document.querySelectorAll(".dashchan.body")];
+  });
+  await page.locator(`${DE} [data-probe]`).click();
+  await expect(page.locator(`${DE} .ip`).first()).toHaveText("203.0.113.10");
+
+  const replaced = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll(".dashchan.body")];
+    return {
+      mutations: window.__gridMutations,
+      // Which row nodes are no longer the ones we saw before the probe.
+      swapped: rows.filter((row, i) => row !== window.__rows[i]).map((r) => r.dataset.id),
+      kept: rows.filter((row, i) => row === window.__rows[i]).map((r) => r.dataset.id),
+    };
+  });
+  expect(replaced.mutations).toBeGreaterThan(0);
+  expect(replaced.swapped).toEqual(["wg_de_1"]);
+  expect(replaced.kept).toEqual(["wg_us_new_york_1"]);
+});
+
+test("grid reconciles adds, removes, and reorders after a quiet spell", async ({
+  app,
+  evidence,
+}) => {
+  const { page } = app;
+  evidence.allow(/console: Failed to load resource: .*400/);
+  const ids = () => page.locator(".dashchan.body").evaluateAll((rows) => rows.map((r) => r.dataset.id));
+
+  await expect(page.locator(".dashchan.body")).toHaveCount(2);
+  expect(await ids()).toEqual(["wg_de_1", "wg_us_new_york_1"]);
+
+  // Let the no-op path settle first, so the reconcile below starts from a grid
+  // the renderer has been deliberately leaving untouched.
+  await page.waitForTimeout(STATUS_TICK_MS + 500);
+
+  // Disable one: its row changes in place, the other keeps its node.
+  await page.evaluate(() => {
+    window.__rows = [...document.querySelectorAll(".dashchan.body")];
+  });
+  await page.locator(`${DE} [data-toggle]`).click();
+  await expect(page.locator(DE)).toHaveClass(/chan-off/, { timeout: 10_000 });
+  expect(
+    await page.evaluate(() => {
+      const rows = [...document.querySelectorAll(".dashchan.body")];
+      return rows.filter((row, i) => row === window.__rows[i]).map((r) => r.dataset.id);
+    }),
+  ).toEqual(["wg_us_new_york_1"]);
+
+  // Remove one: the grid shrinks and the survivor stays.
+  await page.locator(`${DE} [data-remove]`).click();
+  await page.locator(".confirm-modal [data-confirm]").click();
+  await expect(page.locator(".dashchan.body")).toHaveCount(1, { timeout: 10_000 });
+  expect(await ids()).toEqual(["wg_us_new_york_1"]);
+
+  // And the quiet path resumes: no further mutations once it settles.
+  await page.evaluate(() => {
+    window.__gridMutations = 0;
+    new MutationObserver((records) => {
+      window.__gridMutations += records.length;
+    }).observe(document.querySelector(".grid"), { childList: true });
+  });
+  await page.waitForTimeout(STATUS_TICK_MS + 1000);
+  expect(await page.evaluate(() => window.__gridMutations)).toBe(0);
 });

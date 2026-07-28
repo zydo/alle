@@ -367,7 +367,15 @@ function renderChannels() {
   }
   const currentAdd = grid.querySelector("[data-add-channel]");
   wanted.push(currentAdd || htmlNode(addRow));
-  grid.replaceChildren(...wanted);
+  // A poll that changed nothing must not touch the DOM. Every row above is
+  // either a reused node (its render signature matched) or a fresh one, so
+  // node identity is the whole comparison — and replaceChildren detaches and
+  // re-appends even the reused ones, which blurs whatever the user had focused
+  // and re-lays out the grid three seconds at a time.
+  const same =
+    grid.children.length === wanted.length &&
+    wanted.every((node, i) => grid.children[i] === node);
+  if (!same) grid.replaceChildren(...wanted);
   syncHeaderBusy();
 }
 
