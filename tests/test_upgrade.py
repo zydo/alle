@@ -304,6 +304,56 @@ def test_run_rereads_version_under_lock_before_an_exact_rc_gate(monkeypatch):
     assert result["before"] == result["after"] == "0.1.9"
 
 
+def test_upgrade_drops_the_status_version_cache(monkeypatch):
+    """Status must report the new version on the next poll, not wait out the
+    cache window it warmed a moment before the upgrade ran."""
+    from alle import daemon
+
+    installed = ["0.1.8"]
+    monkeypatch.setattr(upgrade, "detect_channel", lambda: "uv-tool")
+    monkeypatch.setattr(upgrade.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(daemon, "installed_version", lambda: installed[0])
+    monkeypatch.setattr(
+        upgrade, "_latest_for_channel", lambda channel, timeout, **kw: "0.1.9"
+    )
+
+    def fake_run(cmd, **kw):
+        installed[0] = "0.1.9"  # the manager replaced the package
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(upgrade.subprocess, "run", fake_run)
+
+    daemon.forget_installed_version()
+    assert daemon.cached_installed_version() == "0.1.8"  # a warm pre-upgrade read
+    assert upgrade.run()["after"] == "0.1.9"
+    assert daemon.cached_installed_version() == "0.1.9"
+
+
+def test_a_failed_upgrade_also_drops_the_status_version_cache(monkeypatch):
+    """A manager can replace the package and still exit non-zero."""
+    from alle import daemon
+
+    installed = ["0.1.8"]
+    monkeypatch.setattr(upgrade, "detect_channel", lambda: "uv-tool")
+    monkeypatch.setattr(upgrade.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(daemon, "installed_version", lambda: installed[0])
+    monkeypatch.setattr(
+        upgrade, "_latest_for_channel", lambda channel, timeout, **kw: "0.1.9"
+    )
+
+    def fake_run(cmd, **kw):
+        installed[0] = "0.1.9"
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
+
+    monkeypatch.setattr(upgrade.subprocess, "run", fake_run)
+
+    daemon.forget_installed_version()
+    assert daemon.cached_installed_version() == "0.1.8"
+    with pytest.raises(upgrade.UpgradeError):
+        upgrade.run()
+    assert daemon.cached_installed_version() == "0.1.9"
+
+
 # ---- delegation -------------------------------------------------------------
 
 

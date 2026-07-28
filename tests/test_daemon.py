@@ -9,6 +9,7 @@ import json
 import signal
 import subprocess
 import threading
+import time
 
 import pytest
 
@@ -393,6 +394,88 @@ def test_daemon_info_records_homebrew_service_identity(monkeypatch):
 
     assert info["service_owner"] == "homebrew"
     assert info["service_prefix"] == "/opt/homebrew/opt/alle"
+
+
+class _FrozenClock:
+    """``daemon.time`` with a monotonic() the test moves by hand."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.t = start
+
+    def monotonic(self) -> float:
+        return self.t
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def _counted_shim(monkeypatch):
+    """A Homebrew-shaped install whose shim reports a new version every run."""
+    monkeypatch.setenv("ALLE_SERVICE_OWNER", "homebrew")
+    monkeypatch.setenv("ALLE_SERVICE_PREFIX", "/opt/homebrew/opt/alle")
+    runs: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        runs.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=f"0.1.{len(runs)}\n", stderr=""
+        )
+
+    monkeypatch.setattr(daemon.subprocess, "run", fake_run)
+    daemon.forget_installed_version()
+    return runs
+
+
+def test_status_version_reads_share_one_discovery_per_cache_window(monkeypatch):
+    runs = _counted_shim(monkeypatch)
+    clock = _FrozenClock()
+    monkeypatch.setattr(daemon, "time", clock)
+
+    # A Web-UI tab polling status must not start an interpreter every 3s.
+    assert [daemon.cached_installed_version() for _ in range(6)] == ["0.1.1"] * 6
+    assert len(runs) == 1
+
+    clock.t += daemon.VERSION_CACHE_TTL - 0.01  # still inside the window
+    assert daemon.cached_installed_version() == "0.1.1"
+    assert len(runs) == 1
+
+    clock.t += 0.02  # the window has passed: rediscover
+    assert daemon.cached_installed_version() == "0.1.2"
+    assert len(runs) == 2
+
+
+def test_version_watcher_never_reads_through_the_status_cache(monkeypatch):
+    """Status traffic must not be able to postpone the upgrade handoff."""
+    runs = _counted_shim(monkeypatch)
+    monkeypatch.setattr(daemon, "time", _FrozenClock())
+
+    assert daemon.cached_installed_version() == "0.1.1"
+    # The package changes underneath a warm cache. The supervised watcher calls
+    # installed_version() directly and sees it immediately.
+    assert daemon.installed_version() == "0.1.2"
+    assert len(runs) == 2
+
+
+def test_forgetting_the_cache_rediscovers_on_the_next_status_read(monkeypatch):
+    runs = _counted_shim(monkeypatch)
+    monkeypatch.setattr(daemon, "time", _FrozenClock())
+
+    assert daemon.cached_installed_version() == "0.1.1"
+    daemon.forget_installed_version()  # what an upgrade run does
+    assert daemon.cached_installed_version() == "0.1.2"
+    assert len(runs) == 2
+
+
+def test_native_installs_are_unaffected_by_the_status_cache(monkeypatch):
+    """No shim, no subprocess — just the same importlib.metadata answer."""
+    monkeypatch.delenv("ALLE_SERVICE_OWNER", raising=False)
+
+    def fail(cmd, **_kwargs):
+        raise AssertionError(f"native version discovery spawned {cmd}")
+
+    monkeypatch.setattr(daemon.subprocess, "run", fail)
+    daemon.forget_installed_version()
+    assert daemon.cached_installed_version() == daemon.installed_version()
 
 
 def test_homebrew_installed_version_uses_the_stable_opt_shim(monkeypatch):

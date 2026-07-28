@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -67,6 +68,82 @@ def test_start_time_of_rejects_an_unreaped_zombie():
         assert proc.verify({"pid": child.pid, "start": "any"}, ()) is False
     finally:
         child.wait()
+
+
+def test_start_marker_keeps_its_pre_snapshot_spelling():
+    """A pidfile written before the single-`ps` snapshot must keep verifying.
+
+    The marker is persisted, so its spelling is a compatibility surface: an
+    upgrade that changed it would invalidate every live process's identity and
+    orphan a running sing-box. Compared against the exact strings the two-call
+    implementation produced — on macOS that is a real `ps` run.
+    """
+    pid = os.getpid()
+    stat = Path(f"/proc/{pid}/stat")
+    if stat.exists():  # Linux: field 22 of the same line, as before
+        legacy = f"ticks:{stat.read_text().rsplit(')', 1)[1].split()[19]}"
+    else:  # macOS/BSD: what a lone `ps -o lstart=` printed
+        out = subprocess.run(
+            [proc.PS, "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        legacy = out.stdout.strip()
+    assert legacy
+    assert proc.start_time_of(pid) == legacy
+    assert proc.verify({"pid": pid, "start": legacy}, ()) is True
+
+
+class _CannedPs:
+    """`proc.subprocess` with a scripted `ps`, leaving the real module alone."""
+
+    def __init__(self, module, result):
+        self.__dict__["_module"] = module
+        self.__dict__["_result"] = result
+
+    def run(self, cmd, **_kwargs):
+        if isinstance(self._result, Exception):
+            raise self._result
+        return subprocess.CompletedProcess(cmd, 0, stdout=self._result, stderr="")
+
+    def __getattr__(self, name):
+        return getattr(self._module, name)
+
+
+def _dead_pid() -> int:
+    """A PID with no process behind it — so `/proc` legitimately misses and
+    both platforms take the `ps` branch under test."""
+    child = subprocess.Popen(["sleep", "0"])
+    child.wait()  # reaped: the PID no longer exists
+    return child.pid
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "",  # ps found no such process (and exited non-zero)
+        "   \n",  # whitespace only
+        "Ss  \n",  # a state column with no start time
+        "\n\n",
+    ],
+    ids=["empty", "blank", "state-only", "newlines"],
+)
+def test_malformed_ps_output_reads_as_not_ours(monkeypatch, output):
+    monkeypatch.setattr(proc, "subprocess", _CannedPs(subprocess, output))
+    assert proc.start_time_of(_dead_pid()) is None
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [OSError("ps is missing"), subprocess.TimeoutExpired(cmd="ps", timeout=5)],
+    ids=["cannot-run", "timed-out"],
+)
+def test_failed_ps_command_reads_as_not_ours(monkeypatch, failure):
+    monkeypatch.setattr(proc, "subprocess", _CannedPs(subprocess, failure))
+    pid = _dead_pid()
+    assert proc.start_time_of(pid) is None
+    assert proc.process_state_of(pid) is None
 
 
 def test_verify_matches_on_recorded_start_time():

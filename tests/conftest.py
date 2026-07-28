@@ -49,6 +49,10 @@ def runtime_guard(monkeypatch, runtime_session, shared_singbox):
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("ALLE_SINGBOX", str(shared_singbox))
+    # Installed-version discovery is cached per *process*, not per home, so a
+    # value discovered under one test's ALLE_SERVICE_OWNER/PREFIX would
+    # otherwise be served to the next test's status call.
+    daemon.forget_installed_version()
     handle = RuntimeHandle(runtime_session, home, daemon.ensure_running)
     monkeypatch.setattr(daemon, "ensure_running", handle.dispatch)
     try:

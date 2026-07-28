@@ -2287,7 +2287,8 @@ def _daemon_info() -> dict:
     return {
         "running": info is not None,
         "version": dv,
-        "installed_version": daemon.installed_version(),
+        # Cached: this runs on every status poll of every open Web-UI tab.
+        "installed_version": daemon.cached_installed_version(),
         "cli_version": __version__,
         "skew": bool(dv and dv != __version__),
         "service_installed": daemonctl.is_installed(),

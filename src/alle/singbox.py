@@ -393,6 +393,28 @@ class ApplyResult:
     detail: str = ""  # rejection/runtime error text (log tail, check stderr)
 
 
+@dataclass(frozen=True)
+class _Identity:
+    """One verified answer to "what sing-box is live, and which instance is it?"
+
+    Every public :class:`Runner` operation needs some subset of these three
+    facts, and each fact used to cost its own verification: ``generation()``
+    called ``_ownership()`` (which verifies the pidfile) and then reread and
+    reverified the very same record — two ``ps`` spawns each on macOS to answer
+    one question. Verifying once and carrying the marker that verification
+    already proved is both cheaper and more coherent: the pid and the
+    generation can no longer come from two different observations of a PID that
+    might have been recycled in between.
+    """
+
+    owner: str | None  # "local", "helper", or None when nothing is running
+    pid: int | None
+    generation: str | None
+
+
+_NOTHING_RUNNING = _Identity(None, None, None)
+
+
 class Runner:
     """Owns the one sing-box daemon, addressed by a pidfile so it survives a
     CLI process exit while channels keep running."""
@@ -406,10 +428,8 @@ class Runner:
         # (Runner → helper.request → helper's Runner → helper.request …).
         self.local_only = local_only
 
-    def _ownership(self) -> tuple[str | None, int | None]:
-        """Who owns the live sing-box, and its pid: ``("local", pid)`` for a
-        user-owned process, ``("helper", pid)`` for one the privileged helper
-        is running as root, or ``(None, None)``.
+    def _identity(self) -> _Identity:
+        """Verify the live sing-box once, and derive every fact from that check.
 
         Local is checked FIRST because it is the common case (explicit-proxy
         mode, tun off): the pidfile read is cheap and local, and it avoids a
@@ -418,30 +438,42 @@ class Runner:
         exactly when tun mode is on and the process is root-owned (the user
         pidfile read returns None then, because os.kill on a root pid gets
         EPERM, which proc.verify reads as "not ours").
+
+        The local fast path is a fast path only, never a bypass: reaching it
+        requires a pidfile whose recorded identity still verifies against a
+        live process *we* can signal, which is precisely the case in which the
+        helper has nothing to say. A root-owned sing-box can never satisfy it.
         """
         _reap_exited_children()
-        local = proc.read_pidfile(_pid_path(), ("sing-box",))
-        if local is not None and not _reap_child(local):
+        local = proc.read_verified_record(_pid_path(), ("sing-box",))
+        if local is not None and not _reap_child(local["pid"]):
             _pid_path().unlink(missing_ok=True)
             _started_path().unlink(missing_ok=True)
             local = None
         if local is not None:
-            return ("local", local)
+            pid = local["pid"]
+            return _Identity("local", pid, f"{pid}/{local.get('start') or ''}")
         if self.local_only:
-            return (None, None)
-        h = self._helper_owned_pid()
-        return ("helper", h) if h else (None, None)
+            return _NOTHING_RUNNING
+        return self._helper_identity()
+
+    def _ownership(self) -> tuple[str | None, int | None]:
+        """Who owns the live sing-box, and its pid: ``("local", pid)`` for a
+        user-owned process, ``("helper", pid)`` for one the privileged helper
+        is running as root, or ``(None, None)``."""
+        identity = self._identity()
+        return (identity.owner, identity.pid)
 
     def running_pid(self) -> int | None:
-        return self._ownership()[1]
+        return self._identity().pid
 
-    def _helper_owned_pid(self) -> int | None:
-        """The pid of a sing-box the privileged helper is running, or None.
+    def _helper_identity(self) -> _Identity:
+        """What the privileged helper is running for *this* home, or nothing.
 
-        None covers every non-tun situation: no helper installed, helper
+        Nothing covers every non-tun situation: no helper installed, helper
         installed but idle (tun off), the helper unreachable, or local_only
         mode (the helper itself using a Runner — it must not ask itself).
-        When it returns a pid, the live sing-box is root-owned and *only* the
+        When it names a pid, the live sing-box is root-owned and *only* the
         helper can signal it — callers must delegate start/stop/reload.
 
         Adoption additionally requires the response to *prove* the served
@@ -451,19 +483,23 @@ class Runner:
         root sing-box.
         """
         if self.local_only:
-            return None
+            return _NOTHING_RUNNING
         from alle import helper, paths
 
         st = helper.request("status")
-        if (
+        if not (
             st.get("ok")
             and st.get("running")
             and st.get("home") == str(paths.state_dir())
         ):
-            pid = st.get("pid")
-            if isinstance(pid, int):
-                return pid
-        return None
+            return _NOTHING_RUNNING
+        pid = st.get("pid")
+        if not isinstance(pid, int):
+            return _NOTHING_RUNNING
+        # One status round-trip now carries the generation too. A pre-v2 helper
+        # answers without one: the caller then has an addressable root sing-box
+        # but no instance marker, exactly as before.
+        return _Identity("helper", pid, st.get("generation") or None)
 
     def is_running(self) -> bool:
         return self.running_pid() is not None
@@ -860,21 +896,9 @@ class Runner:
         The metrics accumulator keys its counter watermarks on this: Clash
         connection counters reset with the process, so a sample from a new
         generation must re-baseline instead of being read as counter deltas.
-        """
-        owner, _pid = self._ownership()
-        if owner == "helper":
-            from alle import helper as helper_mod
 
-            st = helper_mod.request("status")
-            if st.get("ok") and st.get("running"):
-                gen = st.get("generation")
-                if gen:
-                    return gen
-        try:
-            text = _pid_path().read_text()
-        except OSError:
-            return None
-        rec = proc.parse_record(text)
-        if rec is None or not proc.verify(rec, ("sing-box",)):
-            return None
-        return f"{rec['pid']}/{rec.get('start') or ''}"
+        A non-null answer is itself proof of liveness — nothing but a
+        successful identity verification produces one — so a caller holding a
+        generation needs no separate ``is_running()`` check.
+        """
+        return self._identity().generation

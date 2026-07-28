@@ -50,6 +50,10 @@ METRICS_INTERVAL = 2.0  # how often traffic counters are sampled from the Clash 
 RECONCILE_RETRY = 60.0  # retry a *failed* reconcile this often, sans state change
 VERSION_CHECK = 30.0  # how often a supervised daemon checks for an upgraded package
 VERSION_PROBE_TIMEOUT = 5.0  # bounded Homebrew opt-shim version discovery
+# How stale a *status* read of the installed version may be. Never longer than
+# VERSION_CHECK: the supervised watcher is the authority on an upgrade, so
+# status must not be able to report a version older than the watcher's own view.
+VERSION_CACHE_TTL = VERSION_CHECK
 SUPERVISE_INTERVAL = 2.0  # how often sing-box liveness is checked (sans probes)
 BACKUP_CHECK = 300.0  # how often due-ness of a scheduled backup is evaluated
 CRASH_BACKOFF_MAX = 60.0  # cap between supervised restart attempts
@@ -75,6 +79,10 @@ _MARKERS = ("-m alle", "alle applier", "alle run")
 # future caller permits distinct upgrade request kinds concurrently.
 _upgrade_response_lock = threading.Lock()
 _upgrade_responses = 0
+
+# Status-surface cache for installed-version discovery: (read_at, version).
+_version_lock = threading.Lock()
+_version_cache: tuple[float, str] | None = None
 
 
 class _UpgradeResponseState(threading.local):
@@ -201,6 +209,45 @@ def installed_version() -> str:
         return version("alle-proxy")
     except PackageNotFoundError:
         return __version__
+
+
+def cached_installed_version() -> str:
+    """:func:`installed_version` for the status surface, at most one read per
+    :data:`VERSION_CACHE_TTL`.
+
+    A Web-UI tab polls status every three seconds; under Homebrew each of those
+    polls used to start the ``opt/bin/alle`` shim — a whole interpreter, per
+    tab, forever. The value only changes when a package manager replaces the
+    install, so status may serve one that is up to a cache window old.
+
+    Deliberately *not* used by the supervised package watcher, which calls
+    :func:`installed_version` directly: status traffic must never be able to
+    postpone the upgrade handoff by refreshing this cache on its own schedule.
+    ``forget_installed_version()`` drops it after an upgrade so the very next
+    poll reports the new version instead of waiting out the window.
+
+    Discovery happens under the lock on purpose. It is single-flight: several
+    tabs polling a cold cache produce one shim start, not one each, and no
+    other work contends for this lock (the probe is bounded by
+    :data:`VERSION_PROBE_TIMEOUT`).
+    """
+    global _version_cache
+
+    with _version_lock:
+        cached = _version_cache
+        if cached is not None and time.monotonic() - cached[0] < VERSION_CACHE_TTL:
+            return cached[1]
+        value = installed_version()
+        _version_cache = (time.monotonic(), value)
+        return value
+
+
+def forget_installed_version() -> None:
+    """Drop the status cache — the installed package may have just changed."""
+    global _version_cache
+
+    with _version_lock:
+        _version_cache = None
 
 
 def _state_stamp() -> tuple[int, int]:
@@ -495,15 +542,17 @@ def run_applier(own_children: bool = False) -> None:
     def _metrics_pass() -> None:
         try:
             runner = singbox.Runner()
-            if not runner.is_running():
-                return
+            # No preliminary is_running() pass: a non-null generation is
+            # already a verified live process, so the two reads bracketing the
+            # sample establish liveness *and* detect a reload between them —
+            # asking a third time only re-verified the same pid.
             before = runner.generation()
             if before is None:
                 return
             connections = runner.connections()
             after = runner.generation()
-            # A reload between the two identity reads makes the snapshot
-            # ambiguous: discard it without moving accumulator watermarks.
+            # A reload (or an exit) between the two identity reads makes the
+            # snapshot ambiguous: discard it without moving watermarks.
             if before != after:
                 return
             accumulator.observe(connections, generation=before)

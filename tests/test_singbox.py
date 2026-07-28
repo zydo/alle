@@ -336,12 +336,47 @@ def test_running_pid_and_stop_delegate_when_helper_owns(monkeypatch):
     assert fake._owning is False
 
 
+def test_helper_owned_generation_comes_from_one_status_round_trip(monkeypatch):
+    """Helper mode used to ask twice: once to establish ownership, once for the
+    generation. One status response carries both."""
+    r = _runner()
+    fake = _FakeHelper(owning=True)
+    _wire_helper(monkeypatch, fake)
+    assert r.generation() == f"777/s{fake._generation}"
+    assert fake.calls == ["status"]
+
+
+def test_a_helper_without_a_generation_still_reports_its_pid(monkeypatch):
+    """A response with no generation leaves the process addressable and the
+    instance marker unknown — the pre-v2 helper's behaviour, unchanged."""
+    import alle.helper as helper_mod
+
+    from alle import paths
+
+    r = _runner()
+    home = str(paths.state_dir())
+    monkeypatch.setattr(
+        helper_mod,
+        "request",
+        lambda cmd, **kw: {"ok": True, "running": True, "pid": 777, "home": home},
+    )
+    assert r.running_pid() == 777
+    assert r.generation() is None
+
+
 def test_running_pid_falls_to_pidfile_when_helper_idle(monkeypatch):
     r = _runner()
     fake = _FakeHelper(owning=False)  # helper installed but not running sing-box
     _wire_helper(monkeypatch, fake)
-    monkeypatch.setattr(singbox.proc, "read_pidfile", lambda *a, **k: 42)
+    monkeypatch.setattr(
+        singbox.proc,
+        "read_verified_record",
+        lambda *a, **k: {"pid": 42, "start": "ticks:1"},
+    )
     assert r.running_pid() == 42  # local pidfile wins when helper owns nothing
+    # A verified local process is proof the helper owns nothing, so the fast
+    # path is allowed to skip the round-trip entirely.
+    assert fake.calls == []
 
 
 def test_apply_bad_config_is_not_cold_started(monkeypatch):

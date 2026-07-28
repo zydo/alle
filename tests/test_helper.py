@@ -272,16 +272,25 @@ def test_runner_never_adopts_without_a_matching_home(monkeypatch, tmp_path):
     r = singbox.Runner()
     # pre-v2 helper shape: ok+running but no home — must NOT be adopted
     monkeypatch.setattr(
-        helper, "request", lambda cmd, **kw: {"ok": True, "running": True, "pid": 4242}
+        helper,
+        "request",
+        lambda cmd, **kw: {
+            "ok": True,
+            "running": True,
+            "pid": 4242,
+            "generation": "4242/x",
+        },
     )
-    assert r._helper_owned_pid() is None
+    # A refused response yields no pid *and* no generation: the single status
+    # round-trip that now carries both must not leak one past the home check.
+    assert r._helper_identity() == singbox._Identity(None, None, None)
     # v2 foreign helper: refused upstream — must not be adopted
     monkeypatch.setattr(
         helper,
         "request",
         lambda cmd, **kw: {"ok": False, "error": "foreign", "foreign_home": True},
     )
-    assert r._helper_owned_pid() is None
+    assert r._helper_identity() == singbox._Identity(None, None, None)
     # v2 same-home helper: adopted
     monkeypatch.setattr(
         helper,
@@ -291,9 +300,10 @@ def test_runner_never_adopts_without_a_matching_home(monkeypatch, tmp_path):
             "running": True,
             "pid": 4242,
             "home": str(tmp_path),
+            "generation": "4242/started-at",
         },
     )
-    assert r._helper_owned_pid() == 4242
+    assert r._helper_identity() == singbox._Identity("helper", 4242, "4242/started-at")
 
 
 def test_tun_privilege_gate_names_foreign_and_stale_helpers(monkeypatch):

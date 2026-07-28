@@ -656,6 +656,10 @@ def run(*, prerelease: bool = False) -> dict:
             ) from e
         except OSError as e:
             raise UpgradeError(f"could not run `{' '.join(cmd)}`: {e}") from e
+        # The manager has now run, so any cached status-surface version reading
+        # may describe the previous install. Dropped regardless of the exit
+        # code: a failed upgrade can still have replaced the package.
+        daemon.forget_installed_version()
         if r.returncode != 0:
             raise UpgradeError(_command_error(cmd, r))
         after = (
