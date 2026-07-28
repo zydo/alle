@@ -131,6 +131,28 @@ def add_deltas(deltas: dict[tuple[str, str], tuple[int, int]]) -> None:
             )
 
 
+def total(provider: str, channel: str) -> dict:
+    """One channel's stored totals, or zeros when it has none.
+
+    The read a streaming speed test wants: it needs each row's counters as that
+    row lands, and :func:`totals` loads every stored row — an all-rows scan per
+    completed channel. ``(provider, channel)`` is the primary key, so this is an
+    index lookup instead.
+
+    Zeros cover both "never banked anything" and "tombstoned" — a removed
+    channel's row is deleted, so there is nothing to find either way.
+    """
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT sent, received, updated_at FROM channel_traffic"
+            " WHERE provider = ? AND channel = ?",
+            (provider, channel),
+        ).fetchone()
+    if row is None:
+        return {"sent": 0, "received": 0, "updated_at": 0}
+    return {"sent": row[0], "received": row[1], "updated_at": row[2]}
+
+
 def totals() -> dict[tuple[str, str], dict]:
     """All stored totals, keyed by ``(provider, channel)``."""
     with _db() as conn:

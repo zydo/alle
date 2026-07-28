@@ -2338,6 +2338,13 @@ def _test_row(channel, probe: dict, traffic: dict) -> dict:
     }
 
 
+def _apply_traffic(row: dict, traffic: dict) -> None:
+    """Stamp one row's byte counters from a totals reading (zeros if absent)."""
+    row["sent"] = int(traffic.get("sent", 0))
+    row["received"] = int(traffic.get("received", 0))
+    row["traffic_updated_at"] = int(traffic.get("updated_at", 0))
+
+
 def _disabled_test_row(channel, traffic: dict) -> dict:
     """A visible-but-skipped row for a disabled channel: listed with an
     explicit state (never silently hidden), but not probed — it has no inbound
@@ -2465,6 +2472,12 @@ def test(
     )
 
     if speed:
+        # Rows whose transfer completed, so their counters can be refreshed once
+        # the batch is done. Only used when nothing is streaming: a streaming
+        # caller has already been handed each row and cannot be corrected later,
+        # so it reads that row's counters as the row lands (one indexed
+        # single-row query) instead.
+        completed: list[dict] = []
         for row in rows:
             # A streaming caller that disconnected sets cancel(); stop starting
             # new per-channel transfers rather than driving the dead socket.
@@ -2496,13 +2509,20 @@ def test(
                 # Re-read the totals after the transfers so the row reflects
                 # the traffic this very test just generated (as far as the
                 # daemon's sampler has banked it).
-                t = metrics.totals().get((row["provider"], row["name"]), {})
-                row["sent"] = int(t.get("sent", 0))
-                row["received"] = int(t.get("received", 0))
-                row["traffic_updated_at"] = int(t.get("updated_at", 0))
+                if on_row is not None:
+                    _apply_traffic(row, metrics.total(row["provider"], row["name"]))
+                else:
+                    completed.append(row)
 
             if on_row is not None:
                 on_row(row)
+        if completed:
+            # Nothing was streamed, so the refresh can wait for the whole batch
+            # and read every counter in one query — the same numbers, one scan
+            # instead of one per channel.
+            traffic = metrics.totals()
+            for row in completed:
+                _apply_traffic(row, traffic.get((row["provider"], row["name"]), {}))
     elif on_row is not None:
         for row in rows:
             on_row(row)

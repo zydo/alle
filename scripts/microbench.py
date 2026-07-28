@@ -457,6 +457,39 @@ for _count, _repeat in ((100, 200), (500, 50), (1000, 20), (2000, 10)):
 
 
 @bench(
+    "metrics.speed_batch@50ch",
+    repeat=20,
+    note="counter reads for a 50-channel speed batch over 1,000 stored rows",
+)
+def _metrics_speed_batch(home: BenchHome):
+    """The metrics half of a speed test: what reading each row's counters costs.
+
+    Sized like a busy install — 1,000 stored rows, of which 50 are being
+    tested — because the cost that mattered was reading *every* stored row once
+    per completed channel.
+    """
+    from alle import metrics
+
+    metrics.add_deltas(
+        {
+            (f"provider{i % 10}", f"wg_us_{i + 1}"): (1024 + i, 2048 + i)
+            for i in range(1000)
+        }
+    )
+    tested = [(f"provider{i % 10}", f"wg_us_{i + 1}") for i in range(50)]
+
+    def read_counters():
+        # One reading to build the rows, then one per completed row — the
+        # streaming shape, which is the one that still reads per row.
+        totals = metrics.totals()
+        rows = [totals.get(ref, {}) for ref in tested]
+        rows.extend(metrics.total(*ref) for ref in tested)
+        return rows
+
+    yield read_counters
+
+
+@bench(
     "metrics.add_deltas@1000ch",
     repeat=20,
     note="one SQLite transaction banking a 1,000-channel sample",

@@ -313,3 +313,111 @@ def test_run_streaming_test_prints_live_table(
     assert lines[-1].split()[:2] == ["wg_us_1", "nordvpn/wg_us_1"]
     # the animated progress indicator lives on stderr, never polluting the table
     assert "⠋" not in captured.out
+
+
+# ---- how many metrics queries one batch costs --------------------------------
+#
+# The counters ride along on every row, so a speed batch used to call
+# `metrics.totals()` — a read of every stored row — once per completed channel.
+# Streaming still needs a per-row reading (the row is already on the wire by the
+# time the next one finishes), but it can be a single-row lookup; a
+# non-streaming batch needs no per-row reading at all.
+
+
+@pytest.fixture
+def metrics_queries(monkeypatch):
+    """Count metrics reads by kind, keeping the real results."""
+    counts = {"totals": 0, "total": 0}
+    real_totals = service.metrics.totals
+    real_total = service.metrics.total
+
+    def totals():
+        counts["totals"] += 1
+        return real_totals()
+
+    def total(provider, channel):
+        counts["total"] += 1
+        return real_total(provider, channel)
+
+    monkeypatch.setattr(service.metrics, "totals", totals)
+    monkeypatch.setattr(service.metrics, "total", total)
+    return counts
+
+
+@pytest.fixture
+def many_channels():
+    store = service.Store.load()
+    store.add_provider("nordvpn")
+    for i in range(12):
+        store.add_channel("nordvpn", "United States", f"City {i}", dict(WG))
+
+
+def test_a_non_streaming_speed_batch_reads_every_counter_once(
+    many_channels, stub_running, stub_probe, stub_throughput, metrics_queries
+):
+    data = service.test(speed=True)
+
+    assert len(data["channels"]) == 12
+    assert all(row["speed_result"]["tested"] for row in data["channels"])
+    # One reading to build the rows, one to refresh them after the transfers —
+    # not one per channel, and no single-row queries at all.
+    assert metrics_queries == {"totals": 2, "total": 0}
+
+
+def test_a_streaming_speed_batch_uses_one_indexed_read_per_completed_row(
+    many_channels, stub_running, stub_probe, stub_throughput, metrics_queries
+):
+    streamed = []
+    service.test(speed=True, on_row=streamed.append)
+
+    assert len(streamed) == 12
+    # The all-rows read happens once, to build the rows; each completed row
+    # then costs one primary-key lookup, never another full scan.
+    assert metrics_queries == {"totals": 1, "total": 12}
+
+
+def test_skipped_rows_cost_no_metrics_query(
+    two_channels, stub_probe_one_failed, stub_throughput, metrics_queries
+):
+    """Unhealthy, disabled, and cancelled rows never completed a transfer, so
+    there is nothing newer to read for them."""
+    service.Store.load().set_channels_enabled([("nordvpn", "wg_us_1")], False)
+    streamed = []
+    service.test(speed=True, on_row=streamed.append)
+
+    states = {row["name"]: row["speed_result"]["skip_reason"] for row in streamed}
+    assert states == {"wg_us_1": "disabled", "wg_jp_1": None}
+    assert metrics_queries == {"totals": 1, "total": 1}  # only the healthy one
+
+
+def test_a_cancelled_streaming_batch_reads_nothing_extra(
+    many_channels, stub_running, stub_probe, stub_throughput, metrics_queries
+):
+    streamed = []
+    service.test(speed=True, cancel=lambda: True, on_row=streamed.append)
+
+    assert len(streamed) == 12
+    assert all(r["speed_result"]["skip_reason"] == "cancelled" for r in streamed)
+    assert metrics_queries == {"totals": 1, "total": 0}
+
+
+def test_a_completed_row_carries_counters_banked_during_its_own_transfer(
+    two_channels, stub_running, stub_probe, monkeypatch, metrics_queries
+):
+    """The promise the per-row read exists for: a row's counters include the
+    traffic its own transfer just generated, in both batch shapes."""
+
+    def fake_run(port, timeout=60, progress=None, measure_latency=True, cancel=None):
+        # Stand in for the daemon's sampler banking this transfer's bytes.
+        service.metrics.add_delta("nordvpn", "wg_jp_1", 1000, 2000)
+        return {"latency_ms": None, "download_bps": 1.0, "upload_bps": 1.0}
+
+    monkeypatch.setattr(service.throughput, "run", fake_run)
+
+    streamed = []
+    service.test(speed=True, channel="wg_jp_1", on_row=streamed.append)
+    assert (streamed[0]["sent"], streamed[0]["received"]) == (1000, 2000)
+
+    data = service.test(speed=True, channel="wg_jp_1")  # non-streaming
+    row = data["channels"][0]
+    assert (row["sent"], row["received"]) == (2000, 4000)
