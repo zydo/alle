@@ -664,7 +664,7 @@ def test_probe_all_logs_channel_details(monkeypatch):
     eng.runner = cast(singbox.Runner, runner)
     monkeypatch.setattr(
         "alle.engine.probe.probe_channel",
-        lambda port: {
+        lambda port, **kw: {
             "ok": True,
             "at": 1,
             "latency_ms": 12.3,
@@ -712,7 +712,7 @@ def test_probe_all_runs_channels_concurrently(monkeypatch):
     lock = threading.Lock()
     barrier = threading.Barrier(3, timeout=5)
 
-    def slow_probe(port):
+    def slow_probe(port, **kw):
         with lock:
             active["n"] += 1
             active["peak"] = max(active["peak"], active["n"])
@@ -727,6 +727,50 @@ def test_probe_all_runs_channels_concurrently(monkeypatch):
         assert ch.probe.get("ok") is True
 
 
+def test_probe_pass_deadline_discards_results_that_arrive_late(monkeypatch):
+    """The pass deadline is a real bound, not a hope: a fleet whose probes all
+    overrun it is recorded as failed, and a result that lands afterwards is
+    late — it never reaches state.json.
+
+    ``ceil(n / pool) × CHANNEL_DEADLINE`` is what keeps this from happening in
+    practice (each channel bounds itself, IPv6 lookup included). This covers
+    the case where something ignores that bound anyway.
+    """
+    import threading
+
+    store = Store.load()
+    store.add_provider("protonvpn")
+    for name in ("us", "uk", "jp"):
+        store.add_channel("protonvpn", name, "", _v6_wg())
+    eng = Engine(store)
+    runner = _FakeRunner()
+    runner._running = True
+    eng.runner = cast(singbox.Runner, runner)
+
+    monkeypatch.setattr("alle.engine.PROBE_PASS_DEADLINE", 0.05)
+    release = threading.Event()
+    started = threading.Event()
+
+    def overrunning_probe(port, **kw):
+        started.set()
+        assert release.wait(timeout=5), "probe worker was never released"
+        return {"ok": True, "at": 1, "latency_ms": 5.0, "ip": "1.2.3.4", "error": None}
+
+    monkeypatch.setattr("alle.engine.probe.probe_channel", overrunning_probe)
+    try:
+        out = eng.probe_all()
+        assert started.is_set()
+        assert all("probe pass deadline" in r["error"] for r in out.values())
+        assert not any(r["ok"] for r in out.values())
+    finally:
+        release.set()  # let the workers finish; their results are already moot
+    # The successes they eventually returned were never published: publication
+    # happens only in probe_all, which had already moved on.
+    for ch in Store.load().provider_channels("protonvpn"):
+        assert ch.probe.get("ok") is not True
+        assert "probe pass deadline" in ch.probe["error"]
+
+
 def test_probe_result_is_discarded_after_channel_identity_changes(monkeypatch):
     store = Store.load()
     store.add_provider("nordvpn")
@@ -736,7 +780,7 @@ def test_probe_result_is_discarded_after_channel_identity_changes(monkeypatch):
     runner._running = True
     eng.runner = cast(singbox.Runner, runner)
 
-    def probe_then_disable(_port):
+    def probe_then_disable(_port, **kw):
         Store.load().set_channels_enabled([("nordvpn", ch.id)], False)
         return {"ok": False, "at": 1, "error": "old tunnel failed"}
 

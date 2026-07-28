@@ -103,7 +103,9 @@ def _extract_ip(source: str, body: str) -> str | None:
     return _valid_public_ip(body)
 
 
-def probe_ipv6(port: int, timeout: float = 6) -> str | None:
+def probe_ipv6(
+    port: int, timeout: float = 6, budget: float = CHANNEL_DEADLINE
+) -> str | None:
     """The channel's IPv6 exit address, or ``None``.
 
     A supplementary lookup for v6-capable channels only — never on the
@@ -111,12 +113,26 @@ def probe_ipv6(port: int, timeout: float = 6) -> str | None:
     :func:`probe_channel`, and a v6-echo failure only means "no v6 exit to
     show" (the server may still be v4-happy). One source failing falls
     through to the next; anything non-v6 or non-public is rejected.
+
+    ``budget`` is what remains of the *channel's* overall deadline, and it is
+    the whole point of the parameter: this lookup runs after a probe that has
+    already spent part of that deadline, so it caps every open by the
+    remainder and returns immediately when nothing is left. Bounded only
+    per-source, a healthy channel could spend ``sources × timeout`` beyond its
+    own deadline — 12 seconds on top of 15 — and hold a probe-pool worker for
+    all of it.
     """
+    started = time.monotonic()
     opener = proxy_opener(port)
     for _name, url in IPV6_ECHO_SOURCES:
+        remaining = budget - (time.monotonic() - started)
+        if remaining <= 0:
+            break
         req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})  # noqa: S310
         try:
-            with opener.open(req, timeout=timeout) as r:  # noqa: S310 (loopback proxy)
+            with opener.open(  # noqa: S310 (loopback proxy)
+                req, timeout=min(timeout, remaining)
+            ) as r:
                 body = r.read(MAX_BODY_BYTES).decode(errors="replace")
         except Exception:  # noqa: BLE001, S112
             continue
@@ -127,7 +143,10 @@ def probe_ipv6(port: int, timeout: float = 6) -> str | None:
 
 
 def probe_channel(
-    port: int, timeout: float = 10, deadline: float = CHANNEL_DEADLINE
+    port: int,
+    timeout: float = 10,
+    deadline: float = CHANNEL_DEADLINE,
+    ipv6: bool = False,
 ) -> dict:
     """Probe one channel's proxy by querying the IP-echo sources in order.
 
@@ -135,6 +154,13 @@ def probe_channel(
 
         {"ok": bool, "at": epoch, "latency_ms": float|None,
          "ip": str|None, "error": str|None, "detail": str|None}
+
+    ``ipv6`` adds the supplementary v6-exit lookup for a v6-capable channel
+    (an extra ``ipv6`` key). It lives here, behind the same call, because
+    ``deadline`` bounds *the channel* — one budget, measured by one clock. Split
+    across two calls it was two independent budgets, and the caller's own clock
+    reading decided how much was left; a healthy v4 result could then spend
+    ``v6 sources × timeout`` beyond the deadline it was supposed to obey.
 
     The first source to return a valid public IP wins (its round trip is the
     reported latency); a source is treated as failed when the request raises,
@@ -179,7 +205,7 @@ def probe_channel(
         ip = _extract_ip(name, body)
         if ip:
             latency = (time.monotonic() - start) * 1000
-            return {
+            healthy = {
                 "ok": True,
                 "at": int(time.time()),
                 "latency_ms": round(latency, 1),
@@ -187,6 +213,15 @@ def probe_channel(
                 "error": None,
                 "detail": None,
             }
+            if ipv6:
+                # Whatever the verdict cost comes out of the same budget: the
+                # lookup is capped by the remainder and skipped when the
+                # deadline is already spent. A missing v6 exit is informational
+                # and never demotes this healthy result.
+                healthy["ipv6"] = probe_ipv6(
+                    port, budget=deadline - (time.monotonic() - started)
+                )
+            return healthy
         mode = mode or "no_ip"  # got a response, but not a valid public IP
         last_reason = "no valid IP"
     if mode is None:

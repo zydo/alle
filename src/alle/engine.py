@@ -659,13 +659,17 @@ class Engine:
     # ---- probing -----------------------------------------------------------
     @staticmethod
     def _probe_one(ch: Channel) -> dict:
-        """One channel's probe, plus the supplementary IPv6-exit lookup for
-        v6-capable channels. The v6 echo never affects the health verdict —
-        a healthy v4 probe with no v6 answer just shows no v6 exit."""
-        result = probe.probe_channel(ch.port)
-        if result.get("ok") and channel_ipv6(ch):
-            result["ipv6"] = probe.probe_ipv6(ch.port)
-        return result
+        """One channel's probe, inside one ``probe.CHANNEL_DEADLINE``.
+
+        Whether the channel carries IPv6 is policy and belongs here; how much
+        of the deadline the supplementary v6-exit lookup may spend is timing
+        and belongs to :func:`probe.probe_channel`, which owns the budget and
+        the clock that measures it. Composing the two calls from out here meant
+        two independent budgets — and this caller's own clock deciding what was
+        left — so a healthy channel could hold a pool worker for 27s of a 15s
+        deadline.
+        """
+        return probe.probe_channel(ch.port, ipv6=channel_ipv6(ch))
 
     def probe_all(self, channels: list[Channel] | None = None) -> dict[str, dict]:
         """Probe each channel through its proxy and persist the result.
@@ -676,11 +680,19 @@ class Engine:
         sing-box is running; if it isn't, every channel records a failure.
 
         Channels are probed concurrently on a capped worker pool, and the
-        whole pass carries a wall-clock deadline: each channel already bounds
-        itself (``probe.CHANNEL_DEADLINE``), so with the pool the pass costs
-        ``ceil(n / pool) × deadline`` at worst — never ``n × sources ×
-        timeout`` serially. Work that hasn't started when the pass deadline
-        hits is cancelled and recorded as a failure, not left running.
+        whole pass carries a wall-clock deadline. Each channel bounds itself at
+        ``probe.CHANNEL_DEADLINE`` — everything it does, the supplementary IPv6
+        lookup included (see :meth:`_probe_one`) — so with the pool the pass
+        costs ``ceil(n / pool) × deadline`` at worst, never ``n × sources ×
+        timeout`` serially. That arithmetic is only sound *because* no single
+        channel can outlast the channel deadline; a fleet of v6-capable
+        channels used to be able to, which is what made this a claim rather
+        than a guarantee.
+
+        ``PROBE_PASS_DEADLINE`` remains the independent backstop: work still
+        unfinished when it hits is cancelled and recorded as a failure, not
+        left running, and a result arriving after it is late and never
+        published.
         """
         from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 

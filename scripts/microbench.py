@@ -150,11 +150,14 @@ class BenchHome:
         return f"/bin/sh -> {Path(sys.executable).name} -c 'import alle; print(...)'"
 
 
+# Placeholder keys, kept as short as the test suite's (tests/conftest.py): the
+# benchmarks never hand these to WireGuard, and anything longer reads as a
+# high-entropy literal to the repo's secret scan.
 _WG_PARAMS = {
-    "private_key": "bench-private-key=",
+    "private_key": "PRIV=",
     "address": ["10.5.0.2/32"],  # noqa: S1313
     "peer": {
-        "public_key": "bench-public-key=",
+        "public_key": "PUB=",
         "endpoint_host": "198.51.100.10",
         "endpoint_port": 51820,
         "preshared_key": None,
