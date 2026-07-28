@@ -266,14 +266,16 @@ def geo_file(tmp_path, monkeypatch):
 
     def install(kind, name, rule_bytes):
         path = _srs_file(tmp_path, rule_bytes)
-        real = geodata.cached_path
+        real = geodata.verified
 
+        # Stands in at `verified`, the one place that reads and digest-checks a
+        # category — `cached_path` is a projection of it, so both are covered.
         def fake(store, k, n):
             if (k, n) == (kind, name):
-                return path
+                return geodata.Verified(k, n, path, path.read_bytes())
             return real(store, k, n)
 
-        monkeypatch.setattr(geodata, "cached_path", fake)
+        monkeypatch.setattr(geodata, "verified", fake)
         return path
 
     return install

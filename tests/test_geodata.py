@@ -246,3 +246,180 @@ def test_404_error_names_the_plaintext_upstream(store):
     with patch.object(geodata, "_http_get", fake_get):
         with pytest.raises(geodata.GeoDataError, match="browse names: https://"):
             geodata.ensure_matchers([("geosite", "nosuchcategory")])
+
+
+# ---- one read + one digest check per category, per operation -----------------
+#
+# Deduplication may only remove repeated work *inside* one compile or trace.
+# Verification across operations is the integrity boundary: a file swapped
+# between two of them must still be caught, so nothing here may be cached by
+# pathname, mtime, or size.
+
+
+class _HashSpy:
+    """`geodata.hashlib` with a counting sha256 — the real module otherwise."""
+
+    def __init__(self, module):
+        self.__dict__["_module"] = module
+        self.__dict__["digests"] = 0
+
+    def sha256(self, data=b""):
+        self.digests += 1
+        return self._module.sha256(data)
+
+    def __getattr__(self, name):
+        return getattr(self._module, name)
+
+
+@pytest.fixture
+def digests(monkeypatch):
+    spy = _HashSpy(hashlib)
+    monkeypatch.setattr(geodata, "hashlib", spy)
+    return spy
+
+
+def _cache(*matchers):
+    """Fetch and record real cache files for ``matchers``, then reload."""
+    with patch.object(geodata, "_http_get", _mock_fetch({})):
+        geodata.ensure_matchers(list(matchers))
+    return Store.load()
+
+
+def test_verified_reads_and_digests_a_category_once(store, digests):
+    """The unit the counts below rest on: one call, one read, one digest — and
+    the bytes handed back are the bytes that were hashed."""
+    store = _cache(("geosite", "netflix"))
+    digests.digests = 0
+
+    found = geodata.verified(store, "geosite", "netflix")
+
+    assert found is not None
+    assert digests.digests == 1
+    assert found.data == _SRS  # what was verified, not a re-read
+    assert found.path.read_bytes() == found.data
+
+
+def test_verified_rejects_a_tampered_file_without_returning_content(store, digests):
+    store = _cache(("geosite", "netflix"))
+    path = geodata.cached_path(store, "geosite", "netflix")
+    assert path is not None
+    path.write_bytes(b"SRS\x01" + b"x" * (len(_SRS) - 4))  # same length, new bytes
+
+    assert geodata.verified(store, "geosite", "netflix") is None
+    assert geodata.cached_path(store, "geosite", "netflix") is None
+
+
+def _geo_store(*matchers):
+    """A store whose rule table references each matcher the given number of
+    times: ``(("geosite", "netflix"), 3)`` → three rules naming that category.
+
+    The router entrypoint needs its port, or the compile has no inbound to hang
+    the rules off and never reaches a geo matcher at all.
+    """
+    store = _cache(*[m for m, _ in matchers])
+    store.ensure_router_port()
+    store = Store.load()
+    entries = []
+    for (kind, name), count in matchers:
+        entries.extend([(kind, name)] * count)
+    store.create_ruleset("Geo", "direct", entries)
+    return Store.load()
+
+
+def test_compile_digests_each_category_once_however_often_it_is_used(store, digests):
+    """Three rules naming one category is one digest check, not three."""
+    from alle.engine import Engine
+
+    store = _geo_store((("geosite", "netflix"), 3), (("geoip", "us"), 2))
+    digests.digests = 0
+
+    config, errors = Engine(store)._build_config()
+
+    assert errors == {}
+    assert digests.digests == 2  # one per distinct category, not per rule
+    tags = {rs["tag"] for rs in config["route"]["rule_set"]}
+    assert tags == {"geosite-netflix", "geoip-us"}
+
+
+def test_compile_rejects_every_rule_naming_a_broken_category(store, digests):
+    """A remembered failure still has to decorate each affected rule — the
+    deduplication must not let later duplicates through unmarked."""
+    from alle.engine import Engine
+
+    store = _geo_store((("geosite", "netflix"), 3))
+    path = geodata.cached_path(store, "geosite", "netflix")
+    assert path is not None
+    path.unlink()
+    digests.digests = 0
+
+    _config, errors = Engine(store)._build_config()
+
+    assert len(errors) == 3  # r1, r2, r3 — all of them
+    assert all("is not cached" in message for message in errors.values())
+    assert digests.digests == 0  # the missing file is read once, not three times
+
+
+def test_trace_verifies_and_parses_each_category_once(store, digests, monkeypatch):
+    """Duplicates cost nothing a second time — including duplicates of a
+    category that is missing, which used to retry the whole verification."""
+    from alle import srs, tracer
+
+    store = _geo_store((("geosite", "netflix"), 3), (("geoip", "us"), 2))
+    # A category referenced twice that was never cached: the failure has to be
+    # remembered too, or its second mention re-reads and re-digests.
+    store.create_ruleset("Missing", "direct", [("geosite", "absent")] * 2)
+    store = Store.load()
+
+    parses = []
+    real_parse = srs.parse
+    monkeypatch.setattr(
+        srs, "parse", lambda source, **kw: parses.append(1) or real_parse(source, **kw)
+    )
+    monkeypatch.setattr(
+        tracer,
+        "_resolve",
+        lambda domain: {"a": ["1.2.3.4"], "aaaa": [], "error": None},
+    )
+    digests.digests = 0
+
+    result = tracer.trace(store, "www.netflix.com")
+
+    assert digests.digests == 2  # netflix + us; the absent one never reaches a read
+    assert len(parses) == 2  # and each verified category is parsed once
+    # Both failure kinds are covered, which is the point of tracking attempts
+    # rather than successes: `absent` never verifies, and the minimal fixture
+    # .srs verifies but does not parse. Neither is retried by its duplicates.
+    assert set(result["geo_problems"]) == {
+        "geosite:absent",
+        "geosite:netflix",
+        "geoip:us",
+    }
+    assert result["geo_problems"]["geosite:absent"].startswith("not cached")
+    assert "unreadable" in result["geo_problems"]["geosite:netflix"]
+
+
+def test_a_file_swapped_between_two_operations_is_caught(store, digests):
+    """The boundary that must not move: deduplication is per operation, so the
+    second compile re-reads and re-digests rather than trusting the first.
+
+    The replacement keeps the same content-addressed path and the same length,
+    so passing this cannot be explained by a pathname- or size-keyed cache.
+    """
+    from alle.engine import Engine
+
+    store = _geo_store((("geosite", "netflix"), 2))
+
+    _config, errors = Engine(store)._build_config()
+    assert errors == {}
+
+    path = geodata.cached_path(store, "geosite", "netflix")
+    assert path is not None
+    before = path.read_bytes()
+    path.write_bytes(b"SRS\x01" + b"y" * (len(before) - 4))
+    assert len(path.read_bytes()) == len(before)
+
+    digests.digests = 0
+    _config, errors = Engine(store)._build_config()
+
+    assert digests.digests == 1  # it looked again
+    assert len(errors) == 2 and all("is not cached" in m for m in errors.values())

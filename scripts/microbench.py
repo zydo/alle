@@ -92,6 +92,44 @@ class BenchHome:
         }
         state._write_raw(data)
 
+    def write_geo_rules(self, categories: int, per_category: int) -> None:
+        """Cache ``categories`` geo rule-sets offline and reference each of them
+        ``per_category`` times in the rule table.
+
+        Duplicate references are the shape that matters: the compile verifies
+        each distinct category once, so the cost of the table should follow the
+        number of categories, not the number of rules.
+        """
+        from alle import geodata, state
+
+        data = state._read_raw()
+        rules = []
+        files: dict[str, dict] = {}
+        for c in range(categories):
+            name = f"category-{c}"
+            # Distinct content per category, so each has its own digest and
+            # content-addressed file — as a real cache does.
+            files[name] = geodata._write_cache("geosite", name, _srs_bytes(c))
+            rules.extend(
+                {
+                    "id": f"r{len(rules) + i + 1}",
+                    "type": "geosite",
+                    "value": name,
+                    "target": "direct",
+                }
+                for i in range(per_category)
+            )
+        data["router"]["rules"] = rules
+        data["geodata"] = {
+            "source": geodata.DEFAULT_SOURCE,
+            "geosite": {
+                "source": geodata.DEFAULT_SOURCE,
+                "commit": "0" * 40,
+                "files": files,
+            },
+        }
+        state._write_raw(data)
+
     # -- process identity -----------------------------------------------------
 
     def claim_pidfiles(self) -> None:
@@ -153,6 +191,17 @@ class BenchHome:
 # Placeholder keys, kept as short as the test suite's (tests/conftest.py): the
 # benchmarks never hand these to WireGuard, and anything longer reads as a
 # high-entropy literal to the repo's secret scan.
+def _srs_bytes(seed: int) -> bytes:
+    """A minimal well-formed binary rule-set: header plus a zlib body.
+
+    Content differs per seed so every category gets its own digest; the compile
+    only reads and hashes these, so an empty rule list is enough.
+    """
+    import zlib
+
+    return b"SRS\x01" + zlib.compress(b"\x00" + bytes([seed % 251]))
+
+
 _WG_PARAMS = {
     "private_key": "PRIV=",
     "address": ["10.5.0.2/32"],  # noqa: S1313
@@ -332,6 +381,28 @@ def _proc_verify(home: BenchHome):
 
     record = proc.record(os.getpid())
     yield lambda: proc.verify(record, ("sing-box",))
+
+
+# ---- geo rule-set verification ----------------------------------------------
+
+
+@bench(
+    "geo.compile@20cat_x10",
+    repeat=50,
+    note="config build over 200 geo rules naming 20 distinct cached categories",
+)
+def _geo_compile(home: BenchHome):
+    """Prices the digest checks a compile performs for duplicate geo matchers."""
+    from alle.engine import Engine
+    from alle.state import Store
+
+    home.write_state(channels=1)
+    home.write_geo_rules(categories=20, per_category=10)
+
+    def build():
+        return Engine(Store.load())._build_config()
+
+    yield build
 
 
 # ---- route shadow analysis ---------------------------------------------------

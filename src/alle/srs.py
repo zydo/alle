@@ -381,23 +381,37 @@ class RuleSet:
         return any(rule.match(domain, ips) for rule in self.rules)
 
 
-def parse(path: Path | str) -> RuleSet:
-    """Parse one ``.srs`` file (or raise :class:`SrsError`)."""
-    try:
-        raw = Path(path).read_bytes()
-    except OSError as e:
-        raise SrsError(f"cannot read {path}: {e}") from e
+def parse(source: Path | str | bytes, *, label: str | None = None) -> RuleSet:
+    """Parse one ``.srs`` rule-set — from its path, or from bytes (or raise
+    :class:`SrsError`).
+
+    Accepting bytes is what lets a caller that has just digest-checked a file
+    parse *those* bytes. Reopening the path would parse content that was never
+    verified, and cost a second read of a file already in hand.
+
+    ``label`` names the source in error messages; it defaults to the path, and
+    bytes without one are just "rule-set".
+    """
+    if isinstance(source, bytes):
+        raw = source
+        where = label or "rule-set"
+    else:
+        where = label or str(source)
+        try:
+            raw = Path(source).read_bytes()
+        except OSError as e:
+            raise SrsError(f"cannot read {where}: {e}") from e
     if not raw.startswith(MAGIC) or len(raw) < 5:
-        raise SrsError(f"{path} is not a sing-box rule-set (bad magic)")
+        raise SrsError(f"{where} is not a sing-box rule-set (bad magic)")
     try:
         body = zlib.decompress(raw[4:])
     except zlib.error as e:
-        raise SrsError(f"{path}: corrupt rule-set body: {e}") from e
+        raise SrsError(f"{where}: corrupt rule-set body: {e}") from e
     r = io.BytesIO(body)
     try:
         rules = [_read_rule(r) for _ in range(_read_uvarint(r))]
     except SrsError as e:
-        raise SrsError(f"{path}: {e}") from e
+        raise SrsError(f"{where}: {e}") from e
     return RuleSet(rules)
 
 

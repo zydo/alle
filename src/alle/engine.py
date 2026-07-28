@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import time
+from pathlib import Path
 
 from alle import applog, geodata, probe, routes, singbox
 from alle.constants import (
@@ -466,6 +467,12 @@ class Engine:
             "ip_cidr": "ip_cidr",
         }
         rule_set_tags: dict[str, dict] = {}
+        # One digest check per distinct category per compile, not per rule
+        # referencing it. Scoped to this build on purpose: the next compile
+        # re-verifies from scratch, so a file swapped in between is still
+        # caught. `None` is a remembered *failure*, so a missing or corrupt
+        # category rejects every rule that names it without re-reading it.
+        resolved: dict[tuple[str, str], Path | None] = {}
         for rule in router.get("rules") or []:
             ref = f"rule {rule.get('id')}"
             compiled: dict = {"inbound": list(entry)}
@@ -480,7 +487,11 @@ class Engine:
                 # traffic is blocked rather than falling through to direct
                 # (which would leak it, defeating the rule's intent).
                 name = str(rule.get("value"))
-                path = geodata.cached_path(self.store, mtype, name)
+                if (mtype, name) not in resolved:
+                    resolved[(mtype, name)] = geodata.cached_path(
+                        self.store, mtype, name
+                    )
+                path = resolved[(mtype, name)]
                 if path is None:
                     errors[ref] = (
                         f"{mtype} category {name!r} is not cached (or failed "

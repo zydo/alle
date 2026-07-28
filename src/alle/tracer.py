@@ -157,19 +157,33 @@ def parse_destination(value: str) -> tuple[str | None, str | None]:
 
 def _load_geo(store: Store, rules: list[dict]) -> tuple[dict, dict[str, str]]:
     """Parsed rule-sets for every geo matcher in ``rules``, plus per-category
-    problems (uncached, digest-failed, or unparseable)."""
+    problems (uncached, digest-failed, or unparseable).
+
+    Each distinct category is read, digest-checked, and parsed once per trace.
+    Tracking what was *attempted* separately from what parsed is what makes
+    that true for the failures too: keying off the parsed map alone, a
+    duplicate reference to a missing or corrupt category retried the whole
+    verification every time it appeared.
+
+    Reads are deduplicated within this one trace only — the next trace verifies
+    again, so a file swapped between them is still caught.
+    """
     geo: dict = {}
     problems: dict[str, str] = {}
+    attempted: set[tuple[str, str]] = set()
     for rule in rules:
         kind, name = rule.get("type"), str(rule.get("value"))
-        if kind not in routes.GEO_TYPES or (kind, name) in geo:
+        if kind not in routes.GEO_TYPES or (kind, name) in attempted:
             continue
-        path = geodata.cached_path(store, kind, name)
-        if path is None:
+        attempted.add((kind, name))
+        found = geodata.verified(store, kind, name)
+        if found is None:
             problems[f"{kind}:{name}"] = "not cached (or failed its digest check)"
             continue
         try:
-            geo[(kind, name)] = srs.parse(path)
+            # The bytes that were just verified — not a second read of the path,
+            # which could return content this trace never checked.
+            geo[(kind, name)] = srs.parse(found.data, label=found.path.name)
         except srs.SrsError as e:
             problems[f"{kind}:{name}"] = f"unreadable rule-set: {e}"
     return geo, problems

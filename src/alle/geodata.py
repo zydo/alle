@@ -39,6 +39,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 from alle import applog, paths, routes
@@ -124,24 +125,58 @@ def _file_name(kind: str, name: str, sha256: str) -> str:
     return f"{kind}-{name}.{sha256[:12]}.srs"
 
 
-def cached_path(store: Store, kind: str, name: str) -> Path | None:
-    """The verified cache file for a recorded category, or None.
+@dataclass(frozen=True)
+class Verified:
+    """A geo rule-set file that just matched its recorded digest — with the
+    very bytes that were hashed.
 
-    Verifies the recorded sha256 against the file on disk on every call —
-    the compile must never hand sing-box a file that doesn't match the
-    record (tampering, torn writes, manual edits all surface here).
+    Carrying the content is the point. A caller that verifies a path and then
+    reopens it to parse is parsing something it never checked: the two reads
+    are separate observations of a file another process can change in between.
+    Handing back the checked bytes closes that window *and* removes the second
+    read.
+    """
+
+    kind: str
+    name: str
+    path: Path
+    data: bytes
+
+
+def verified(store: Store, kind: str, name: str) -> Verified | None:
+    """Read and digest-check a recorded category's cache file, or ``None``.
+
+    One bounded read and one SHA-256 per call, every call — the compile must
+    never hand sing-box a file that doesn't match the record (tampering, torn
+    writes, manual edits all surface here). Callers may reuse the result within
+    one operation; they must not cache it across operations, or a file swapped
+    between them would go unnoticed.
     """
     entry = (_record(store, kind).get("files") or {}).get(name)
     if not entry:
         return None
-    path = cache_dir() / _file_name(kind, name, str(entry.get("sha256")))
+    sha256 = str(entry.get("sha256"))
+    path = cache_dir() / _file_name(kind, name, sha256)
     try:
-        data = path.read_bytes()
+        with path.open("rb") as f:
+            # Bounded like the download that produced it: a cache file grown
+            # past the cap is not something to load into memory to reject.
+            data = f.read(_MAX_BYTES + 1)
     except OSError:
         return None
-    if hashlib.sha256(data).hexdigest() != entry.get("sha256"):
+    if len(data) > _MAX_BYTES or hashlib.sha256(data).hexdigest() != sha256:
         return None
-    return path
+    return Verified(kind, name, path, data)
+
+
+def cached_path(store: Store, kind: str, name: str) -> Path | None:
+    """The verified cache file for a recorded category, or None.
+
+    Kept for callers that only need somewhere to point sing-box. Anything that
+    goes on to *read* the file wants :func:`verified` instead — see there.
+    """
+    found = verified(store, kind, name)
+    return found.path if found is not None else None
 
 
 def _http_get(url: str, *, accept: str | None = None) -> bytes:
