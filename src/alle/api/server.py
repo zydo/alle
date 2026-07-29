@@ -811,6 +811,27 @@ class _Handler(BaseHTTPRequestHandler):
             return False
         raise _BadRequest(400, "dry_run must be one of: 1, true, 0, false")
 
+    def _if_match(self) -> str | None:
+        """One optional strong revision entity-tag from ``If-Match``.
+
+        Object revisions are exposed as bare hex strings in JSON; HTTP callers
+        quote that value as an entity-tag. Lists, wildcards, weak tags, and
+        malformed tokens are rejected rather than assigned ambiguous merge
+        semantics.
+        """
+        values = self.headers.get_all("If-Match") or []
+        if not values:
+            return None
+        if len(values) != 1:
+            raise _BadRequest(400, "If-Match must contain exactly one revision")
+        match = re.fullmatch(r'"([0-9a-f]{64})"', values[0].strip())
+        if match is None:
+            raise _BadRequest(
+                400,
+                'If-Match must be one quoted 64-character revision, e.g. "abc…"',
+            )
+        return match.group(1)
+
     def _on_canonical_host(self) -> bool:
         return self.headers.get("Host", "") == self.canonical
 
@@ -1159,9 +1180,23 @@ class _Handler(BaseHTTPRequestHandler):
         """
         from alle import service
         from alle.providers import ProviderError
+        from alle.state import RevisionConflict
 
         try:
             return self._json(200, fn(*args, **kwargs))
+        except RevisionConflict as e:
+            return self._json(
+                409,
+                {
+                    "error": str(e),
+                    "conflict": {
+                        "resource": e.resource,
+                        "id": e.identity,
+                        "expected": e.expected,
+                        "current": e.current,
+                    },
+                },
+            )
         except service.ServiceBusyError as e:
             return self._json(503, {"error": str(e)})
         except (service.ServiceError, ProviderError) as e:
@@ -1472,6 +1507,7 @@ class _Handler(BaseHTTPRequestHandler):
                     [seg[2]],
                     _bool_field(body, "enabled", required=True),
                     provider=seg[1],
+                    expected_revision=self._if_match(),
                 )
             )
         if method == "POST" and seg == ["channels", "enabled"]:
@@ -1546,6 +1582,7 @@ class _Handler(BaseHTTPRequestHandler):
                 _str_field(body, "name"),
                 _str_field(body, "target"),
                 _matchers_field(body),
+                expected_revision=self._if_match(),
             )
         if method == "DELETE" and len(seg) == 3 and seg[:2] == ["routes", "rulesets"]:
             return self._call(
@@ -1564,6 +1601,7 @@ class _Handler(BaseHTTPRequestHandler):
                 service.routes_reorder,
                 _str_list_field(body, "ids", required=True),
                 _bool_field(body, "flat"),
+                expected_revision=self._if_match(),
             )
         if method == "POST" and seg == ["routes", "killswitch"]:
             # `enabled` is required and strictly boolean: a missing field or a

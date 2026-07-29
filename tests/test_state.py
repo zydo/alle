@@ -64,6 +64,47 @@ def test_channel_round_trips_through_disk():
     assert got.wg["peer"]["endpoint_host"] == "se1.example.com"
 
 
+def test_channel_revision_tracks_intent_but_ignores_daemon_bookkeeping():
+    store = Store.load()
+    store.add_provider("nordvpn")
+    channel = store.add_channel("nordvpn", "US", "", dict(WG))
+    revision = store.channel_revision("nordvpn", channel.id)
+    assert revision is not None
+
+    store.set_probe("nordvpn", channel.id, {"ok": True, "ip": "192.0.2.1"})
+    store.set_reconnect("nordvpn", channel.id, {"attempts": 2})
+    assert Store.load().channel_revision("nordvpn", channel.id) == revision
+
+    store.set_label("nordvpn", channel.id, "Primary")
+    assert Store.load().channel_revision("nordvpn", channel.id) != revision
+
+
+def test_ruleset_content_and_order_have_independent_revisions():
+    store = Store.load()
+    first = store.create_ruleset("A", "direct", [("domain_suffix", "a.example")])
+    second = store.create_ruleset("B", "block", [("domain_suffix", "b.example")])
+    first_revision = store.ruleset_revision(first["id"])
+    second_revision = store.ruleset_revision(second["id"])
+    order_revision = store.ruleset_order_revision()
+
+    store.update_ruleset(
+        first["id"],
+        "A changed",
+        "direct",
+        [("domain_suffix", "aa.example")],
+        expected_revision=first_revision,
+    )
+    assert store.ruleset_revision(first["id"]) != first_revision
+    assert store.ruleset_revision(second["id"]) == second_revision
+    assert store.ruleset_order_revision() == order_revision
+
+    store.reorder_rulesets(
+        [second["id"], first["id"]],
+        expected_revision=order_revision,
+    )
+    assert store.ruleset_order_revision() != order_revision
+
+
 def test_direct_channel_lookups_construct_only_requested_scope(monkeypatch):
     store = Store.load()
     for provider in ("nordvpn", "protonvpn"):

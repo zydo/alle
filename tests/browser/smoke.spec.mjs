@@ -99,6 +99,51 @@ test("channel disable/enable round-trips through state", async ({ app, evidence 
   await expect(page.locator(DE)).not.toHaveClass(/chan-off/, { timeout: 10_000 });
 });
 
+test("stale channel toggle reports the conflict without changing state", async ({
+  app,
+  evidence,
+}) => {
+  const { page } = app;
+  await expect(page.locator(DE)).toBeVisible();
+  // Freeze status polling at the revision the row rendered with. Another
+  // client changes the same channel's label, which must invalidate that
+  // captured revision without changing its enabled state.
+  const staleStatus = await page.evaluate(async () =>
+    (await fetch("/api/v1/status")).json(),
+  );
+  await page.route("**/api/v1/status", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(staleStatus),
+    }),
+  );
+  const competing = await page.evaluate(async () => {
+    const response = await fetch("/api/v1/channels/nordvpn/wg_de_1/label", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label: "Changed in another tab" }),
+    });
+    return response.status;
+  });
+  expect(competing).toBe(200);
+
+  evidence.allow(/console: Failed to load resource: .*409/);
+  await page.locator(`${DE} [data-toggle]`).click();
+  await expect(page.locator("#toasts")).toContainText(
+    "changed after this client read it",
+  );
+  const committed = await page.evaluate(async () => {
+    const data = await (await fetch("/api/v1/channels")).json();
+    return data.channels.find((channel) => channel.name === "wg_de_1");
+  });
+  expect(committed).toMatchObject({
+    enabled: true,
+    label: "Changed in another tab",
+  });
+  await expect(page.locator(DE)).not.toHaveClass(/chan-off/);
+});
+
 test("route reorder stages locally, applies once, survives reload", async ({ app }) => {
   const { page } = app;
   const names = page.locator(".rule-row[data-id] .rule-name");
@@ -141,6 +186,65 @@ test("route reorder stages locally, applies once, survives reload", async ({ app
     "Streaming",
     "Trackers",
   ]);
+});
+
+test("stale staged reorder refreshes instead of merging", async ({
+  app,
+  evidence,
+}) => {
+  const { page } = app;
+  const names = page.locator(".rule-row[data-id] .rule-name");
+  await expect(names).toHaveText(["Streaming", "Home lab", "Trackers"]);
+  // Keep the dashboard on its initial order revision while another client
+  // appends a ruleset. The local drag is then a stale full permutation.
+  const staleStatus = await page.evaluate(async () =>
+    (await fetch("/api/v1/status")).json(),
+  );
+  await page.route("**/api/v1/status", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(staleStatus),
+    }),
+  );
+  const streaming = page.locator('.rule-row[data-id]', { hasText: "Streaming" });
+  const homelab = page.locator('.rule-row[data-id]', { hasText: "Home lab" });
+  await streaming.scrollIntoViewIfNeeded();
+  await homelab.scrollIntoViewIfNeeded();
+  const sBox = await streaming.boundingBox();
+  const hBox = await homelab.boundingBox();
+  await page.mouse.move(sBox.x + sBox.width / 2, sBox.y + sBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(hBox.x + 200, hBox.y + 30, { steps: 12 });
+  await page.mouse.up();
+  await expect(names).toHaveText(["Home lab", "Streaming", "Trackers"]);
+
+  const competing = await page.evaluate(async () => {
+    const response = await fetch("/api/v1/routes/rulesets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Added elsewhere",
+        target: "direct",
+        matchers: [{ value: "elsewhere.example" }],
+      }),
+    });
+    return response.status;
+  });
+  expect(competing).toBe(200);
+
+  evidence.allow(/console: Failed to load resource: .*409/);
+  await page.locator("#dash-reorder-apply").click();
+  await expect(page.locator("#toasts")).toContainText(
+    "changed after this client read it",
+  );
+  await expect(names).toHaveText([
+    "Streaming",
+    "Home lab",
+    "Trackers",
+    "Added elsewhere",
+  ]);
+  await expect(page.locator(".apply-bar")).toHaveCount(0);
 });
 
 test("rule tracer: verdict renders and the winning row is highlighted", async ({
@@ -383,6 +487,55 @@ test("geo matchers round-trip through the ruleset editor", async ({ app }) => {
     "example.com\ngeoip:jp",
   );
   await page.keyboard.press("Escape");
+});
+
+test("stale ruleset editor keeps both writers' changes separate", async ({
+  app,
+  evidence,
+}) => {
+  const { page } = app;
+  // Open first: the editor captures this exact ruleset revision. A separate
+  // legacy client then updates the same ruleset without If-Match, leaving the
+  // modal intentionally stale even if the dashboard poll refreshes behind it.
+  const row = page.locator('.rule-row[data-id]', { hasText: "Home lab" });
+  await row.locator("[data-id-edit]").click();
+  await expect(page.locator(".modal #name")).toHaveValue("Home lab");
+  const competing = await page.evaluate(async () => {
+    const routes = await (await fetch("/api/v1/routes")).json();
+    const ruleset = routes.rulesets.find((candidate) => candidate.name === "Home lab");
+    const response = await fetch(
+      `/api/v1/routes/rulesets/${encodeURIComponent(ruleset.id)}/update`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "Home lab from another tab",
+          target: ruleset.target,
+          matchers: ruleset.rules.map((rule) => ({
+            type: rule.type,
+            value: rule.value,
+          })),
+        }),
+      },
+    );
+    return response.status;
+  });
+  expect(competing).toBe(200);
+
+  // The deliberate stale save logs the expected 409 resource error. It must
+  // leave the editor open, explain how to recover, and preserve the competing
+  // writer's committed value rather than silently merging or overwriting it.
+  evidence.allow(/console: Failed to load resource: .*409/);
+  await page.locator(".modal #name").fill("Home lab from this tab");
+  await page.locator('.modal button[type="submit"]').click();
+  await expect(page.locator(".modal #err")).toContainText(
+    "Close and reopen this editor.",
+  );
+  await expect(page.locator(".modal")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(row.locator(".rule-name")).toHaveText(
+    "Home lab from another tab",
+  );
 });
 
 test("speed test streams rows incrementally, then completes", async ({ app }) => {

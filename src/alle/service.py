@@ -53,6 +53,7 @@ from alle.providers import (
 from alle.state import (
     PortInUseError,
     ReferencedError,
+    RevisionConflict,
     Store,
     channel_id_from_filename,
     config_signature,
@@ -578,13 +579,13 @@ def _conf_channel_unchanged(
     return not (label and label != existing.label)
 
 
-def _channel_public(channel) -> dict:
+def _channel_public(channel, revision: str | None = None) -> dict:
     """The public projection of a channel — the fields every API surface and
     the CLI render. Never includes ``wg`` (it carries the WireGuard private
     key), so the raw :class:`~alle.state.Channel` dataclass must never be
     serialized to a client. One projection for channel-list, add, import,
     status, and test rows keeps the field set and names consistent."""
-    return {
+    public = {
         "provider": channel.provider,
         "display_name": display_name(channel.provider),
         "name": channel.id,
@@ -596,11 +597,20 @@ def _channel_public(channel) -> dict:
         "enabled": channel.enabled,
         "ipv6": channel_ipv6(channel),
     }
+    if revision is not None:
+        public["revision"] = revision
+    return public
 
 
 def channel_list() -> dict:
     store = Store.load()
-    channels = [_channel_public(channel) for channel in store.channels()]
+    channels = [
+        _channel_public(
+            channel,
+            store.channel_revision(channel.provider, channel.id),
+        )
+        for channel in store.channels()
+    ]
     return {"providers": store.provider_names(), "channels": channels}
 
 
@@ -754,6 +764,7 @@ def channel_set_enabled_many(
     provider: str | None = None,
     dry_run: bool = False,
     all_: bool = False,
+    expected_revision: str | None = None,
 ) -> dict:
     """Enable or disable a batch of channels (same ref grammar as removal).
 
@@ -771,7 +782,29 @@ def channel_set_enabled_many(
     """
     verb = "enable" if enabled else "disable"
     store = Store.load()
-    plan = _channel_batch_plan(store, channel_ids, provider, all_)
+    try:
+        plan = _channel_batch_plan(store, channel_ids, provider, all_)
+    except ServiceError:
+        # A revision proves the client previously read one exact channel. If
+        # that channel disappeared before this request, absence is a conflict
+        # (409 at the API boundary), not the legacy unknown-channel 400.
+        if (
+            expected_revision is not None
+            and provider is not None
+            and not all_
+            and len(channel_ids) == 1
+        ):
+            identity = f"{provider}/{channel_ids[0]}"
+            current = store.channel_revision(provider, channel_ids[0])
+            if current != expected_revision:
+                raise RevisionConflict(
+                    "channel", identity, expected_revision, current
+                ) from None
+        raise
+    if expected_revision is not None and len(plan) != 1:
+        raise ServiceError(
+            "a channel revision precondition requires exactly one channel."
+        )
     for item in plan:
         ch = store.get_channel(item["provider"], item["channel"])
         item["was_enabled"] = ch.enabled if ch is not None else enabled
@@ -808,22 +841,44 @@ def channel_set_enabled_many(
                 raise ServiceError(
                     f"cannot enable {item['ref']}: resolving a server failed ({e})."
                 ) from e
-            store.update_channel_wg(item["provider"], item["channel"], wg)
+            checked = (
+                expected_revision
+                if len(plan) == 1 and item["ref"] == plan[0]["ref"]
+                else None
+            )
+            store.update_channel_wg(
+                item["provider"],
+                item["channel"],
+                wg,
+                expected_revision=checked,
+            )
+            if checked is not None:
+                expected_revision = store.channel_revision(
+                    item["provider"], item["channel"]
+                )
             wg_resolved.append(item["ref"])
 
     # One state transaction for the whole batch (all-or-nothing); the
     # restrict-only check re-runs inside it, so a rule added between plan and
     # toggle blocks the batch, never half of it.
     try:
-        changed = (
-            store.set_channels_enabled(sorted(to_change), enabled) if to_change else []
+        expected_revisions = None
+        if expected_revision is not None:
+            item = plan[0]
+            expected_revisions = {
+                (item["provider"], item["channel"]): expected_revision
+            }
+        changed = store.set_channels_enabled(
+            sorted(to_change),
+            enabled,
+            expected_revisions=expected_revisions,
         )
     except ReferencedError as e:
         raise _blockers_error(e.blockers, verb=verb) from e
     for prov, cid in changed:
         applog.log(f"{verb}d channel {prov}/{cid}")
     daemon.ensure_running()
-    return {
+    result = {
         "enabled": enabled,
         "dry_run": False,
         "channels": plan,
@@ -831,6 +886,10 @@ def channel_set_enabled_many(
         "already": [i["ref"] for i in plan if not i["changed"]],
         "wg_resolved": wg_resolved,
     }
+    if len(plan) == 1:
+        item = plan[0]
+        result["revision"] = store.channel_revision(item["provider"], item["channel"])
+    return result
 
 
 def channel_set_label(ref: str, label: str, provider: str | None = None) -> dict:
@@ -997,9 +1056,11 @@ def _ensure_geo_matchers(normalized: list[tuple[str, str]]) -> None:
         raise ServiceError(str(e)) from e
 
 
-def _decorate_ruleset(block: dict, shadows: dict[str, str]) -> dict:
+def _decorate_ruleset(
+    block: dict, shadows: dict[str, str], revision: str | None = None
+) -> dict:
     rules_ = [_decorate_rule(rule, shadows) for rule in block["rules"]]
-    return {
+    decorated = {
         "id": block["id"],
         "name": block["name"],
         "target": block["target"],
@@ -1007,6 +1068,9 @@ def _decorate_ruleset(block: dict, shadows: dict[str, str]) -> dict:
         "matcher_count": len(rules_),
         "shadowed_count": sum(1 for rule in rules_ if rule.get("shadowed_by")),
     }
+    if revision is not None:
+        decorated["revision"] = revision
+    return decorated
 
 
 def _routes_payload(
@@ -1031,7 +1095,14 @@ def _routes_payload(
         rows.append(_decorate_rule(rule, shadows))
     rulesets = []
     if channel is None:
-        rulesets = [_decorate_ruleset(block, shadows) for block in store.rulesets()]
+        rulesets = [
+            _decorate_ruleset(
+                block,
+                shadows,
+                store.ruleset_revision(block["id"]),
+            )
+            for block in store.rulesets()
+        ]
     return {
         "rules": rows,
         "rulesets": rulesets,
@@ -1046,6 +1117,7 @@ def _routes_payload(
             "udp_ports": list(routes.LAN_DIRECT_UDP_PORTS),
         },
         "config_revision": config_signature(store.data),
+        "revision": store.ruleset_order_revision(),
     }
 
 
@@ -1133,7 +1205,11 @@ def routes_ruleset_retarget(ruleset_id: str, target: str) -> dict:
 
 
 def routes_ruleset_update(
-    ruleset_id: str, name: str, target: str, matchers: list
+    ruleset_id: str,
+    name: str,
+    target: str,
+    matchers: list,
+    expected_revision: str | None = None,
 ) -> dict:
     """Update one ruleset's name, target, and matchers (id/position kept)."""
     target = _normalize_target(target)
@@ -1142,11 +1218,17 @@ def routes_ruleset_update(
     name = (name or "").strip()
     store = Store.load()
     try:
-        block = store.update_ruleset(ruleset_id, name, target, normalized)
+        block = store.update_ruleset(
+            ruleset_id,
+            name,
+            target,
+            normalized,
+            expected_revision=expected_revision,
+        )
     except ValueError as e:
         raise ServiceError(str(e)) from e
     shadows = routes.shadowed_by(store.rules())
-    decorated = _decorate_ruleset(block, shadows)
+    decorated = _decorate_ruleset(block, shadows, store.ruleset_revision(ruleset_id))
     applog.log(f"updated ruleset {ruleset_id}: {name!r} via {target}")
     daemon.ensure_running()
     return {"ruleset": decorated, "router": _router_info(store)}
@@ -1208,7 +1290,11 @@ def routes_move(ids: list[str], ruleset_id: str) -> dict:
     }
 
 
-def routes_reorder(ids: list[str], flat: bool = False) -> dict:
+def routes_reorder(
+    ids: list[str],
+    flat: bool = False,
+    expected_revision: str | None = None,
+) -> dict:
     """Replace ruleset-block order (or flat rule order for debugging)."""
     if not ids:
         what = "rule" if flat else "ruleset"
@@ -1216,20 +1302,36 @@ def routes_reorder(ids: list[str], flat: bool = False) -> dict:
     store = Store.load()
     try:
         if flat:
+            if expected_revision is not None:
+                raise ServiceError(
+                    "the ruleset-order revision cannot guard a flat rule reorder."
+                )
             ordered, changed = store.reorder_rules(ids)
             shadows = routes.shadowed_by(ordered)
             payload = {
                 "rules": [_decorate_rule(rule, shadows) for rule in ordered],
                 "rulesets": [
-                    _decorate_ruleset(block, shadows) for block in store.rulesets()
+                    _decorate_ruleset(
+                        block,
+                        shadows,
+                        store.ruleset_revision(block["id"]),
+                    )
+                    for block in store.rulesets()
                 ],
             }
         else:
-            ordered_sets, changed = store.reorder_rulesets(ids)
+            ordered_sets, changed = store.reorder_rulesets(
+                ids, expected_revision=expected_revision
+            )
             shadows = routes.shadowed_by(store.rules())
             payload = {
                 "rulesets": [
-                    _decorate_ruleset(block, shadows) for block in ordered_sets
+                    _decorate_ruleset(
+                        block,
+                        shadows,
+                        store.ruleset_revision(block["id"]),
+                    )
+                    for block in ordered_sets
                 ],
                 "rules": [_decorate_rule(rule, shadows) for rule in store.rules()],
             }
@@ -1239,7 +1341,12 @@ def routes_reorder(ids: list[str], flat: bool = False) -> dict:
     if changed:
         applog.log("reordered routes: " + " ".join(ids))
         daemon.ensure_running()
-    return {**payload, "changed": changed, "router": _router_info(store)}
+    return {
+        **payload,
+        "changed": changed,
+        "router": _router_info(store),
+        "revision": store.ruleset_order_revision(),
+    }
 
 
 def routes_lan_direct(enable: bool | None = None) -> dict:
@@ -2230,6 +2337,7 @@ def status_snapshot() -> dict:
                 "latency_ms": latency,
                 "ip": ip,
                 "ipv6_exit": ipv6_exit,
+                "revision": store.channel_revision(channel.provider, channel.id),
             }
         )
     enabled_count = sum(1 for c in channels if c["enabled"])

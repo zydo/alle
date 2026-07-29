@@ -17,6 +17,7 @@ function node(html) {
 // --- API: same-origin, cookie auth. Returns { ok, data, error }. ---
 async function req(method, path, body, options = {}) {
   const opt = { method, headers: {}, signal: options.signal };
+  if (options.ifMatch) opt.headers["If-Match"] = `"${options.ifMatch}"`;
   if (body !== undefined) {
     opt.headers["Content-Type"] = "application/json";
     opt.body = JSON.stringify(body);
@@ -40,8 +41,16 @@ async function req(method, path, body, options = {}) {
       return { ok: false, error: `Invalid response from daemon: ${detail}` };
     }
   }
-  if (!res.ok) return { ok: false, error: data?.error || `Request failed (${res.status})` };
-  return { ok: true, data };
+  if (!res.ok) {
+    return {
+      ok: false,
+      status: res.status,
+      data,
+      conflict: data?.conflict,
+      error: data?.error || `Request failed (${res.status})`,
+    };
+  }
+  return { ok: true, status: res.status, data };
 }
 
 export const api = {

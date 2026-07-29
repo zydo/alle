@@ -83,7 +83,8 @@ gate dependents; a plain `HEAD /health` works as a liveness probe.
   `400` invalid input or a refused operation (the message is human-readable
   and specific — blocker lists, provider rejections);
   `401` missing/wrong credential; `403` Host/Origin refusal; `404` unknown
-  resource; `405` known resource, wrong method (with an `Allow` header);
+  resource; `405` known resource, wrong method (with an `Allow` header); `409`
+  an optional revision precondition lost;
   `413`/`415` framing; `503` a single-flight job (speed test, bundle import,
   token refresh) is already running.
 - Boolean fields are strict JSON booleans: the *string* `"false"` is a 400.
@@ -95,6 +96,18 @@ gate dependents; a plain `HEAD /health` works as a liveness probe.
   channels under several providers is refused; a glob may span providers.
 - `/api/v1` is the versioned contract. Additive response fields may appear;
   request schemas, methods, and paths only change with the version.
+
+Channel objects in `GET /status` and `GET /channels` carry a `revision`;
+rulesets in `GET /routes` carry their own revisions, and that response's
+top-level `revision` covers ruleset membership/order. A client editing one of
+those objects may send its value as a strong entity tag, for example
+`If-Match: "<revision>"`, on the single-channel `enabled`, ruleset `update`,
+or ruleset `reorder` request. If that exact object changed or was deleted,
+the write does not run and the API returns `409` with
+`{"error", "conflict": {"resource", "id", "expected", "current"}}`; refresh
+and let the user decide again rather than auto-merging. Revisions are
+**optional**: omitting `If-Match` preserves the existing last-write-wins
+behavior for scripts, older clients, and the CLI.
 
 ## Read endpoints
 

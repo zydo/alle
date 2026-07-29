@@ -533,6 +533,7 @@ paths:
       parameters:
         - { $ref: "#/components/parameters/providerPath" }
         - { $ref: "#/components/parameters/channelId" }
+        - { $ref: "#/components/parameters/ifMatch" }
       requestBody:
         required: true
         content:
@@ -547,6 +548,7 @@ paths:
         "200": { $ref: "#/components/responses/GenericResult" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   /api/v1/channels/enabled:
     post:
@@ -747,7 +749,9 @@ paths:
       tags: [routes]
       summary: Replace a ruleset's name, target, and matchers atomically
       operationId: updateRuleset
-      parameters: [{ $ref: "#/components/parameters/rulesetId" }]
+      parameters:
+        - { $ref: "#/components/parameters/rulesetId" }
+        - { $ref: "#/components/parameters/ifMatch" }
       requestBody:
         required: true
         content:
@@ -764,6 +768,7 @@ paths:
         "200": { $ref: "#/components/responses/GenericResult" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   /api/v1/routes/move:
     post:
@@ -797,6 +802,7 @@ paths:
       tags: [routes]
       summary: Reorder rules/rulesets (first match wins)
       operationId: reorderRoutes
+      parameters: [{ $ref: "#/components/parameters/ifMatch" }]
       requestBody:
         required: true
         content:
@@ -814,6 +820,7 @@ paths:
         "200": { $ref: "#/components/responses/GenericResult" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
 
   /api/v1/routes/killswitch:
     post:
@@ -1154,6 +1161,16 @@ components:
       schema:
         type: string
         enum: ["1", "true", "0", "false"]
+    ifMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: >
+        Optional strong entity tag containing the revision returned by the
+        corresponding read. Omit it for legacy last-write-wins behavior.
+      schema:
+        type: string
+        pattern: '^"[0-9a-f]{64}"$'
 
   requestBodies:
     EmptyObject:
@@ -1200,6 +1217,11 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: The optional object revision no longer matches committed state
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/RevisionConflict" }
 
   schemas:
     Error:
@@ -1207,6 +1229,22 @@ components:
       required: [error]
       properties:
         error: { type: string }
+
+    RevisionConflict:
+      type: object
+      required: [error, conflict]
+      properties:
+        error: { type: string }
+        conflict:
+          type: object
+          required: [resource, id, expected, current]
+          properties:
+            resource: { type: string }
+            id: { type: string }
+            expected: { type: string, pattern: "^[0-9a-f]{64}$" }
+            current:
+              type: [string, "null"]
+              pattern: "^[0-9a-f]{64}$"
 
     Target:
       type: string

@@ -372,6 +372,21 @@ def test_cli_disable_enable_round_trip(capsys):
     assert ch3.enabled is True
 
 
+def test_cli_write_remains_unconditional_when_a_browser_revision_is_stale(capsys):
+    store, ch = seed_channel()
+    browser_revision = store.channel_revision("nordvpn", ch.id)
+    assert browser_revision is not None
+
+    # Another writer changes the object after the hypothetical browser read.
+    store.set_label("nordvpn", ch.id, "Changed elsewhere")
+    assert Store.load().channel_revision("nordvpn", ch.id) != browser_revision
+
+    # The CLI has no If-Match contract and retains last-write-wins behavior.
+    out = run_cli(["channels", "disable", ch.id], capsys)
+    assert f"Disabled channel nordvpn/{ch.id}." in out
+    assert Store.load().get_channel("nordvpn", ch.id).enabled is False
+
+
 def test_cli_disable_supports_globs_all_and_dry_run(capsys):
     store, _ = seed_channel(city="Seattle")
     seed_channel(city="Chicago")

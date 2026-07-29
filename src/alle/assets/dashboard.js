@@ -60,6 +60,7 @@ let pendingIds = null;
 let refreshStatus = () => { };
 let lifetime = null;
 let configRevision = null;
+let orderRevision = null;
 let lastLabelsSig = null;
 // Last trace verdict; survives routes re-renders so the row highlight can be
 // re-applied after the panel's innerHTML is rebuilt.
@@ -96,7 +97,7 @@ export function mount(view, ctx) {
   refreshRoutes();
 }
 
-export function unmount() { el = {}; status = null; rulesets = []; router = null; measured = new Map(); busy = new Set(); dragRuleId = null; paused = false; pendingIds = null; lifetime = null; configRevision = null; lastLabelsSig = null; traceData = null; }
+export function unmount() { el = {}; status = null; rulesets = []; router = null; measured = new Map(); busy = new Set(); dragRuleId = null; paused = false; pendingIds = null; lifetime = null; configRevision = null; orderRevision = null; lastLabelsSig = null; traceData = null; }
 
 function activateOnKey(event) {
   if ((event.key === "Enter" || event.key === " ") && event.target.matches('[role="button"]')) {
@@ -581,7 +582,7 @@ async function toggleChannel(c) {
     const res = await api.post(
       `/api/v1/channels/${c.provider}/${c.name}/enabled`,
       { enabled: enable },
-      { signal: lifetime?.signal },
+      { signal: lifetime?.signal, ifMatch: c.revision },
     );
     if (res.aborted || !active()) return;
     if (res.ok) {
@@ -591,6 +592,7 @@ async function toggleChannel(c) {
     } else {
       // A refused disable lists the routing rules that still target the channel.
       toast(res.error, "err");
+      if (res.status === 409) refreshStatus();
     }
   });
 }
@@ -645,6 +647,7 @@ async function refreshRoutes() {
   if (!res.ok) { toast(res.error, "err"); return; }
   rulesets = res.data.rulesets || [];
   router = res.data.router || {};
+  orderRevision = res.data.revision || null;
   pendingIds = null; // fresh from the server — no staged change
   renderRoutes();
 }
@@ -900,10 +903,18 @@ async function applyReorder() {
     const active = mountGuard();
     const btn = el.routes.querySelector("#dash-reorder-apply");
     if (btn) { btn.disabled = true; btn.textContent = "Applying…"; }
-    const res = await api.post("/api/v1/routes/reorder", { ids: pendingIds }, { signal: lifetime?.signal });
+    const res = await api.post(
+      "/api/v1/routes/reorder",
+      { ids: pendingIds },
+      { signal: lifetime?.signal, ifMatch: orderRevision },
+    );
     if (res.aborted || !active()) return;
     if (!res.ok) {
       toast(res.error, "err");
+      if (res.status === 409) {
+        await refreshRoutes();
+        return;
+      }
       if (btn) { btn.disabled = false; btn.textContent = "Apply new order"; }
       return;
     }
@@ -1323,9 +1334,19 @@ function openEditRuleset(rulesetId) {
     if (btn.disabled) return;
     btn.disabled = true; btn.textContent = "Saving…";
     const active = mountGuard();
-    const res = await api.post(`/api/v1/routes/rulesets/${encodeURIComponent(rulesetId)}/update`, { name, target, matchers }, { signal: lifetime?.signal });
+    const res = await api.post(
+      `/api/v1/routes/rulesets/${encodeURIComponent(rulesetId)}/update`,
+      { name, target, matchers },
+      { signal: lifetime?.signal, ifMatch: rs.revision },
+    );
     if (res.aborted || !active()) return;
-    if (!res.ok) { err.textContent = res.error; btn.disabled = false; btn.textContent = "Save"; return; }
+    if (!res.ok) {
+      err.textContent = res.status === 409
+        ? `${res.error} Close and reopen this editor.`
+        : res.error;
+      if (res.status === 409) refreshRoutes();
+      btn.disabled = false; btn.textContent = "Save"; return;
+    }
     m.close(); toast(`Saved ${name}.`); refreshRoutes(); refreshStatus();
   };
   m.root.querySelector("#name").focus();

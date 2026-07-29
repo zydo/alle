@@ -428,6 +428,104 @@ def _ruleset_blocks(rules: list[dict]) -> list[dict]:
     return blocks
 
 
+def _content_revision(kind: str, identity: str, content) -> str:
+    """A restart-stable revision for one committed state object.
+
+    The kind and identity are part of the digest domain so equal JSON under
+    two different objects can never share a revision. Revisions are derived
+    from content rather than minted counters: every process observing the same
+    committed state derives the same token, including after a daemon restart.
+    """
+    canonical = json.dumps(
+        {"kind": kind, "identity": identity, "content": content},
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _channel_revision(data: dict, provider: str, cid: str) -> str | None:
+    """The channel intent revision, or ``None`` when it does not exist.
+
+    Probe and reconnect records are daemon-owned observations/bookkeeping.
+    Excluding them prevents a heartbeat landing between a browser read and
+    write from manufacturing a conflict in otherwise unchanged user intent.
+    """
+    channel = (
+        ((data.get("providers") or {}).get(provider) or {}).get("channels") or {}
+    ).get(cid)
+    if channel is None:
+        return None
+    intent = {
+        key: value
+        for key, value in channel.items()
+        if key not in {"probe", "reconnect"}
+    }
+    return _content_revision("channel", f"{provider}/{cid}", intent)
+
+
+def _ruleset_revision(data: dict, ruleset_id: str) -> str | None:
+    """The revision of one ruleset block, or ``None`` when it was removed."""
+    rules = (data.get("router") or {}).get("rules") or []
+    block = next(
+        (item for item in _ruleset_blocks(rules) if item["id"] == ruleset_id),
+        None,
+    )
+    if block is None:
+        return None
+    return _content_revision("ruleset", ruleset_id, block)
+
+
+def _ruleset_order_revision(data: dict) -> str:
+    """Revision for ruleset membership and order, not ruleset contents.
+
+    Reordering preserves the current content of every block, so an independent
+    edit inside a ruleset need not invalidate a staged order. Adds, removals,
+    and another reorder do invalidate it because the ordered id list changes.
+    """
+    rules = (data.get("router") or {}).get("rules") or []
+    ids = [block["id"] for block in _ruleset_blocks(rules)]
+    return _content_revision("ruleset-order", "router", ids)
+
+
+class RevisionConflict(RuntimeError):
+    """An optional optimistic-concurrency precondition did not match."""
+
+    def __init__(
+        self,
+        resource: str,
+        identity: str,
+        expected: str,
+        current: str | None,
+    ):
+        self.resource = resource
+        self.identity = identity
+        self.expected = expected
+        self.current = current
+        if current is None:
+            message = (
+                f"{resource} {identity!r} was removed after this client read it; "
+                "refresh before trying again"
+            )
+        else:
+            message = (
+                f"{resource} {identity!r} changed after this client read it; "
+                "refresh before trying again"
+            )
+        super().__init__(message)
+
+
+def _require_revision(
+    resource: str,
+    identity: str,
+    expected: str | None,
+    current: str | None,
+) -> None:
+    if expected is not None and expected != current:
+        raise RevisionConflict(resource, identity, expected, current)
+
+
 class ReferencedError(RuntimeError):
     """Removal refused: routing rules still reference the channel(s).
 
@@ -784,6 +882,15 @@ class Store:
         channel = (pdata.get("channels") or {}).get(cid)
         return _channel_view(provider, cid, channel) if channel is not None else None
 
+    def channel_revision(self, provider: str, cid: str) -> str | None:
+        return _channel_revision(self.data, provider, cid)
+
+    def ruleset_revision(self, ruleset_id: str) -> str | None:
+        return _ruleset_revision(self.data, ruleset_id)
+
+    def ruleset_order_revision(self) -> str:
+        return _ruleset_order_revision(self.data)
+
     def add_channel(
         self,
         provider: str,
@@ -905,7 +1012,11 @@ class Store:
         return removed
 
     def set_channels_enabled(
-        self, refs: list[tuple[str, str]], enabled: bool
+        self,
+        refs: list[tuple[str, str]],
+        enabled: bool,
+        *,
+        expected_revisions: dict[tuple[str, str], str] | None = None,
     ) -> list[tuple[str, str]]:
         """Enable/disable several channels in ONE transaction; returns those
         whose state actually changed (already-there channels are no-ops).
@@ -923,6 +1034,13 @@ class Store:
         """
         changed: list[tuple[str, str]] = []
         with transaction() as data:
+            for (provider, cid), expected in (expected_revisions or {}).items():
+                _require_revision(
+                    "channel",
+                    f"{provider}/{cid}",
+                    expected,
+                    _channel_revision(data, provider, cid),
+                )
             if not enabled:
                 blockers = _rules_referencing(data, set(refs))
                 if blockers:
@@ -1284,6 +1402,8 @@ class Store:
         name: str,
         target: str,
         matchers: list[tuple[str, str]],
+        *,
+        expected_revision: str | None = None,
     ) -> dict:
         """Set one ruleset's name, target, and matchers in one transaction,
         keeping its id and position. The per-ruleset editor's Apply."""
@@ -1292,6 +1412,12 @@ class Store:
         if not matchers:
             raise ValueError("at least one matcher is required")
         with transaction() as data:
+            _require_revision(
+                "ruleset",
+                ruleset_id,
+                expected_revision,
+                _ruleset_revision(data, ruleset_id),
+            )
             _ensure_channel_target(data, target)
             router = data.setdefault("router", _router_blank())
             rules = router.setdefault("rules", [])
@@ -1407,9 +1533,17 @@ class Store:
         self.data = _read_raw()
         return ordered_copy, changed
 
-    def reorder_rulesets(self, ids: list[str]) -> tuple[list[dict], bool]:
+    def reorder_rulesets(
+        self, ids: list[str], *, expected_revision: str | None = None
+    ) -> tuple[list[dict], bool]:
         """Replace ruleset block order with a full ruleset-id permutation."""
         with transaction() as data:
+            _require_revision(
+                "ruleset order",
+                "router",
+                expected_revision,
+                _ruleset_order_revision(data),
+            )
             router = data.setdefault("router", _router_blank())
             rules = router.get("rules") or []
             blocks = _ruleset_blocks(rules)
@@ -1520,12 +1654,25 @@ class Store:
         the authoritative check re-runs inside the removal transaction)."""
         return _rules_referencing(self.data, refs)
 
-    def update_channel_wg(self, provider: str, cid: str, wg: dict) -> bool:
+    def update_channel_wg(
+        self,
+        provider: str,
+        cid: str,
+        wg: dict,
+        *,
+        expected_revision: str | None = None,
+    ) -> bool:
         """Replace a channel's WireGuard params (used by auto-reconnect to swap in a
         freshly resolved server). Changes the config signature so the daemon
         reconciles sing-box. True if the channel existed."""
         updated = False
         with transaction() as data:
+            _require_revision(
+                "channel",
+                f"{provider}/{cid}",
+                expected_revision,
+                _channel_revision(data, provider, cid),
+            )
             prov = data["providers"].get(provider) or {}
             ch = (prov.get("channels") or {}).get(cid)
             if ch is not None:

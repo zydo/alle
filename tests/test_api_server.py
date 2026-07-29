@@ -668,6 +668,154 @@ def test_toggle_channel_enabled(live):
     assert ch is not None and ch.enabled is True
 
 
+def test_channel_revisions_conflict_only_on_the_same_channel(live):
+    base, secret = live
+    headers = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    store = Store.load()
+    first = store.add_channel("nordvpn", "US", "", dict(WG))
+    second = store.add_channel("nordvpn", "CA", "", dict(WG))
+
+    st, body, _ = _req(base + "/api/v1/channels", headers=headers)
+    assert st == 200
+    by_name = {item["name"]: item for item in json.loads(body)["channels"]}
+    first_revision = by_name[first.id]["revision"]
+    second_revision = by_name[second.id]["revision"]
+
+    # Two clients holding the same snapshot may edit different channels.
+    for channel, revision in (
+        (first, first_revision),
+        (second, second_revision),
+    ):
+        st, body, _ = _req(
+            f"{base}/api/v1/channels/nordvpn/{channel.id}/enabled",
+            method="POST",
+            headers={**headers, "If-Match": f'"{revision}"'},
+            data={"enabled": False},
+        )
+        assert st == 200
+        assert json.loads(body)["changed"] == [f"nordvpn/{channel.id}"]
+
+    # Reusing the first channel's stale revision loses with structured detail.
+    st, body, _ = _req(
+        f"{base}/api/v1/channels/nordvpn/{first.id}/enabled",
+        method="POST",
+        headers={**headers, "If-Match": f'"{first_revision}"'},
+        data={"enabled": True},
+    )
+    data = json.loads(body)
+    assert st == 409
+    assert data["conflict"] == {
+        "resource": "channel",
+        "id": f"nordvpn/{first.id}",
+        "expected": first_revision,
+        "current": Store.load().channel_revision("nordvpn", first.id),
+    }
+    assert Store.load().get_channel("nordvpn", first.id).enabled is False
+
+    # No If-Match is the legacy last-write-wins contract.
+    st, body, _ = _req(
+        f"{base}/api/v1/channels/nordvpn/{first.id}/enabled",
+        method="POST",
+        headers=headers,
+        data={"enabled": True},
+    )
+    assert st == 200 and json.loads(body)["changed"] == [f"nordvpn/{first.id}"]
+
+
+def test_concurrent_writers_with_one_channel_revision_have_one_winner(live):
+    base, secret = live
+    channel = Store.load().add_channel("nordvpn", "US", "", dict(WG))
+    revision = Store.load().channel_revision("nordvpn", channel.id)
+    assert revision is not None
+    headers = {
+        "Origin": base,
+        "Authorization": f"Bearer {secret}",
+        "If-Match": f'"{revision}"',
+    }
+    barrier = threading.Barrier(3)
+    statuses = []
+
+    def write():
+        barrier.wait()
+        status, _, _ = _req(
+            f"{base}/api/v1/channels/nordvpn/{channel.id}/enabled",
+            method="POST",
+            headers=headers,
+            data={"enabled": False},
+        )
+        statuses.append(status)
+
+    threads = [threading.Thread(target=write) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(statuses) == [200, 409]
+
+
+def test_channel_revision_reports_delete_as_a_conflict(live):
+    base, secret = live
+    headers = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    channel = Store.load().add_channel("nordvpn", "US", "", dict(WG))
+    revision = Store.load().channel_revision("nordvpn", channel.id)
+    assert revision is not None
+
+    st, _, _ = _req(
+        f"{base}/api/v1/channels/nordvpn/{channel.id}",
+        method="DELETE",
+        headers=headers,
+    )
+    assert st == 200
+    st, body, _ = _req(
+        f"{base}/api/v1/channels/nordvpn/{channel.id}/enabled",
+        method="POST",
+        headers={**headers, "If-Match": f'"{revision}"'},
+        data={"enabled": False},
+    )
+    data = json.loads(body)
+    assert st == 409
+    assert data["conflict"]["current"] is None
+    assert "removed" in data["error"]
+
+
+def test_revision_from_before_control_server_restart_still_matches():
+    store = Store.load()
+    store.add_provider("nordvpn")
+    channel = store.add_channel("nordvpn", "US", "", dict(WG))
+
+    first_server = server.build_server()
+    first_thread = start_test_server(first_server)
+    api = server.control_api()
+    base = f"http://{api['address']}"
+    headers = {"Origin": base, "Authorization": f"Bearer {api['secret']}"}
+    try:
+        st, body, _ = _req(base + "/api/v1/status", headers=headers)
+        assert st == 200
+        revision = next(
+            item["revision"]
+            for item in json.loads(body)["channels"]
+            if item["name"] == channel.id
+        )
+    finally:
+        stop_test_server(first_server, first_thread)
+
+    restarted = server.build_server()
+    restarted_thread = start_test_server(restarted)
+    try:
+        st, body, _ = _req(
+            f"{base}/api/v1/channels/nordvpn/{channel.id}/enabled",
+            method="POST",
+            headers={**headers, "If-Match": f'"{revision}"'},
+            data={"enabled": False},
+        )
+        assert st == 200
+        assert json.loads(body)["changed"] == [f"nordvpn/{channel.id}"]
+    finally:
+        stop_test_server(restarted, restarted_thread)
+
+
 def test_disable_channel_blocked_by_rule_returns_verbatim_message(live):
     from alle.state import Store
 
@@ -872,6 +1020,149 @@ def test_routes_api_create_reorder_killswitch_delete(live):
     )
     assert st == 200
     assert Store.load().rules() == []
+
+
+def test_ruleset_and_order_revisions_are_scoped(live):
+    base, secret = live
+    headers = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    for name, value in (("A", "a.example"), ("B", "b.example")):
+        st, _, _ = _req(
+            base + "/api/v1/routes/rulesets",
+            method="POST",
+            headers=headers,
+            data={
+                "name": name,
+                "target": "direct",
+                "matchers": [{"value": value}],
+            },
+        )
+        assert st == 200
+
+    st, body, _ = _req(base + "/api/v1/routes", headers=headers)
+    assert st == 200
+    snapshot = json.loads(body)
+    by_id = {ruleset["id"]: ruleset for ruleset in snapshot["rulesets"]}
+    first_revision = by_id["rs1"]["revision"]
+    second_revision = by_id["rs2"]["revision"]
+    order_revision = snapshot["revision"]
+
+    # Editing rs1 does not invalidate rs2, and neither content edit invalidates
+    # the order token because reorder preserves current block contents.
+    for ruleset_id, revision, name, value in (
+        ("rs1", first_revision, "A changed", "aa.example"),
+        ("rs2", second_revision, "B changed", "bb.example"),
+    ):
+        st, _, _ = _req(
+            f"{base}/api/v1/routes/rulesets/{ruleset_id}/update",
+            method="POST",
+            headers={**headers, "If-Match": f'"{revision}"'},
+            data={
+                "name": name,
+                "target": "direct",
+                "matchers": [{"value": value}],
+            },
+        )
+        assert st == 200
+
+    st, body, _ = _req(
+        base + "/api/v1/routes/reorder",
+        method="POST",
+        headers={**headers, "If-Match": f'"{order_revision}"'},
+        data={"ids": ["rs2", "rs1"]},
+    )
+    assert st == 200
+    new_order_revision = json.loads(body)["revision"]
+
+    # Another client using the old order loses; the accepted order is intact.
+    st, body, _ = _req(
+        base + "/api/v1/routes/reorder",
+        method="POST",
+        headers={**headers, "If-Match": f'"{order_revision}"'},
+        data={"ids": ["rs1", "rs2"]},
+    )
+    data = json.loads(body)
+    assert st == 409
+    assert data["conflict"]["resource"] == "ruleset order"
+    assert data["conflict"]["current"] == new_order_revision
+    assert [item["id"] for item in Store.load().rulesets()] == ["rs2", "rs1"]
+
+    # Reusing rs1's pre-edit revision also loses on that object.
+    st, body, _ = _req(
+        base + "/api/v1/routes/rulesets/rs1/update",
+        method="POST",
+        headers={**headers, "If-Match": f'"{first_revision}"'},
+        data={
+            "name": "stale",
+            "target": "direct",
+            "matchers": [{"value": "stale.example"}],
+        },
+    )
+    assert st == 409 and json.loads(body)["conflict"]["id"] == "rs1"
+
+
+def test_ruleset_revision_reports_delete_as_a_conflict(live):
+    base, secret = live
+    headers = {"Origin": base, "Authorization": f"Bearer {secret}"}
+    st, _, _ = _req(
+        base + "/api/v1/routes/rulesets",
+        method="POST",
+        headers=headers,
+        data={
+            "name": "A",
+            "target": "direct",
+            "matchers": [{"value": "a.example"}],
+        },
+    )
+    assert st == 200
+    _, body, _ = _req(base + "/api/v1/routes", headers=headers)
+    revision = json.loads(body)["rulesets"][0]["revision"]
+    st, _, _ = _req(
+        base + "/api/v1/routes/rulesets/rs1",
+        method="DELETE",
+        headers=headers,
+    )
+    assert st == 200
+
+    st, body, _ = _req(
+        base + "/api/v1/routes/rulesets/rs1/update",
+        method="POST",
+        headers={**headers, "If-Match": f'"{revision}"'},
+        data={
+            "name": "stale",
+            "target": "direct",
+            "matchers": [{"value": "stale.example"}],
+        },
+    )
+    data = json.loads(body)
+    assert st == 409
+    assert data["conflict"]["current"] is None
+    assert "removed" in data["error"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not-quoted",
+        '"short"',
+        'W/"' + "a" * 64 + '"',
+        '"%s", "%s"' % ("a" * 64, "b" * 64),
+        "*",
+    ],
+)
+def test_if_match_rejects_ambiguous_or_malformed_tags(live, value):
+    base, secret = live
+    channel = Store.load().add_channel("nordvpn", "US", "", dict(WG))
+    st, body, _ = _req(
+        f"{base}/api/v1/channels/nordvpn/{channel.id}/enabled",
+        method="POST",
+        headers={
+            "Origin": base,
+            "Authorization": f"Bearer {secret}",
+            "If-Match": value,
+        },
+        data={"enabled": False},
+    )
+    assert st == 400 and "If-Match" in json.loads(body)["error"]
 
 
 def test_routes_geo_status_reports_source_and_empty_cache(live):
