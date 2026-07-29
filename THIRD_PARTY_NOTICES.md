@@ -84,5 +84,39 @@ trademark holders.
   whose embedded Inkscape/RDF metadata mislabeled it "Proton Mail"; that stale
   metadata has been corrected to "Proton VPN."
 
+### README provider icons
+
+`src/alle/assets/readme/providers/*.png` are README-only (excluded from the installed
+wheel). Each is the provider's own published icon-only mark, downloaded from the
+source below and **not redrawn**: the only processing is a proportional resize
+and centring on a uniform white rounded tile, so every mark stays legible in
+both light and dark READMEs.
+
+| Provider                | Source                                                                                                            | Trademark holder              |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| NordVPN                 | `sb.nordcdn.com/m/5dd86f435e9b1aea/original/nordvpn-symbolBlue.svg`                                               | Nord Security                 |
+| Proton VPN              | `pmecdn.protonweb.com` → `static/logos/vpn/vpn-badge.svg`                                                         | Proton AG                     |
+| Mullvad                 | `mullvad.net/favicon.svg`                                                                                         | Mullvad VPN AB                |
+| IVPN                    | `github.com/ivpn/desktop-app` → `ui/References/Linux/ui/ivpnicon.svg` (GPL-3.0 repo, no separate trademark grant) | IVPN / Privatus Limited       |
+| Private Internet Access | `assets-cms.privateinternetaccess.com/photos/shares/pia-homepage/PIA-Logo.svg`                                    | Private Internet Access, Inc. |
+| VyprVPN                 | `www.vyprvpn.com/site/templates/images/vyprvpn_logo.svg`                                                          | Certida                       |
+
+One asset was edited beyond resizing: VyprVPN publishes no standalone icon, only
+a combined lockup. The wordmark group was removed and the viewBox re-fit to the
+mark's own bounds — no path data was altered.
+
+Two of these carry usage terms narrower than general nominative use, recorded
+here so the position is explicit rather than assumed:
+
+- **Mullvad** — its press page grants the logos "for editorial purposes in which
+  our work is described."
+- **VyprVPN** — its Terms of Service (§2) state the marks are provided for
+  personal, non-commercial use and grant no third-party logo permission.
+
+Both are shown here to identify a provider alle supports or plans to support,
+which is the nominative use described above; neither provider has reviewed or
+approved this project. Remove either on request from the trademark holder.
+
 alle is an independent project and is not affiliated with, endorsed by, or
-sponsored by Nord Security, Proton AG, or any VPN provider.
+sponsored by Nord Security, Proton AG, Mullvad VPN AB, IVPN, Private Internet
+Access, Certida, or any VPN provider.

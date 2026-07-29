@@ -94,10 +94,11 @@ def test_third_party_notices_ships_in_wheel_and_sdist(built):
 def test_all_served_assets_present_in_wheel(built):
     _, wheel = built
     wheel_names = _wheel_names(wheel)
+    # Everything directly in assets/ is served by the Web UI and must ship.
+    # README-only art lives in assets/readme/, which iterdir() skips because
+    # it is a directory — that separation is what keeps this list honest.
     served = [
-        p.name
-        for p in ASSETS.iterdir()
-        if p.is_file() and not p.name.startswith(".") and p.name != "webui.png"
+        p.name for p in ASSETS.iterdir() if p.is_file() and not p.name.startswith(".")
     ]
     missing = [
         name

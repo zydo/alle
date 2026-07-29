@@ -11,172 +11,102 @@
 
 # alle
 
-A universal VPN client that manages multiple VPN connections with rule-based routing.
+A universal VPN client that manages multiple VPN connections with rule-based routing, with interfaces for human (Web UI and CLI) and programs (REST API and Docker image).
+
+## VPN Providers
+
+**Supported**
+
+<table>
+  <tr>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/nordvpn.png" alt="" height="56"><br>NordVPN</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/protonvpn.png" alt="" height="56"><br>Proton VPN</td>
+  </tr>
+</table>
+
+**Planned (Developing)**
+
+<table>
+  <tr>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/mullvad.png" alt="" height="56"><br>Mullvad</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/ivpn.png" alt="" height="56"><br>IVPN</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/pia.png" alt="" height="56"><br>PIA</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/vyprvpn.png" alt="" height="56"><br>VyprVPN</td>
+  </tr>
+</table>
+
+See [VPN provider research](docs/vpn-provider-research.md) for setup archetypes,
+provider-specific constraints, and excluded providers.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/webui.png" alt="alle Web UI dashboard" width="900">
+  <img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/webui.png" alt="alle Web UI dashboard" width="900">
+  <br>
+  <em>Web UI</em>
 </p>
 
 # Why alle
 
-Most VPN clients are built around one global idea: connect this device to a single
-VPN server, then send everything through it until you disconnect or switch.
+## For people
 
-That is not enough when different resources need to appear from different regions
-— a geo-fenced stream, a bank that blocks foreign IPs, a region-locked test
-environment. Switching origins means disconnecting from one server and reconnecting
-to another, and the official client on one machine usually cannot keep several
-locations active at once anyway.
+You already pay for a commercial VPN — but its official client connects to one
+location at a time. Switching countries means disconnecting, reconnecting, and
+breaking whatever was using the old exit. Two locations at once is not on offer.
 
-`alle` keeps multiple VPN exits live at the same time, from one provider or mixed
-across several. Say you want a US exit, a UK exit, and a Japan exit at once —
-NordVPN for the US and Japan, ProtonVPN for the UK:
+`alle` keeps several exits live simultaneously, from one provider or mixed across
+providers. Different traffic leaves through different VPN servers, decided by
+alle's routing rules:
 
-```text
-   streaming + admin   ──►  alle  ──►  United States   (NordVPN)
-   test runner         ──►  alle  ──►  Japan           (NordVPN)
-   bank login          ──►  alle  ──►  United Kingdom  (Proton VPN)
-```
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/why-alle-dark.svg">
+    <img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/why-alle.svg" alt="Three apps routed through alle to three different VPN exits at the same time" width="700">
+  </picture>
+</p>
 
-Each app points at the exit it needs; they run concurrently and independently, so
-opening the bank never disturbs the stream.
+## For programs
 
-In short: not one global location you keep switching, but several exits alive at
-once, each used where it is needed.
+Every action the CLI performs is also a REST call, and each exit is a stable
+`127.0.0.1:<port>` proxy. So another program can drive the whole lifecycle of
+many VPN connections — create, probe, rotate, retire — on its own schedule,
+with no human clicking a client. That is what makes proxy rotation across
+regions, and reaching geofenced resources from wherever they are served,
+something you can script.
+
+It also ships as a container image — [`ziyudo/alle`](https://hub.docker.com/r/ziyudo/alle)
+— so a compose stack can add it as one service and let sibling containers reach
+the internet through whichever exit the rules pick.
 
 ## What alle does
 
-`alle` runs multiple VPN exits side by side. Each exit is exposed as its own
-local HTTP+SOCKS proxy on `127.0.0.1:<port>`. A single HTTP+SOCKS router
-entrypoint routes traffic by rule (domain, IP) to a VPN exit, to direct
-outbound, or blocks it. Instead of changing your whole machine's VPN location,
-you point each app, browser profile, script, or test job at the path it needs.
+`alle` runs multiple VPN exits side by side, each its own local HTTP+SOCKS
+proxy. One router entrypoint sends traffic by rule to an exit, straight out, or
+nowhere at all — see [Rule-based routing](docs/routing.md). For a whole-machine
+VPN through those same rules there is an optional **TUN mode** (`alle tun on`,
+one-time privilege grant): [CLI reference](docs/cli-reference.md#alle-tun-onoff),
+[runbook](docs/tun-runbook.md).
 
-Under the hood, `alle` manages one
-[`sing-box`](https://github.com/SagerNet/sing-box) process. Each channel becomes
-one local proxy inbound routed through one WireGuard VPN peer. Channels can come
-from different providers, so a NordVPN exit and a Proton VPN `.conf` import can
-run at the same time.
+The runtime model — one `sing-box` process, state, ports, probes — is in
+[How it works](docs/how-it-works.md). What is supported today is in
+[Current status](docs/status.md).
 
-For a whole-machine VPN that captures *all* traffic through the same routing
-rules, there is an optional **TUN mode** (`alle tun on`, one-time privilege
-grant) — see the [CLI reference](docs/cli-reference.md#alle-tun-onoff) and
-the [runbook](docs/tun-runbook.md).
-
-## Current status
-
-`alle` is usable today as a CLI-first client for per-app/per-workflow VPN exits.
-
-**Providers**
-
-| Provider   | Support                                                                   |
-| ---------- | ------------------------------------------------------------------------- |
-| NordVPN    | Token/API setup, location selection, automatic WireGuard channel creation |
-| Proton VPN | WireGuard `.conf` import                                                  |
-
-**Platforms**
-
-| Platform | Support                                                           |
-| -------- | ----------------------------------------------------------------- |
-| macOS    | Supported                                                         |
-| Windows  | Planned                                                           |
-| Linux    | Supported                                                         |
-| Docker   | Supported — [`ziyudo/alle`](https://hub.docker.com/r/ziyudo/alle) |
-
-**Features**
-
-| Area              | Status                                                                                                           |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Core CLI          | Providers, channels, per-channel proxies, status, tests (probe + speed + traffic), logs                          |
-| Routing           | Ruleset-based router entrypoint with domain/CIDR/all matchers, kill-switch, CLI shadow lint, built-in LAN bypass |
-| Web UI            | Dashboard (channels, probe/speed, routes, kill-switch) + Bundle + Logs pages                                     |
-| REST API          | Everything the CLI does over `/api/v1` (Bearer auth) — for scripts and compose siblings                          |
-| Docker            | Container profile: proxy hub for compose networks, VPN gateway container (tun), declarative boot config          |
-| Desktop companion | Planned                                                                                                          |
-| Distribution      | PyPI, one-command uv bootstrap, Homebrew, and Docker Hub                                                         |
-
-## Install or deploy
-
-| Choice                | Supervisor                 | Traffic captured                          | Host-wide VPN |
-| --------------------- | -------------------------- | ----------------------------------------- | ------------- |
-| One-command uv script | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
-| Homebrew              | `brew services`            | Host apps or host TUN                     | Yes           |
-| Manual `uv` install   | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
-| Manual `pipx` install | launchd / `systemd --user` | Host apps or host TUN                     | Yes           |
-| Docker proxy hub      | Docker restart policy      | Proxy-aware containers/apps               | No            |
-| Docker gateway        | Docker restart policy      | alle netns + explicitly joined containers | No            |
+## Get started
 
 ```bash
-# Host, one-command uv bootstrap (installs + verifies the login service)
+# macOS + Linux: installs alle and its user-level login service
 curl -LsSf \
   https://github.com/zydo/alle/releases/latest/download/install.sh | sh
 
-# Host, with an existing uv installation
-uv tool install alle-proxy
-
-# Host, with Homebrew (install + start at login)
-brew install zydo/tap/alle
-brew services start alle
-
-# Host, with pipx
-pipx install alle-proxy
-
-# Docker proxy hub (persistent state; no proxy/API ports published)
-docker run -d --name alle --restart unless-stopped \
-  --mount type=volume,src=alle-state,dst=/var/lib/alle \
-  ziyudo/alle:latest
-docker exec alle alle status
-```
-
-After the script, restart your shell if it reports that the uv tool directory
-was added to `PATH` (or use the exact temporary `export` command it prints).
-For a first manual uv install, run `uv tool update-shell` if uv prompts, then
-restart the shell. Bare `alle` commands then work in the new shell.
-
-The script installs and verifies alle's own user-level login service. Homebrew
-uses `brew services` instead—do not also run `alle daemon install` for that
-channel. Manual uv/pipx installs may add `alle daemon install` when login
-startup is wanted. `alle upgrade` delegates to the owning package manager;
-containers instead upgrade by pulling a new image tag. See
-[Getting started](docs/getting-started.md) for every installation choice and
-[Docker](docs/docker.md) for bundles and gateway scope.
-
-To completely remove a script installation (service, tool, and `~/.alle`
-state) without needing to know uv commands, first remove the optional macOS
-root helper if you previously installed it:
-
-```bash
-# macOS only, and only if you ran `sudo alle helper install`
-sudo alle helper uninstall
-
-curl -LsSf \
-  https://github.com/zydo/alle/releases/latest/download/install.sh | \
-  sh -s -- --uninstall
-```
-
-The uninstaller acts only on an installation recorded by this bootstrap. It
-removes only the recorded uv-owned alle tool, never uv itself or a pipx, pip,
-or Homebrew installation. On Linux it disables login lingering only when the
-bootstrap enabled it.
-
-## Quick start
-
-```bash
 alle providers add nordvpn
 alle channels add nordvpn --country "United States"
 alle start
 alle channels ls                # prints each channel's local proxy port
 ```
 
-Point anything proxy-aware at a channel's port:
+Point anything proxy-aware at a channel's port, and it exits there.
 
-```bash
-curl -x http://127.0.0.1:53124 https://api.ipify.org
-```
-
-The full walkthrough — provider setup styles (token vs `.conf` import),
-labels, everyday commands, holding more channels than your plan's connection
-cap — is in **[Getting started](docs/getting-started.md)**.
+Homebrew, `uv`, `pipx`, Docker, the checksum-verified manual install, and the
+uninstaller are all in **[Getting started](docs/getting-started.md)**; container
+deployments are in **[Docker](docs/docker.md)**.
 
 ## Documentation
 
@@ -215,6 +145,8 @@ cap — is in **[Getting started](docs/getting-started.md)**.
 
 - **[How it works](docs/how-it-works.md)** — the runtime model: one sing-box,
   state, ports, probes.
+- **[Current status](docs/status.md)** — supported providers and platforms,
+  feature matrix, what is planned, and the non-goals.
 - **[Security model](docs/security.md)** — trust boundaries, credential
   handling, Web UI/API hardening, fail-closed routing.
 - **[VPN provider research](docs/vpn-provider-research.md)** — which providers
@@ -222,32 +154,7 @@ cap — is in **[Getting started](docs/getting-started.md)**.
 
 ## Security and privacy
 
-- Credentials and WireGuard keys stay local (`~/.alle`, owner-only
-  permissions); tokens are never read from the environment implicitly.
-- Proxy ports bind to loopback on hosts; the Docker image opts into the
-  container network as its trust boundary.
-- The loopback proxies are unauthenticated (alle assumes a single-user
-  machine); the control API — Web UI and REST — is always authenticated.
-- `sing-box` is a pinned upstream release, checksum-verified before every run.
-
-The full threat model lives in **[docs/security.md](docs/security.md)**.
-
-## Roadmap and non-goals
-
-Planned next steps:
-
-- More WireGuard-capable VPN providers. See
-  [VPN Provider Research](docs/vpn-provider-research.md).
-- Desktop companion with OS-level VPN integration.
-- Windows support and broader distribution.
-
-Non-goals:
-
-- OpenVPN or IKEv2/IPsec support.
-- VPN providers without usable WireGuard support, such as ExpressVPN, HideMyAss,
-  Perfect Privacy, Privado, SlickVPN, VPN.ac/VPNSecure, and Giganews.
-- SOCKS5-only or unencrypted proxy providers.
-- Bundling `sing-box` inside the Python package.
+See the **[Security model](docs/security.md)**.
 
 ## License
 

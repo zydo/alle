@@ -38,9 +38,10 @@ exclude = [".localonly"]
 packages = ["src/alle"]
 # Distribution channels are deliberately headless. Keep the future desktop
 # companion sources available to the in-tree test suite and sdist, but never
-# put them (or the README-only screenshot) in an installed wheel.
+# put them (or anything under assets/readme/, which exists only for the
+# README and the PyPI project page) in an installed wheel.
 exclude = [
-    "src/alle/assets/webui.png",
+    "src/alle/assets/readme",
     "src/alle/companion.py",
     "src/alle/tray.py",
 ]
