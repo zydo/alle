@@ -48,6 +48,11 @@ def _load_updater():
 # ---- formula structure ------------------------------------------------------
 
 
+def test_formula_pins_the_current_bottled_python(formula_text):
+    assert 'depends_on "python@3.14"' in formula_text
+    assert 'depends_on "python@3.13"' not in formula_text
+
+
 def test_formula_has_native_service_and_caveats(formula_text):
     # Portable brew supervision (launchd on macOS, systemd --user on Linux) of
     # the stable `alle applier` shim, plus a caveat steering to brew services.
