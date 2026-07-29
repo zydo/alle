@@ -57,9 +57,12 @@ _USER_AGENT = "alle-probe/1"
 # body on the heartbeat path.
 MAX_BODY_BYTES = 8192
 
-# Overall wall-clock budget for one channel across ALL its sources. Without
-# it, a dead channel costs (sources × per-request timeout) — multiplied by
-# the channel count, enough to stall a whole probe pass for minutes.
+# Overall wall-clock budget for one channel: every source it tries, and the
+# supplementary IPv6-exit lookup after them. Without it, a dead channel costs
+# (sources × per-request timeout) — multiplied by the channel count, enough to
+# stall a whole probe pass for minutes. It is the number `Engine.probe_all`'s
+# `ceil(n / pool) × deadline` reasoning rests on, so nothing a channel does may
+# fall outside it.
 CHANNEL_DEADLINE = 15.0
 
 

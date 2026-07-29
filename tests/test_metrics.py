@@ -173,6 +173,39 @@ def test_tombstone_blocks_late_samples_until_revived():
     assert (t["sent"], t["received"]) == (7, 8)
 
 
+def test_single_row_reads_agree_with_the_bulk_read():
+    """`total` is the read a streaming speed test uses per row, so it has to
+    answer exactly what `totals` would — zeros included, tombstones included.
+    Two readers that disagree would show a channel different counters depending
+    on whether its batch happened to be streaming."""
+    metrics.add_delta("nordvpn", "us_1", 10, 20)
+
+    assert metrics.total("nordvpn", "us_1") == metrics.totals()[("nordvpn", "us_1")]
+    # never banked anything
+    assert metrics.total("nordvpn", "never") == {
+        "sent": 0,
+        "received": 0,
+        "updated_at": 0,
+    }
+
+    metrics.remove_channel("nordvpn", "us_1")
+    # a late sample cannot resurrect the row, and the single-row read sees the
+    # same nothing the bulk read does
+    metrics.add_delta("nordvpn", "us_1", 99, 99)
+    assert metrics.total("nordvpn", "us_1") == {
+        "sent": 0,
+        "received": 0,
+        "updated_at": 0,
+    }
+    assert ("nordvpn", "us_1") not in metrics.totals()
+
+    metrics.revive_channel("nordvpn", "us_1")
+    metrics.add_delta("nordvpn", "us_1", 7, 8)
+    revived = metrics.total("nordvpn", "us_1")
+    assert (revived["sent"], revived["received"]) == (7, 8)
+    assert revived == metrics.totals()[("nordvpn", "us_1")]
+
+
 def test_provider_tombstone_covers_every_channel_and_lifts_on_readd():
     metrics.add_delta("nordvpn", "us_1", 10, 10)
     metrics.remove_provider("nordvpn")
