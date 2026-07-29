@@ -72,11 +72,14 @@ with no human clicking a client. That is what makes proxy rotation across
 regions, and reaching geofenced resources from wherever they are served,
 something you can script.
 
-It also ships as a container image — [`ziyudo/alle`](https://hub.docker.com/r/ziyudo/alle)
-— so a compose stack can add it as one service and let sibling containers reach
+It also ships as a container image ([`ziyudo/alle`](https://hub.docker.com/r/ziyudo/alle))
+so a compose stack can add it as one service and let sibling containers reach
 the internet through whichever exit the rules pick.
 
-## What alle does
+You may also have heard of [gluetun](https://github.com/qdm12/gluetun),
+[alle and gluetun](docs/gluetun-comparison.md) compares the two.
+
+# What alle does
 
 `alle` runs multiple VPN exits side by side, each its own local HTTP+SOCKS
 proxy. One router entrypoint sends traffic by rule to an exit, straight out, or
@@ -89,28 +92,36 @@ The runtime model — one `sing-box` process, state, ports, probes — is in
 [How it works](docs/how-it-works.md). What is supported today is in
 [Current status](docs/status.md).
 
-## Get started
+# For AI Coding Agents
+
+**[alle for agents](docs/for-agents.md)** — copy-paste to your coding agent to
+teach them how to use alle. It carries the model, the facts that change how the
+code is written, and links it can fetch on demand.
+
+# Quick Start
+
+For macOS + Linux: installs alle and its user-level login service
 
 ```bash
-# macOS + Linux: installs alle and its user-level login service
-curl -LsSf \
-  https://github.com/zydo/alle/releases/latest/download/install.sh | sh
+curl -LsSf https://github.com/zydo/alle/releases/latest/download/install.sh | sh
+```
 
-alle providers add nordvpn
+Then add a VPN provider (use NordVPN as example) and create a connection ("channel").
+
+```bash
+alle providers add nordvpn      # will ask you for NordVPN token
 alle channels add nordvpn --country "United States"
 alle start
 alle channels ls                # prints each channel's local proxy port
 ```
 
-Point anything proxy-aware at a channel's port, and it exits there.
-
 Homebrew, `uv`, `pipx`, Docker, the checksum-verified manual install, and the
 uninstaller are all in **[Getting started](docs/getting-started.md)**; container
 deployments are in **[Docker](docs/docker.md)**.
 
-## Documentation
+# Documentation
 
-**Using alle**
+## Using alle
 
 - **[Getting started](docs/getting-started.md)** — install, quick start,
   provider setup, everyday commands, channel enable/disable.
@@ -121,8 +132,10 @@ deployments are in **[Docker](docs/docker.md)**.
 - **[CLI reference](docs/cli-reference.md)** — every command, flag, and
   environment variable.
 
-**Automating alle**
+## Automating alle
 
+- **[alle for agents](docs/for-agents.md)** — the entry point to hand a coding
+  agent: model, minimal call set, failure modes, progressive links.
 - **[REST API](docs/api.md)** — the `/api/v1` contract: everything the CLI can
   do, over HTTP with Bearer auth. Loopback by default; opt-in network exposure
   for compose siblings. Machine-readable spec:
@@ -131,7 +144,7 @@ deployments are in **[Docker](docs/docker.md)**.
   **[bundle format](docs/bundle.md)** — the whole setup (providers, channels,
   rules) as one YAML file: backup/restore, startup config, secret indirection.
 
-**Deploying alle**
+## Deploying alle
 
 - **[Docker](docs/docker.md)** — image design, proxy hub, VPN gateway
   container (tun), trust boundaries.
@@ -141,7 +154,7 @@ deployments are in **[Docker](docs/docker.md)**.
 - **[TUN runbook](docs/tun-runbook.md)** — whole-machine capture: privilege
   models per platform, verification, rollback.
 
-**Understanding alle**
+## Understanding alle
 
 - **[How it works](docs/how-it-works.md)** — the runtime model: one sing-box,
   state, ports, probes.
@@ -151,11 +164,13 @@ deployments are in **[Docker](docs/docker.md)**.
   handling, Web UI/API hardening, fail-closed routing.
 - **[VPN provider research](docs/vpn-provider-research.md)** — which providers
   can be supported next, and why some can't.
+- **[alle and gluetun](docs/gluetun-comparison.md)** — how the two differ, and
+  how to choose between them.
 
-## Security and privacy
+# Security and privacy
 
 See the **[Security model](docs/security.md)**.
 
-## License
+# License
 
 MIT
