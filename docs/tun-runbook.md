@@ -64,6 +64,37 @@ its test harness ancestor; the runbook's host-safety rules don't apply there
 because a container netns is exactly the isolation this tier map exists to
 provide.
 
+Tier 3 entrypoints (automated — the manual recipe below still applies for
+anything the scripts do not cover):
+
+```bash
+scripts/tier3-macos/run.sh                   # IPv6 tun verification, end to end
+scripts/tier3-macos/run.sh guest-probe.sh    # just report what the guest can do
+VM=scratch scripts/tier3-macos/run.sh        # use a different clone
+```
+
+`run.sh` clones the base image, boots it headless, installs alle from the
+checkout, and runs the named guest script over SSH — everything privileged
+happens in the guest. `guest-v6.sh` imports a v6-capable and a v4-only
+WireGuard `.conf` (generated fresh by `make-confs.py`, never committed:
+alle validates them as real keys), activates a real `utun225` under a trial,
+and checks that no v6 escapes unencapsulated while it is up — against a
+baseline that proves the same probe *does* escape with the tun down.
+
+It cleans up after itself on entry, which matters: killing sing-box alone
+never sticks (a stray applier's supervision restarts it within a second, and
+the binary is version-suffixed, so `pkill -x sing-box` does not match), and
+an orphaned tun makes the next run fail with `configure tun interface:
+Connect: resource busy`. Note also that `alle tun off` is a reconcile, not a
+synchronous unplug — the interface clears in about two seconds, so poll for
+it rather than sleeping a fixed amount.
+
+What Tier 3 deliberately does not decide: with unreachable peers no tunnel
+completes a handshake, so *which* channel a destination was routed to is not
+observable here — both channels emit 148-byte handshake initiations
+regardless of traffic. That discrimination belongs to Tier 2, which swaps the
+endpoints for direct outbounds precisely so the choice becomes visible.
+
 Tier 3 connect / reset recipe (verified 2026-07-11 against
 `macos-tahoe-base`, macOS 26.5):
 
