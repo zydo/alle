@@ -26,16 +26,16 @@ same time.
 
 ## Where they differ
 
-|                          | gluetun                                        | alle                                                                         |
-| ------------------------ | ---------------------------------------------- | ---------------------------------------------------------------------------- |
-| Concurrent VPN locations | One per container                              | Many in one process                                                          |
-| Choosing the exit        | Which container you attach to                  | A rule table matched per request                                             |
-| Providers                | 23, OpenVPN for all of them                    | 2 (growing, and [more planned](vpn-provider-research.md))                    |
-| Protocols                | OpenVPN + WireGuard                            | WireGuard only                                                               |
-| Kill switch              | Firewall rules in the container                | Route rules; unmatched traffic blocked                                       |
-| Control API              | Status, start/stop, port forwarding, public IP | Status, start/stop, route rules, connection lifecycles, via CLI and REST API |
-| Runs on                  | Docker                                         | Docker, or as a host service (launchd / `systemd --user`)                    |
-| Whole-machine capture    | Container netns; LAN devices via the gateway   | Same in a container, plus host TUN mode                                      |
+|                          | gluetun                                        | alle                                                                           |
+| ------------------------ | ---------------------------------------------- | ------------------------------------------------------------------------------ |
+| Concurrent VPN locations | One per container                              | Many in one process                                                            |
+| Choosing the exit        | Which container you attach to                  | A rule table matched per request                                               |
+| Providers                | 23, OpenVPN for all of them                    | 2 (growing — [22 planned](vpn-provider-research.md), close to gluetun's list)  |
+| Protocols                | OpenVPN + WireGuard                            | WireGuard ([OpenVPN planned](vpn-provider-research.md), pending sing-box 1.14) |
+| Kill switch              | Firewall rules in the container                | Route rules; unmatched traffic blocked                                         |
+| Control API              | Status, start/stop, port forwarding, public IP | Status, start/stop, route rules, connection lifecycles, via CLI and REST API   |
+| Runs on                  | Docker                                         | Docker, or as a host service (launchd / `systemd --user`)                      |
+| Whole-machine capture    | Container netns; LAN devices via the gateway   | Same in a container, plus host TUN mode                                        |
 
 ## Worked example: three exits, routed by destination
 
@@ -119,8 +119,9 @@ the next section exists.
 
 - Your provider is one of the 23 it supports and not one of alle's two. This is
   the common case today, and it is a real reason to stop reading here.
-- You need OpenVPN, or a provider that only offers WireGuard through gluetun's
-  custom-provider path.
+- You need OpenVPN today, or a provider that only offers WireGuard through
+  gluetun's custom-provider path. (alle's OpenVPN support is only
+  [planned](vpn-provider-research.md), gated on sing-box 1.14 stabilizing.)
 - One exit is all you want, and "every container in this stack goes through
   Sweden" is the whole requirement.
 - You want provider-side port forwarding for a torrent client — alle has no

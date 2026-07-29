@@ -36,15 +36,16 @@ Which providers can come next, and why some cannot, is in
 
 ## Planned next
 
-- More WireGuard-capable VPN providers — see
-  [VPN provider research](vpn-provider-research.md).
+- More VPN providers, WireGuard now and OpenVPN once sing-box 1.14 stabilizes —
+  see [VPN provider research](vpn-provider-research.md).
 - Desktop companion with OS-level VPN integration.
 - Windows support and broader distribution.
 
 ## Non-goals
 
-- OpenVPN or IKEv2/IPsec support.
-- VPN providers without usable WireGuard support — the excluded list and the
-  reasoning for each is in [VPN provider research](vpn-provider-research.md).
+- IKEv2/IPsec support.
+- VPN providers without a usable WireGuard or (once supported) OpenVPN
+  credential path — the excluded list and the reasoning for each is in
+  [VPN provider research](vpn-provider-research.md).
 - SOCKS5-only or unencrypted proxy providers.
 - Bundling `sing-box` inside the Python package.

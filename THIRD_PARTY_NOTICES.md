@@ -92,14 +92,30 @@ source below and **not redrawn**: the only processing is a proportional resize
 and centring on a uniform white rounded tile, so every mark stays legible in
 both light and dark READMEs.
 
-| Provider                | Source                                                                                                            | Trademark holder              |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------- |
-| NordVPN                 | `sb.nordcdn.com/m/5dd86f435e9b1aea/original/nordvpn-symbolBlue.svg`                                               | Nord Security                 |
-| Proton VPN              | `pmecdn.protonweb.com` → `static/logos/vpn/vpn-badge.svg`                                                         | Proton AG                     |
-| Mullvad                 | `mullvad.net/favicon.svg`                                                                                         | Mullvad VPN AB                |
-| IVPN                    | `github.com/ivpn/desktop-app` → `ui/References/Linux/ui/ivpnicon.svg` (GPL-3.0 repo, no separate trademark grant) | IVPN / Privatus Limited       |
-| Private Internet Access | `assets-cms.privateinternetaccess.com/photos/shares/pia-homepage/PIA-Logo.svg`                                    | Private Internet Access, Inc. |
-| VyprVPN                 | `www.vyprvpn.com/site/templates/images/vyprvpn_logo.svg`                                                          | Certida                       |
+| Provider                | Source                                                                                                                                                               | Trademark holder               |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| NordVPN                 | `sb.nordcdn.com/m/5dd86f435e9b1aea/original/nordvpn-symbolBlue.svg`                                                                                                  | Nord Security                  |
+| Proton VPN              | `pmecdn.protonweb.com` → `static/logos/vpn/vpn-badge.svg`                                                                                                            | Proton AG                      |
+| Mullvad                 | `mullvad.net/favicon.svg`                                                                                                                                            | Mullvad VPN AB                 |
+| IVPN                    | `github.com/ivpn/desktop-app` → `ui/References/Linux/ui/ivpnicon.svg` (GPL-3.0 repo, no separate trademark grant)                                                    | IVPN / Privatus Limited        |
+| Private Internet Access | `assets-cms.privateinternetaccess.com/photos/shares/pia-homepage/PIA-Logo.svg`                                                                                       | Private Internet Access, Inc.  |
+| VyprVPN                 | `www.vyprvpn.com/site/templates/images/vyprvpn_logo.svg`                                                                                                             | Certida                        |
+| AirVPN                  | Google Play Store listing icon for `org.airvpn.eddie` (`play-lh.googleusercontent.com`, 512×512) — airvpn.org itself only publishes a 16×16 favicon of the same mark | AirVPN                         |
+| Windscribe              | `windscribe.com/favicon.ico` (48×48 frame)                                                                                                                           | Windscribe Limited             |
+| Surfshark               | `surfshark.com/website/_next/public/global/favicon-192.png`                                                                                                          | Surfshark B.V.                 |
+| PrivateVPN              | `privatevpn.com/apple-touch-icon.png`                                                                                                                                | PrivateVPN                     |
+| VPN Unlimited           | `vpnunlimited.com/icon.png`                                                                                                                                          | KeepSolid Inc.                 |
+| IPVanish                | `ipvanish.com/wp-content/uploads/2021/10/cropped-ipv-icon-270x270.png`                                                                                               | IPVanish                       |
+| TorGuard                | `torguard.net/favicon.ico` (32×32 frame — no larger icon-only mark is published)                                                                                     | TorGuard                       |
+| PrivadoVPN              | `privadovpn.com/favicon.svg`                                                                                                                                         | Privado Networks, Inc.         |
+| VPN.ac                  | `vpn.ac/assets/images/touch-icon.png`                                                                                                                                | VPN.ac                         |
+| PureVPN                 | `purevpn.com/wp-content/uploads/2023/02/cropped-pvpn-favicon-img-192x192.png`                                                                                        | PureVPN                        |
+| FastestVPN              | `fastestvpn.com/favicon.ico` (32×32 frame — no larger icon-only mark is published)                                                                                   | FastestVPN                     |
+| ExpressVPN              | `expressvpn.com/apple-touch-icon.png`                                                                                                                                | Express VPN International Ltd. |
+| CyberGhost              | `cyberghostvpn.com/apple-touch-icon.png`                                                                                                                             | CyberGhost S.R.L.              |
+| HideMyAss (HMA)         | `static2.hidemyass.com` → `web/i/icons/favicon/android-chrome-256x256.png`                                                                                           | HideMyAss (HMA VPN)            |
+| SlickVPN                | `slickvpn.com/assets/logo-icon.png`                                                                                                                                  | SlickVPN                       |
+| VPNSecure.me            | `vpnsecure.me/favicon.svg`                                                                                                                                           | VPNSecure.me                   |
 
 One asset was edited beyond resizing: VyprVPN publishes no standalone icon, only
 a combined lockup. The wordmark group was removed and the viewBox re-fit to the
@@ -118,5 +134,4 @@ which is the nominative use described above; neither provider has reviewed or
 approved this project. Remove either on request from the trademark holder.
 
 alle is an independent project and is not affiliated with, endorsed by, or
-sponsored by Nord Security, Proton AG, Mullvad VPN AB, IVPN, Private Internet
-Access, Certida, or any VPN provider.
+sponsored by any of the trademark holders listed above, or any VPN provider.

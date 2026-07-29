@@ -1,23 +1,40 @@
 # VPN Provider Research
 
 Reference for which providers `alle` can support and how, given that the engine
-is **sing-box** (not OpenVPN). Snapshot: **2026-07**, verified against provider documentation.
+is **sing-box**, verified against provider documentation.
+
+sing-box speaks **WireGuard** today (what `alle` uses for every implemented and
+planned provider below) and gains an [OpenVPN Client
+endpoint](https://sing-box.sagernet.org/configuration/endpoint/openvpn-client/)
+in **v1.14** (currently a prerelease/beta; stable is still v1.13.x), compatible
+with standard OpenVPN servers (TLS mode, username/password or certificate auth,
+`tls-auth`/`tls-crypt` control-channel wrapping — the same fields a provider's
+`.ovpn` file carries). Once that release stabilizes and alle integrates an
+OpenVPN provider archetype (not yet started — new engine-integration work), the
+**OpenVPN-only providers** section below becomes buildable too. See
+`.localonly/Backlog.md` (item 9's exclusion list and the "non-WireGuard
+protocols out of scope" guardrail) for the implementation-side status — this
+document is research, not a shipped feature.
 
 ## Key conclusions
 
-1. **sing-box cannot speak OpenVPN or IKEv2/IPsec.** The only usable protocols for
-   commercial VPNs are **WireGuard**, SOCKS5 (excluded — unencrypted), and Shadowsocks
-   (niche). OpenVPN-only providers are unsupportable.
-2. **`alle` is WireGuard-first + encrypted-only.** No OpenVPN-only providers, no
-   unencrypted SOCKS5. Credentials come from the provider API where one exists,
-   else from importing the provider's WireGuard `.conf`.
-3. **"Supports WireGuard" is not the bar — exporting it is.** Several providers run
-   WireGuard *inside their own apps only* (sometimes as a customized,
-   non-interoperable variant) with no config download or key API. Those are just as
-   unsupportable as OpenVPN-only providers. As IPVanish's own announcement put it:
-   "most VPN providers only offer WireGuard connections through their apps rather
-   than allowing manual configuration options." The disqualifier is apps-only
-   WireGuard, not WireGuard absence.
+1. **The provider bar is protocol-exportable, not protocol-specific.** A
+   provider qualifies if either its WireGuard config/keys are self-service
+   extractable today, or its OpenVPN username/password + config will be once
+   alle can speak OpenVPN. SOCKS5 is excluded outright (unencrypted); Shadowsocks
+   is niche among commercial VPNs.
+2. **`alle` is encrypted-only.** No unencrypted SOCKS5, ever. Credentials come
+   from the provider API where one exists, else from importing the provider's
+   config (WireGuard `.conf` today; OpenVPN `.ovpn`-equivalent planned).
+3. **"Supports \[protocol\]" is not the bar — exporting it is.** Several providers
+   run WireGuard *inside their own apps only* (sometimes as a customized,
+   non-interoperable variant) with no config download or key API. Those are just
+   as unsupportable as protocol-absent providers. As IPVanish's own announcement
+   put it: "most VPN providers only offer WireGuard connections through their
+   apps rather than allowing manual configuration options." The disqualifier is
+   apps-only lockdown, not protocol absence — and it applies the same way to
+   OpenVPN: a provider whose only OpenVPN path is inside their app doesn't
+   qualify either, even once alle can speak OpenVPN.
 
 ## Provider archetypes
 
@@ -74,11 +91,58 @@ offer standard WireGuard config download/generation from their portal:
 | PureVPN    | Portal generates WireGuard configs, but they **expire** ("activate within 30 minutes… or redownload") — hostile to alle's stored-config model; expect frequent re-imports |
 | FastestVPN | WireGuard `.conf` provided **only via support email** — no self-service generator; provisioning is manual and slow                                                        |
 
+## OpenVPN-only providers (planned, gated on sing-box 1.14)
+
+These providers have no exportable WireGuard (apps-only, or no WireGuard at all),
+which is why the "Excluded providers" section below used to rule them out
+entirely. Each does, however, publish a genuinely self-service OpenVPN
+username/password + config outside their own app — no app-only lockdown, the
+same disqualifier the WireGuard providers above are held to. They become
+supportable once sing-box 1.14 stabilizes and alle adds an OpenVPN provider
+archetype:
+
+| Provider        | Credential shape                                     | Config source                                                                                                  | Notes                                                                                                                                                         |
+| --------------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ExpressVPN      | Username & password (ExpressVPN+ dashboard)          | "Manual Configuration" page — per-region `.ovpn`, credentials shown on screen                                  | Same account that's WireGuard-apps-only; manual OpenVPN setup is fully self-service and is their *only* published manual path (routers, Linux, pfSense)       |
+| CyberGhost      | Account username & password                          | "Configure Device" portal generates `.ovpn`                                                                    | The same portal that's OpenVPN-only for WireGuard purposes now qualifies it directly                                                                          |
+| HideMyAss (HMA) | Main HMA account username & password                 | VPN Control Panel; manual OpenVPN via Terminal/NetworkManager, no app needed                                   | Router-specific integration reportedly discontinued (FlashRouters), but manual OpenVPN using the account password is still current per HMA's own support docs |
+| SlickVPN        | Main account username & password (same as app login) | Public `.ovpn` download (`slickvpn.com/tutorials/using-openvpn-configuration-files`) + Linux CLI / QNAP guides | Explicitly documented as distinct from the separate IPSec password — OpenVPN uses the main account password                                                   |
+| VPNSecure.me    | Account username & password                          | Manual OpenVPN config download + "regenerate key files" from the account portal                                | Router/pfSense guides are self-service, no app dependency                                                                                                     |
+
+**Permanently excluded regardless of protocol:**
+
+- **Perfect Privacy** — the service **shut down entirely around 2026-01-30**
+  (website stopped loading, support unreachable, server count had collapsed to
+  6 in the prior months). This is a business-continuity fact, not a protocol
+  gap — irrelevant whether sing-box speaks OpenVPN or not.
+- **Giganews** — a Usenet service whose VPN is a **VyprVPN white-label**, not an
+  independent provider. It rides whichever protocol VyprVPN's own path uses
+  (WireGuard today, via VyprVPN's WireGuard API — see the post-MVP token/API
+  table above) if that's ever implemented; it does not need its own entry.
+
+## Coverage vs. gluetun
+
+gluetun supports 23 providers (OpenVPN for all of them, WireGuard for a subset —
+see `docs/gluetun-comparison.md`): AirVPN, CyberGhost, ExpressVPN, FastestVPN,
+Giganews, HideMyAss, IPVanish, IVPN, Mullvad, NordVPN, Perfect Privacy, Privado,
+Private Internet Access, PrivateVPN, ProtonVPN, PureVPN, SlickVPN, Surfshark,
+TorGuard, VPNSecure.me, VPN Unlimited, VyprVPN, Windscribe.
+
+Combining every WireGuard-plannable provider above with the five OpenVPN-planned
+ones gives alle a **22-provider target list** — identical to gluetun's 23 minus
+the two that aren't real, distinct, live providers: Perfect Privacy (defunct) and
+Giganews (a VyprVPN white-label, tracked under VyprVPN). Every provider gluetun
+supports that is still an operating, independent business is on alle's plan too
+— alle additionally plans VPN.ac, which gluetun does not support. Getting there
+still requires: shipping the post-MVP WireGuard providers (Backlog item 2/9),
+sing-box 1.14 reaching a stable release, and alle adding an OpenVPN provider
+archetype (not started — see `.localonly/Backlog.md`).
+
 ## IPv6 support (planned providers)
 
-Snapshot: **2026-07**, checked against each provider's own support/knowledge-base
-articles. Scope is the post-MVP providers above (NordVPN and ProtonVPN are already
-implemented, not "planned", and are omitted). For `alle`, what matters is whether the
+Checked against each provider's own support/knowledge-base articles. Scope is the
+post-MVP providers above (NordVPN and ProtonVPN are already implemented, not
+"planned", and are omitted). For `alle`, what matters is whether the
 provider's **WireGuard config/API actually assigns a routable IPv6 address** — a
 generic "IPv6 leak protection" feature just blocks IPv6 outside the tunnel and is not
 IPv6 support.
@@ -110,26 +174,40 @@ avoid leaking outside the tunnel.
 
 ## Excluded providers
 
-- **ExpressVPN** — *has* WireGuard (since ~2025), but only as a **customized,
-  non-interoperable variant inside their apps** (post-quantum handshake, ephemeral
-  keys, dynamic IPs). Every manual-setup path they publish (Windows, macOS, Linux,
-  pfSense, all routers) is **OpenVPN-only**; no standard config export, no key API.
-- **CyberGhost** — WireGuard **in their apps only** (Android/iOS/Linux CLI app);
-  the "Configure Device" portal generates **OpenVPN configs exclusively**.
-- **HideMyAss (HMA)** — no WireGuard manual configuration exists anywhere in their
-  support catalog; device/router setup is OpenVPN-only, everything else is
-  app-centric.
-- **Perfect Privacy** — **no WireGuard at all** (confirmed by current third-party
-  reviews); OpenVPN/IPsec only.
-- **SlickVPN** — OpenVPN/IPsec/PPTP only; no WireGuard.
-- **VPNSecure** — OpenVPN/PPTP only; no WireGuard.
-- **Giganews** — a Usenet service whose VPN is a **VyprVPN white-label**; not a
-  provider in its own right. If VyprVPN's API path is ever implemented, Giganews
-  bundles may ride it — track under VyprVPN.
+Only two providers are excluded outright now (no protocol unlocks them) — see
+"Permanently excluded regardless of protocol" under **OpenVPN-only providers**
+above for Perfect Privacy (defunct) and Giganews (VyprVPN white-label). Every
+other provider excluded on WireGuard alone (ExpressVPN, CyberGhost, HideMyAss,
+SlickVPN, VPNSecure — all apps-only or absent on WireGuard) now has an OpenVPN
+path instead; see that same section for credential shape and
+sources.
 
 ## Sources
 
 - sing-box outbound protocols — <https://sing-box.sagernet.org/configuration/outbound/>
+- sing-box OpenVPN Client endpoint (v1.14) —
+  <https://sing-box.sagernet.org/configuration/endpoint/openvpn-client/>; release
+  notes — <https://github.com/SagerNet/sing-box/releases> ("Add OpenVPN client
+  and server support")
+- gluetun supported providers — <https://github.com/qdm12/gluetun> (README
+  features list); per-provider OpenVPN credential shape —
+  <https://raw.githubusercontent.com/qdm12/gluetun-wiki/main/setup/providers/>
+  (expressvpn.md, cyberghost.md, hidemyass.md, slickvpn.md, giganews.md — all
+  `OPENVPN_USER`/`OPENVPN_PASSWORD`)
+- ExpressVPN manual OpenVPN setup (self-service username/password + per-region
+  `.ovpn`) —
+  <https://www.expressvpn.com/support/vpn-setup/manual-config-for-asus-router-with-openvpn>
+- CyberGhost OpenVPN setup (portal-generated config + account credentials) —
+  <https://support.cyberghostvpn.com/hc/en-us/articles/360007929314-Set-Up-OpenVPN-on-Linux-Ubuntu-via-Network-Manager>
+- HideMyAss manual OpenVPN (main account password, no app) —
+  <https://support.hidemyass.com/s/article/connection-issues>
+- SlickVPN OpenVPN (main account username/password, public `.ovpn` download) —
+  <https://www.slickvpn.com/tutorials/using-openvpn-configuration-files>,
+  <https://www.slickvpn.com/guides/linux-cli>
+- VPNSecure.me manual OpenVPN (account portal config download) —
+  <https://support.vpnsecure.me/articles/getting-started-dd-wrt-routers/pfsense>
+- Perfect Privacy shutdown (~2026-01-30) —
+  <https://cyberinsider.com/vpn/reviews/perfect-privacy>
 - NordVPN API — `api.nordvpn.com/v1/servers/countries`, `/v1/users/services/credentials`
 - Mullvad WireGuard API + generator — <https://api.mullvad.net/app/v1/wireguard-keys>,
   <https://mullvad.net/en/account/wireguard-config>
