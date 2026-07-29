@@ -51,6 +51,7 @@ Tier 2 entrypoints:
 ```bash
 scripts/tun-sandbox/run.sh                                        # design-assumption smoke
 scripts/tun-sandbox/run.sh /repo/scripts/tun-sandbox/engine-smoke.sh  # the engine-GENERATED config, live
+scripts/tun-sandbox/run.sh /repo/scripts/tun-sandbox/smoke-v6.sh      # IPv6 guards: carried, dropped, never leaked
 scripts/tun-sandbox/run.sh /repo/scripts/tun-sandbox/setcap-smoke.sh  # Linux setcap (no-root) privilege path
 scripts/tun-sandbox/run.sh bash                                   # interactive shell
 ```

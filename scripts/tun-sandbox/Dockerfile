@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pycountry \
     python3-yaml \
+    tcpdump \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home sandbox
 
