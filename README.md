@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/wordmark.svg" alt="alle" width="320">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/wordmark-dark.svg">
+    <img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/wordmark.svg" alt="alle" width="320">
+  </picture>
 </p>
 
 <p align="center">
