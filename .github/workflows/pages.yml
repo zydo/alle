@@ -8,6 +8,8 @@ on:
       - "README.md"
       - "mkdocs.yml"
       - "scripts/build-docs-site.sh"
+      - "scripts/gen_docs_homepage.py"
+      - "src/alle/assets/icon.svg"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 

@@ -292,8 +292,11 @@ class AuthField:
 
 
 # The registry. ``kind`` is "token" (API-backed) or "config" (portal .conf).
-# ``functional`` marks providers wired end-to-end; alle only ships NordVPN (token)
-# and Proton VPN (config) — together they cover both archetypes.
+# ``functional`` marks *token* providers whose API resolver is wired up —
+# config-kind providers are never gated by this flag (they're gated by
+# ``kind`` instead, since there's no API to resolve). alle ships exactly one
+# of each archetype today: NordVPN (token, ``functional: True``) and Proton
+# VPN (config, resolved via ``kind == "config"`` regardless of this flag).
 REGISTRY: dict[str, dict] = {
     "nordvpn": {
         "name": "NordVPN",

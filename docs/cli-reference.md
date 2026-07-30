@@ -15,29 +15,29 @@ omit the checkout prefix.
   - [Conventions](#conventions)
   - [Concepts](#concepts)
   - [`alle providers`](#alle-providers)
-    - [`alle providers add <provider>`](#alle-providers-add-provider)
+    - [`alle providers add PROVIDER`](#alle-providers-add-provider)
     - [`alle providers ls [--json]`](#alle-providers-ls---json)
-    - [`alle providers rm <provider>... [--all] [--dry-run] [-y|--yes]`](#alle-providers-rm-provider---all---dry-run--y--yes)
+    - [`alle providers rm PROVIDER... [--all] [--dry-run] [-y|--yes]`](#alle-providers-rm-provider---all---dry-run--y--yes)
   - [`alle channels`](#alle-channels)
-    - [`alle channels add <provider> …`](#alle-channels-add-provider-)
+    - [`alle channels add PROVIDER …`](#alle-channels-add-provider-)
     - [`alle channels ls [--json|--ids|--refs]`](#alle-channels-ls---json--ids--refs)
-    - [`alle channels setlabel <channel> [label]`](#alle-channels-setlabel-channel-label)
-    - [`alle channels rm <channel>...`](#alle-channels-rm-channel)
-    - [`alle channels enable/disable <channel>...`](#alle-channels-enabledisable-channel)
+    - [`alle channels setlabel CHANNEL [label]`](#alle-channels-setlabel-channel-label)
+    - [`alle channels rm CHANNEL...`](#alle-channels-rm-channel)
+    - [`alle channels enable/disable CHANNEL...`](#alle-channels-enabledisable-channel)
   - [`alle routes`](#alle-routes)
-    - [`alle routes ruleset create <name> --via <target> --<matcher>...`](#alle-routes-ruleset-create-name---via-target---matcher)
-    - [`alle routes ruleset add <ruleset> --<matcher>...`](#alle-routes-ruleset-add-ruleset---matcher)
-    - [`alle routes ruleset rm <ruleset> [--dry-run]`](#alle-routes-ruleset-rm-ruleset---dry-run)
-    - [`alle routes ruleset rename <ruleset> <name>` / `retarget <ruleset> <target>`](#alle-routes-ruleset-rename-ruleset-name--retarget-ruleset-target)
-    - [`alle routes ruleset update <ruleset> <name> --via <target> --<matcher>...`](#alle-routes-ruleset-update-ruleset-name---via-target---matcher)
-    - [`alle routes ls [--channel <ref>] [--flat] [--json]`](#alle-routes-ls---channel-ref---flat---json)
-    - [`alle routes rm <id>...`](#alle-routes-rm-id)
-    - [`alle routes mv <id>... <ruleset>`](#alle-routes-mv-id-ruleset)
-    - [`alle routes reorder <ruleset-id>... [--flat] [--json]`](#alle-routes-reorder-ruleset-id---flat---json)
+    - [`alle routes ruleset create NAME --via TARGET --MATCHER...`](#alle-routes-ruleset-create-name---via-target---matcher)
+    - [`alle routes ruleset add RULESET --MATCHER...`](#alle-routes-ruleset-add-ruleset---matcher)
+    - [`alle routes ruleset rm RULESET [--dry-run]`](#alle-routes-ruleset-rm-ruleset---dry-run)
+    - [`alle routes ruleset rename RULESET NAME` / `retarget RULESET TARGET`](#alle-routes-ruleset-rename-ruleset-name--retarget-ruleset-target)
+    - [`alle routes ruleset update RULESET NAME --via TARGET --MATCHER...`](#alle-routes-ruleset-update-ruleset-name---via-target---matcher)
+    - [`alle routes ls [--channel REF] [--flat] [--json]`](#alle-routes-ls---channel-ref---flat---json)
+    - [`alle routes rm ID...`](#alle-routes-rm-id)
+    - [`alle routes mv ID... RULESET`](#alle-routes-mv-id-ruleset)
+    - [`alle routes reorder RULESET-ID... [--flat] [--json]`](#alle-routes-reorder-ruleset-id---flat---json)
     - [`alle routes killswitch [on|off]`](#alle-routes-killswitch-onoff)
     - [`alle routes lan [on|off]`](#alle-routes-lan-onoff)
     - [`alle routes geo [ls|refresh|source]`](#alle-routes-geo-lsrefreshsource)
-    - [`alle routes trace <destination> [--json]`](#alle-routes-trace-destination---json)
+    - [`alle routes trace DESTINATION [--json]`](#alle-routes-trace-destination---json)
   - [`alle locations`](#alle-locations)
   - [`alle status`](#alle-status)
   - [`alle start` / `stop` / `restart`](#alle-start--stop--restart)
@@ -46,12 +46,12 @@ omit the checkout prefix.
   - [`alle health [--json]`](#alle-health---json)
   - [`alle tun [on|off]`](#alle-tun-onoff)
   - [`alle test`](#alle-test)
-  - [`alle export [--out <file>]`](#alle-export---out-file)
+  - [`alle export [--out FILE]`](#alle-export---out-file)
   - [`alle backup [on|off|now]`](#alle-backup-onoffnow)
-  - [`alle import <file> [--replace] [--yes]`](#alle-import-file---replace---yes)
-  - [`alle sync <file>`](#alle-sync-file)
+  - [`alle import FILE [--replace] [--yes]`](#alle-import-file---replace---yes)
+  - [`alle sync FILE`](#alle-sync-file)
   - [`alle gateway init`](#alle-gateway-init)
-  - [`alle validate <file>`](#alle-validate-file)
+  - [`alle validate FILE`](#alle-validate-file)
   - [`alle logs`](#alle-logs)
   - [`alle ui`](#alle-ui)
   - [`alle daemon`](#alle-daemon)
@@ -119,7 +119,7 @@ config; its health is whatever the most recent background probe found.
 
 Manage VPN providers.
 
-### `alle providers add <provider>`
+### `alle providers add PROVIDER`
 
 Add a provider — **or replace an already-added token provider's token**.
 
@@ -170,7 +170,7 @@ NordVPN     token   ******8fb7
 Proton VPN  config  2 .conf files
 ```
 
-### `alle providers rm <provider>... [--all] [--dry-run] [-y|--yes]`
+### `alle providers rm PROVIDER... [--all] [--dry-run] [-y|--yes]`
 
 Remove one or more providers **and all their channels and stored credentials**.
 Prompts for confirmation unless `-y` is given.
@@ -196,7 +196,7 @@ alle providers rm --all --dry-run
 Manage channels under a provider. The two ways to add a channel are **mutually
 exclusive**, one per provider archetype.
 
-### `alle channels add <provider> …`
+### `alle channels add PROVIDER …`
 
 **Token/API providers** — locate a server by country (and optionally city):
 
@@ -273,7 +273,7 @@ alle channels ls --ids
 alle channels ls --refs
 ```
 
-### `alle channels setlabel <channel> [label]`
+### `alle channels setlabel CHANNEL [label]`
 
 Set (or, with no `label`, clear) a channel's display label. The label is
 presentation only — commands, routing rules, and metrics always use the id, so
@@ -292,7 +292,7 @@ the same `LABEL` + `ID` columns — `LABEL` is the label or the id when unset, `
 is the provider-qualified ref (`nordvpn/wg_jp_1`); `--json` on those carries the
 bare `name` (id), `provider`, and `label` separately.
 
-### `alle channels rm <channel>...`
+### `alle channels rm CHANNEL...`
 
 Remove one or more channels (also drops stored metrics).
 
@@ -318,7 +318,7 @@ alle channels rm --provider nordvpn --all
   is always its own explicit step, so a channel removal can never silently
   reroute traffic.
 
-### `alle channels enable/disable <channel>...`
+### `alle channels enable/disable CHANNEL...`
 
 Set a channel's **administrative state** without removing it. A **disabled**
 channel is kept in the config but not materialised at all: no local proxy
@@ -394,7 +394,7 @@ earlier rule (or the built-in LAN block, when on) already covers it.
 The entrypoint's port is shown by `alle status` and by `routes ls`; it is
 allocated on the first daemon start and then never changes.
 
-### `alle routes ruleset create <name> --via <target> --<matcher>...`
+### `alle routes ruleset create NAME --via TARGET --MATCHER...`
 
 Create a named ruleset: a contiguous, ordered block of matchers that all share
 one exit target. `<target>` is where matched traffic exits:
@@ -433,29 +433,29 @@ Notes:
   before `--domain api.google.com`), `routes ls` marks the later matcher as
   **shadowed** and it will never match.
 
-### `alle routes ruleset add <ruleset> --<matcher>...`
+### `alle routes ruleset add RULESET --MATCHER...`
 
 Add matcher(s) to an existing ruleset block. The new matchers inherit that
 ruleset's priority immediately; lower-priority duplicates are left in place and
 shown as shadowed rather than silently deleted.
 
-### `alle routes ruleset rm <ruleset> [--dry-run]`
+### `alle routes ruleset rm RULESET [--dry-run]`
 
 Remove a whole ruleset block. (A ruleset whose matchers are all removed via
 `routes rm` simply has no rows left, so it no longer appears.)
 
-### `alle routes ruleset rename <ruleset> <name>` / `retarget <ruleset> <target>`
+### `alle routes ruleset rename RULESET NAME` / `retarget RULESET TARGET`
 
 Rename a ruleset or change its exit target. Renaming is presentation-only and
 does not trigger a sing-box reconcile; retargeting does.
 
-### `alle routes ruleset update <ruleset> <name> --via <target> --<matcher>...`
+### `alle routes ruleset update RULESET NAME --via TARGET --MATCHER...`
 
 Replace a ruleset's name, target, and matchers in one atomic call, keeping its
 id and priority position — the per-ruleset editor's Apply (the Web UI uses the
 same operation). Matcher flags are the same as `ruleset create`.
 
-### `alle routes ls [--channel <ref>] [--flat] [--json]`
+### `alle routes ls [--channel REF] [--flat] [--json]`
 
 List rulesets in evaluation order. The header line shows the entrypoint address
 and its unmatched behavior. `--channel <name|provider/name>` filters to flat
@@ -472,7 +472,7 @@ rs2  Direct exceptions → direct (1 matcher(s))
   r3  ip_cidr 192.168.0.0/16
 ```
 
-### `alle routes rm <id>...`
+### `alle routes rm ID...`
 
 Remove matcher rows by id (`--dry-run` to preview). Unknown ids are reported all
 at once and nothing is removed.
@@ -482,7 +482,7 @@ alle routes rm r2
 alle routes rm r1 r3 --dry-run
 ```
 
-### `alle routes mv <id>... <ruleset>`
+### `alle routes mv ID... RULESET`
 
 Move matcher rows into another ruleset in **one transaction** — the moved
 matchers keep their ids, adopt the destination's target, and are appended at
@@ -501,7 +501,7 @@ alle routes mv r1 r4 r7 rs2      # several at once
 Shadow-lint warnings are re-checked after the move: a matcher that lands
 behind a covering rule in its new position is flagged immediately.
 
-### `alle routes reorder <ruleset-id>... [--flat] [--json]`
+### `alle routes reorder RULESET-ID... [--flat] [--json]`
 
 Replace the ruleset-block evaluation order with a full list of ruleset ids. Pass
 every existing ruleset id exactly once; ids stay stable and only their order
@@ -617,7 +617,7 @@ on every use. See [routing.md](routing.md#geo-matchers) for the full design.
 
 ---
 
-### `alle routes trace <destination> [--json]`
+### `alle routes trace DESTINATION [--json]`
 
 Which routing rule wins for a destination — an offline dry-run of the rule
 table. Nothing is sent through any tunnel (use [`alle test`](#alle-test) for a
@@ -948,7 +948,7 @@ cumulative usage trends, not exact accounting. (`--json` also carries a
 
 ---
 
-## `alle export [--out <file>]`
+## `alle export [--out FILE]`
 
 Write the entire setup — providers (with their credentials), channels of both
 archetypes, rulesets, and the router toggles — as one declarative YAML
@@ -1022,7 +1022,7 @@ How it runs:
 
 ---
 
-## `alle import <file> [--replace] [--yes]`
+## `alle import FILE [--replace] [--yes]`
 
 Apply a bundle. Two modes, one command:
 
@@ -1067,7 +1067,7 @@ caveats: [bundle.md](bundle.md).
 
 ---
 
-## `alle sync <file>`
+## `alle sync FILE`
 
 Converge on a bundle as the **managed desired state** — the startup-sync
 apply mode. This is what the Docker entrypoint runs on every container start;
@@ -1116,7 +1116,7 @@ actually holds.
 
 ---
 
-## `alle validate <file>`
+## `alle validate FILE`
 
 Check a bundle **without applying it** — a pre-import dry run. Reports **every**
 problem in one pass (never stopping at the first), each with the **line number**

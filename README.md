@@ -25,41 +25,36 @@ A universal VPN client that manages multiple VPN connections with rule-based rou
   </tr>
 </table>
 
-**Planned (WireGuard)**
-
-<table>
-  <tr>
-    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/mullvad.png" alt="" height="56"><br>Mullvad</td>
-    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/ivpn.png" alt="" height="56"><br>IVPN</td>
-    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/pia.png" alt="" height="56"><br>PIA</td>
-    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/vyprvpn.png" alt="" height="56"><br>VyprVPN</td>
-    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/airvpn.png" alt="" height="56"><br>AirVPN</td>
-  </tr>
-  <tr>
-    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/windscribe.png" alt="" height="56"><br>Windscribe</td>
-    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/surfshark.png" alt="" height="56"><br>Surfshark</td>
-    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/privatevpn.png" alt="" height="56"><br>PrivateVPN</td>
-    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/vpnunlimited.png" alt="" height="56"><br>VPN Unlimited</td>
-    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/ipvanish.png" alt="" height="56"><br>IPVanish</td>
-  </tr>
-  <tr>
-    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/torguard.png" alt="" height="56"><br>TorGuard</td>
-    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/privadovpn.png" alt="" height="56"><br>PrivadoVPN</td>
-    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/vpnac.png" alt="" height="56"><br>VPN.ac</td>
-    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/purevpn.png" alt="" height="56"><br>PureVPN</td>
-    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/fastestvpn.png" alt="" height="56"><br>FastestVPN</td>
-  </tr>
-</table>
-
-**Planned (OpenVPN, pending sing-box 1.14)**
+**Planned**
 
 <table>
   <tr>
     <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/expressvpn.png" alt="" height="56"><br>ExpressVPN</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/surfshark.png" alt="" height="56"><br>Surfshark</td>
     <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/cyberghost.png" alt="" height="56"><br>CyberGhost</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/pia.png" alt="" height="56"><br>PIA</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/windscribe.png" alt="" height="56"><br>Windscribe</td>
+  </tr>
+  <tr>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/ipvanish.png" alt="" height="56"><br>IPVanish</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/mullvad.png" alt="" height="56"><br>Mullvad</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/purevpn.png" alt="" height="56"><br>PureVPN</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/vyprvpn.png" alt="" height="56"><br>VyprVPN</td>
     <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/hidemyass.png" alt="" height="56"><br>HideMyAss</td>
-    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/slickvpn.png" alt="" height="56"><br>SlickVPN</td>
+  </tr>
+  <tr>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/vpnunlimited.png" alt="" height="56"><br>VPN Unlimited</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/privadovpn.png" alt="" height="56"><br>PrivadoVPN</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/torguard.png" alt="" height="56"><br>TorGuard</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/privatevpn.png" alt="" height="56"><br>PrivateVPN</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/fastestvpn.png" alt="" height="56"><br>FastestVPN</td>
+  </tr>
+  <tr>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/ivpn.png" alt="" height="56"><br>IVPN</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/airvpn.png" alt="" height="56"><br>AirVPN</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/vpnac.png" alt="" height="56"><br>VPN.ac</td>
     <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/vpnsecure.png" alt="" height="56"><br>VPNSecure.me</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/providers/slickvpn.png" alt="" height="56"><br>SlickVPN</td>
   </tr>
 </table>
 

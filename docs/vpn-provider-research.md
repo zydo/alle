@@ -124,7 +124,8 @@ archetype:
 
 gluetun supports 23 providers (OpenVPN for all of them, WireGuard for a subset —
 see `docs/gluetun-comparison.md`): AirVPN, CyberGhost, ExpressVPN, FastestVPN,
-Giganews, HideMyAss, IPVanish, IVPN, Mullvad, NordVPN, Perfect Privacy, Privado,
+Giganews, HideMyAss, IPVanish, IVPN, Mullvad, NordVPN, Perfect Privacy, Privado
+(gluetun's name for PrivadoVPN — same service as elsewhere in this document),
 Private Internet Access, PrivateVPN, ProtonVPN, PureVPN, SlickVPN, Surfshark,
 TorGuard, VPNSecure.me, VPN Unlimited, VyprVPN, Windscribe.
 
@@ -178,8 +179,8 @@ Only two providers are excluded outright now (no protocol unlocks them) — see
 "Permanently excluded regardless of protocol" under **OpenVPN-only providers**
 above for Perfect Privacy (defunct) and Giganews (VyprVPN white-label). Every
 other provider excluded on WireGuard alone (ExpressVPN, CyberGhost, HideMyAss,
-SlickVPN, VPNSecure — all apps-only or absent on WireGuard) now has an OpenVPN
-path instead; see that same section for credential shape and
+SlickVPN, VPNSecure.me — all apps-only or absent on WireGuard) now has an
+OpenVPN path instead; see that same section for credential shape and
 sources.
 
 ## Sources

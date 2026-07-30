@@ -80,8 +80,7 @@ paths:
                       type: boolean,
                       description: "True only while sing-box (the data plane) is running",
                     }
-                  sing_box:
-                    { type: string, enum: [running, stopped] }
+                  sing_box: { type: string, enum: [running, stopped] }
                   runtime:
                     type: [object, "null"]
                     description: >
@@ -470,7 +469,9 @@ paths:
       description: >
         `country` (+`city`) for API providers; `conf_text` (+`conf_name`)
         for config providers — mutually exclusive, exactly as the CLI's
-        --country/--config.
+        --country/--config. `port` declares the local proxy port instead
+        of an OS-assigned one, exactly as the CLI's --port; refused if
+        already held.
       operationId: addChannel
       requestBody:
         required: true
@@ -491,6 +492,11 @@ paths:
                   {
                     type: string,
                     description: Original file name (names the channel),
+                  }
+                port:
+                  {
+                    type: integer,
+                    description: Declare the local proxy port instead of an OS-assigned one,
                   }
       responses:
         "200": { $ref: "#/components/responses/GenericResult" }
