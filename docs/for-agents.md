@@ -1,5 +1,11 @@
 # alle for coding agents
 
+Click "Copy" on the block below and paste the whole thing into your coding
+agent's context.
+
+````markdown
+# alle for coding agents
+
 Entry point for integrating **alle** into a project. Read this, then fetch only
 the pages you need — every link below is a raw URL you can retrieve.
 
@@ -31,6 +37,40 @@ built-in LAN bypass · per-channel traffic totals and speed tests · whole-machi
 capture via TUN mode · whole setup exported and re-imported as one YAML bundle ·
 run as a host service or a container, including as a gateway other containers
 join.
+
+## Install the latest release
+
+Pick one, depending on where the code you're writing will run:
+
+- **Native host (macOS/Linux) — CLI, Web UI, and REST API together:**
+
+  ```bash
+  curl -LsSf https://github.com/zydo/alle/releases/latest/download/install.sh | sh
+  ```
+
+  Installs a pinned `uv` if needed, that release's exact `alle-proxy` version,
+  and the user-level login service. Never invokes `sudo`. Refuses containers
+  and WSL — use the Docker image there instead. On Linux, run after logout
+  too by replacing the trailing `sh` with `sh -s -- --linger`.
+
+- **Docker — sibling containers, compose stacks, CI:**
+
+  ```bash
+  docker pull ziyudo/alle:latest
+  docker run -d --name alle --restart unless-stopped \
+    --mount type=volume,src=alle-state,dst=/var/lib/alle \
+    --mount type=bind,src="$PWD/bundle.yaml",dst=/etc/alle/bundle.yaml,readonly \
+    ziyudo/alle:latest
+  docker exec alle alle status        # manage with the same CLI, via exec
+  ```
+
+  `latest` is a mutable tag; pin the digest (`ziyudo/alle@sha256:…`) when the
+  deployment must select identical bytes. Image:
+  <https://hub.docker.com/r/ziyudo/alle>.
+
+Both are the exact same `alle-proxy` release — same CLI, same REST contract.
+Pick the native installer for a host process, Docker for anything already
+containerized.
 
 ## Facts that change how you write the code
 
@@ -72,3 +112,4 @@ join.
 
 Read `GET /api/v1/status` before acting — most mistakes are a stale assumption
 about what exists and what is healthy.
+````

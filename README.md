@@ -13,8 +13,6 @@
 
 A universal VPN client that manages multiple VPN connections with rule-based routing, with interfaces for human (Web UI and CLI) and programs (REST API and Docker image).
 
-## VPN Providers
-
 **Supported**
 
 <table>
@@ -71,9 +69,9 @@ provider-specific constraints, and excluded providers.
   <em>Web UI</em>
 </p>
 
-# Why alle
+## Why alle
 
-## For people
+### For people
 
 You already pay for a commercial VPN — but its official client connects to one
 location at a time. Switching countries means disconnecting, reconnecting, and
@@ -90,7 +88,7 @@ alle's routing rules:
   </picture>
 </p>
 
-## For programs
+### For programs
 
 Every action the CLI performs is also a REST call, and each exit is a stable
 `127.0.0.1:<port>` proxy. So another program can drive the whole lifecycle of
@@ -108,7 +106,7 @@ You may also have heard of [gluetun](https://github.com/qdm12/gluetun) or
 gluetun](docs/gluetun-comparison.md) and [alle and
 vopono](docs/vopono-comparison.md) compare alle to each.
 
-# What alle does
+## What alle does
 
 `alle` runs multiple VPN exits side by side, each its own local HTTP+SOCKS
 proxy. One router entrypoint sends traffic by rule to an exit, straight out, or
@@ -121,13 +119,13 @@ The runtime model — one `sing-box` process, state, ports, probes — is in
 [How it works](docs/how-it-works.md). What is supported today is in
 [Current status](docs/status.md).
 
-# For AI Coding Agents
+## For AI Coding Agents
 
 **[alle for agents](docs/for-agents.md)** — copy-paste to your coding agent to
 teach them how to use alle. It carries the model, the facts that change how the
 code is written, and links it can fetch on demand.
 
-# Quick Start
+## Quick Start
 
 For macOS + Linux: installs alle and its user-level login service
 
@@ -148,9 +146,9 @@ Homebrew, `uv`, `pipx`, Docker, the checksum-verified manual install, and the
 uninstaller are all in **[Getting started](docs/getting-started.md)**; container
 deployments are in **[Docker](docs/docker.md)**.
 
-# Documentation
+## Documentation
 
-## Using alle
+### Using alle
 
 - **[Getting started](docs/getting-started.md)** — install, quick start,
   provider setup, everyday commands, channel enable/disable.
@@ -161,7 +159,7 @@ deployments are in **[Docker](docs/docker.md)**.
 - **[CLI reference](docs/cli-reference.md)** — every command, flag, and
   environment variable.
 
-## Automating alle
+### Automating alle
 
 - **[alle for agents](docs/for-agents.md)** — the entry point to hand a coding
   agent: model, minimal call set, failure modes, progressive links.
@@ -173,7 +171,7 @@ deployments are in **[Docker](docs/docker.md)**.
   **[bundle format](docs/bundle.md)** — the whole setup (providers, channels,
   rules) as one YAML file: backup/restore, startup config, secret indirection.
 
-## Deploying alle
+### Deploying alle
 
 - **[Docker](docs/docker.md)** — image design, proxy hub, VPN gateway
   container (tun), trust boundaries.
@@ -183,7 +181,7 @@ deployments are in **[Docker](docs/docker.md)**.
 - **[TUN runbook](docs/tun-runbook.md)** — whole-machine capture: privilege
   models per platform, verification, rollback.
 
-## Understanding alle
+### Understanding alle
 
 - **[How it works](docs/how-it-works.md)** — the runtime model: one sing-box,
   state, ports, probes.
@@ -198,10 +196,10 @@ deployments are in **[Docker](docs/docker.md)**.
 - **[alle and vopono](docs/vopono-comparison.md)** — request-level routing vs.
   per-process network-namespace isolation.
 
-# Security and privacy
+## Security and privacy
 
 See the **[Security model](docs/security.md)**.
 
-# License
+## License
 
 MIT

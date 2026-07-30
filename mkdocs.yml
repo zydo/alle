@@ -8,6 +8,8 @@ docs_dir: docs
 
 theme:
   name: material
+  logo: assets/icon.svg
+  favicon: assets/icon.svg
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
@@ -49,11 +51,11 @@ not_in_nav: |
 nav:
   - Home: index.md
   - Getting started: getting-started.md
-  - alle for agents: for-agents.md
+  - Prompt for coding agents: for-agents.md
   - Core:
-      - Rule-based routing: routing.md
       - How it works: how-it-works.md
       - Current status: status.md
+      - Rule-based routing: routing.md
       - Security model: security.md
       - VPN provider research: vpn-provider-research.md
   - Interfaces:
