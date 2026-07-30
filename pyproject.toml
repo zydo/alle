@@ -77,6 +77,7 @@ dev = [
     "shellcheck-py>=0.11",
     "shfmt-py>=3",
 ]
+docs = ["mkdocs>=1.6", "mkdocs-material>=9.5"]
 
 [tool.mypy]
 # Permissive baseline, enforced at zero errors in CI; strictness is ratcheted

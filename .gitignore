@@ -20,3 +20,6 @@ htmlcov/
 node_modules/
 test-results/
 playwright-report/
+# MkDocs build output and its generated (never tracked) homepage
+site/
+docs/index.md

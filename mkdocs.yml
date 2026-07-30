@@ -1,0 +1,71 @@
+site_name: alle
+site_description: A universal VPN client that manages multiple VPN connections with rule-based routing.
+site_url: https://zydo.github.io/alle/
+repo_url: https://github.com/zydo/alle
+repo_name: zydo/alle
+edit_uri: edit/main/docs/
+docs_dir: docs
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+    - toc.follow
+
+markdown_extensions:
+  - tables
+  - fenced_code
+  - toc:
+      permalink: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - admonition
+
+not_in_nav: |
+  openapi.yaml
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - alle for agents: for-agents.md
+  - Core:
+      - Rule-based routing: routing.md
+      - How it works: how-it-works.md
+      - Current status: status.md
+      - Security model: security.md
+      - VPN provider research: vpn-provider-research.md
+  - Interfaces:
+      - Web UI: web-ui.md
+      - CLI reference: cli-reference.md
+      - REST API: api.md
+      - Declarative setup: declarative-config.md
+      - Bundle format: bundle.md
+  - Docker:
+      - Docker: docker.md
+      - Docker Compose walkthrough: docker-compose.md
+  - TUN runbook: tun-runbook.md
+  - Compare with alternatives:
+      - alle and gluetun: gluetun-comparison.md
+      - alle and vopono: vopono-comparison.md
