@@ -103,8 +103,10 @@ It also ships as a container image ([`ziyudo/alle`](https://hub.docker.com/r/ziy
 so a compose stack can add it as one service and let sibling containers reach
 the internet through whichever exit the rules pick.
 
-You may also have heard of [gluetun](https://github.com/qdm12/gluetun),
-[alle and gluetun](docs/gluetun-comparison.md) compares the two.
+You may also have heard of [gluetun](https://github.com/qdm12/gluetun) or
+[vopono](https://github.com/jamesmcm/vopono) — [alle and
+gluetun](docs/gluetun-comparison.md) and [alle and
+vopono](docs/vopono-comparison.md) compare alle to each.
 
 # What alle does
 
@@ -193,6 +195,8 @@ deployments are in **[Docker](docs/docker.md)**.
   can be supported next, and why some can't.
 - **[alle and gluetun](docs/gluetun-comparison.md)** — how the two differ, and
   how to choose between them.
+- **[alle and vopono](docs/vopono-comparison.md)** — request-level routing vs.
+  per-process network-namespace isolation.
 
 # Security and privacy
 

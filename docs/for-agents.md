@@ -10,7 +10,9 @@ from different countries at the same time.
 
 **Wrong tool if** your provider is not NordVPN or Proton VPN (the common case —
 [compare with gluetun](https://raw.githubusercontent.com/zydo/alle/main/docs/gluetun-comparison.md)),
-you need OpenVPN, or one exit for everything is enough.
+you need OpenVPN today, one exit for everything is enough, or you want
+per-process namespace isolation on Linux rather than per-request routing
+([compare with vopono](https://raw.githubusercontent.com/zydo/alle/main/docs/vopono-comparison.md)).
 
 ## The model
 
