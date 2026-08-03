@@ -5,16 +5,9 @@ name: Supply Chain
 # every PR and push to main so problems surface pre-merge, plus a weekly sweep
 # to catch advisories published after a dependency was pinned. All Actions are
 # pinned to immutable commit SHAs; the trailing comment records the tag.
-#
-# workflow_dispatch matters for gitleaks specifically: push runs scan only the
-# pushed commits, so a fix to the allowlist cannot be verified by pushing it.
-# Manual (like scheduled) runs scan the full history, which is the mode a
-# .gitleaks.toml change has to be checked in — otherwise the next confirmation
-# is a week away.
 on:
   schedule:
     - cron: "17 6 * * 1" # weekly, Monday 06:17 UTC (off the :00 herd)
-  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
