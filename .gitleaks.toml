@@ -21,4 +21,7 @@ regexes = [
   '''^nGx4SECRETa91k$''',
   # .github/workflows/ci.yml ephemeral Docker-network API credential
   '''^ci-test-secret-0123456789$''',
+  # scripts/microbench.py WireGuard placeholder, since shortened to "PRIV=" but
+  # still reachable by the scheduled full-history sweep
+  '''^bench-private-key=$''',
 ]
