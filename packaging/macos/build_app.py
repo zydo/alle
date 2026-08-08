@@ -82,8 +82,8 @@ def app_paths(out: Path) -> dict[str, Path]:
 
 
 def build_swift(configuration: str) -> Path:
-    run(["swift", "build", "--package-path", "macos/AlleTray", "-c", configuration])
-    return ROOT / "macos" / "AlleTray" / ".build" / configuration / "AlleTray"
+    run(["swift", "build", "--package-path", "macos/Alle", "-c", configuration])
+    return ROOT / "macos" / "Alle" / ".build" / configuration / "Alle"
 
 
 def build_pyinstaller(work: Path) -> Path:
@@ -193,7 +193,7 @@ def copy_tray_status_icons(resources: Path) -> None:
     and renders them as template images. PDFs are committed alongside their SVG
     sources under the SPM target's Resources dir.
     """
-    src = ROOT / "macos" / "AlleTray" / "Sources" / "AlleTray" / "Resources"
+    src = ROOT / "macos" / "Alle" / "Sources" / "Alle" / "Resources"
     icons = sorted(src.glob("status-*.pdf"))
     if not icons:
         raise BuildError(f"no status-*.pdf tray icons found under {src}")
@@ -244,8 +244,8 @@ def _write_tray_skeleton(paths: dict, version: str, swift_binary: Path) -> None:
     )
     build_app_icon(paths["resources"])
     copy_tray_status_icons(paths["resources"])
-    shutil.copy2(swift_binary, paths["macos"] / "AlleTray")
-    chmod_exec(paths["macos"] / "AlleTray")
+    shutil.copy2(swift_binary, paths["macos"] / "Alle")
+    chmod_exec(paths["macos"] / "Alle")
     (paths["resources"] / "README.txt").write_text(
         (PACKAGING / "README.txt.template").read_text()
     )
@@ -313,7 +313,7 @@ def sign_app(app: Path, identity: str) -> None:
                 str(launcher),
             ]
         )
-    sign_path(app / "Contents" / "MacOS" / "AlleTray", identity)
+    sign_path(app / "Contents" / "MacOS" / "Alle", identity)
     run(["codesign", "--force", "--sign", identity, "--timestamp=none", str(app)])
     run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)])
 

@@ -9,7 +9,7 @@
     <key>CFBundleDisplayName</key>
     <string>Alle</string>
     <key>CFBundleExecutable</key>
-    <string>AlleTray</string>
+    <string>Alle</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>
