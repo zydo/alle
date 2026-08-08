@@ -1359,6 +1359,15 @@ def cmd_applier(args):
     daemon.run_applier()
 
 
+def cmd_lifecycle_run(args):
+    daemon._lifecycle_run(args.action, args.delay)
+
+
+def cmd_tun_trial_expire(args):
+    time.sleep(max(0.0, args.delay))
+    service.tun_trial_expire(args.nonce)
+
+
 def cmd_run(args):
     """The daemon loop in the foreground — a container's PID 1 (or an
     interactive debug run). Identical to the hidden ``applier`` body except
@@ -2015,6 +2024,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("applier").set_defaults(
         func=cmd_applier
     )  # internal: the daemon body
+    lr = sub.add_parser("lifecycle-run")
+    lr.add_argument("action", choices=["stop", "restart"])
+    lr.add_argument("--delay", type=float, default=0.0)
+    lr.set_defaults(func=cmd_lifecycle_run)
+    tt = sub.add_parser("tun-trial-expire")
+    tt.add_argument("nonce")
+    tt.add_argument("--delay", type=float, default=0.0)
+    tt.set_defaults(func=cmd_tun_trial_expire)
 
     # privileged tun helper (macOS): root LaunchDaemon that owns sing-box in
     # tun mode, installed once via sudo so `alle tun on` never needs sudo again.

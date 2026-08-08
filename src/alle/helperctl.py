@@ -24,7 +24,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from alle import applog, paths, proc
+from alle import applog, daemonctl, paths, proc
 from alle.helper import HELPER_LABEL, HELPER_SOCKET_DEFAULT
 
 LAUNCHD_PLIST = f"/Library/LaunchDaemons/{HELPER_LABEL}.plist"
@@ -83,10 +83,20 @@ def _real_uid() -> int:
 def _service_exec() -> list[str]:
     """The stable command the plist execs: the ``alle`` shim + ``helper-run``.
 
-    Prefers the console-script shim (stable across upgrades); falls back to
-    ``<python> -m alle helper-run`` only when no shim is on PATH. Mirrors
+    An app-bundled runtime must win over PATH. Helper install runs under
+    ``sudo``, which replaces PATH with ``secure_path``, so ``which("alle")``
+    from inside the macOS app would resolve a *brew/uv* shim and the root
+    helper would then exec CLI code against the app's ``ALLE_HOME`` — exactly
+    the cross-contamination the hermetic bundle exists to prevent. Mirror
+    :func:`alle.daemon._self_command` and take ``ALLE_EXECUTABLE`` first.
+
+    Otherwise prefer the console-script shim (stable across upgrades) and fall
+    back to ``<python> -m alle helper-run`` when no shim is on PATH, mirroring
     daemonctl so an upgrade never orphans the installed unit.
     """
+    exe = os.environ.get("ALLE_EXECUTABLE")
+    if exe and os.path.isabs(exe):
+        return [exe, "helper-run"]
     shim = shutil.which("alle")
     if shim:
         return [shim, "helper-run"]
@@ -95,19 +105,21 @@ def _service_exec() -> list[str]:
 
 def _plist_bytes(uid: int, alle_home: str) -> bytes:
     log = str(Path(alle_home) / "helper.log")
+    env = {
+        "ALLE_HELPER_ALLOWED_UID": str(uid),
+        "ALLE_HELPER_SOCKET": HELPER_SOCKET_DEFAULT,
+        "ALLE_HOME": alle_home,
+        # The helper runs as root out of the installing user's uv-tool
+        # venv. Without this, root would write root-owned .pyc into that
+        # venv and later `uv tool upgrade` would fail to remove them. A
+        # root daemon does not benefit from bytecode caching anyway.
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    env.update(daemonctl._app_env())
     plist = {
         "Label": HELPER_LABEL,
         "ProgramArguments": _service_exec(),
-        "EnvironmentVariables": {
-            "ALLE_HELPER_ALLOWED_UID": str(uid),
-            "ALLE_HELPER_SOCKET": HELPER_SOCKET_DEFAULT,
-            "ALLE_HOME": alle_home,
-            # The helper runs as root out of the installing user's uv-tool
-            # venv. Without this, root would write root-owned .pyc into that
-            # venv and later `uv tool upgrade` would fail to remove them. A
-            # root daemon does not benefit from bytecode caching anyway.
-            "PYTHONDONTWRITEBYTECODE": "1",
-        },
+        "EnvironmentVariables": env,
         "UserName": "root",
         "RunAtLoad": True,
         "KeepAlive": True,  # supervisor: respawn on crash

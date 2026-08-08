@@ -55,7 +55,7 @@ from alle import applog, paths, singbox
 # /var/run is root-owned (not world-writable like /tmp), so a non-root process
 # cannot pre-create the socket path and spoof the helper before it binds.
 HELPER_SOCKET_DEFAULT = "/var/run/alle.helper.sock"
-HELPER_LABEL = "com.github.zydo.alle.helper"
+HELPER_LABEL = "io.github.zydo.alle.helper"
 # Bumped when the protocol/behaviour changes; the client can refuse to delegate
 # to an older helper it cannot trust. v2: every state command carries the
 # caller's ALLE_HOME and the helper serves exactly one home.

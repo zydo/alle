@@ -1760,10 +1760,7 @@ def _spawn_tun_watchdog(seconds: int, nonce: str) -> None:
     keyed on the marker's nonce, so only the first matching watchdog acts.
     """
     daemon.spawn_detached(
-        "import time\n"
-        f"time.sleep({int(seconds)!r})\n"
-        "from alle import service\n"
-        f"service.tun_trial_expire({nonce!r})\n"
+        daemon._self_command("tun-trial-expire", nonce, "--delay", str(int(seconds)))
     )
 
 

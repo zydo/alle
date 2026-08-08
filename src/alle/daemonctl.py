@@ -35,8 +35,9 @@ from pathlib import Path
 
 from alle import applog, paths
 
-LAUNCHD_LABEL = "com.github.zydo.alle"
+LAUNCHD_LABEL = "io.github.zydo.alle"
 SYSTEMD_UNIT = "alle.service"
+_APP_ENV_PATHS = {"ALLE_EXECUTABLE", "ALLE_SINGBOX", "ALLE_SERVICE_PREFIX"}
 
 
 class DaemonCtlError(RuntimeError):
@@ -63,6 +64,25 @@ def _service_exec() -> list[str]:
     return [sys.executable, "-m", "alle", "applier"]
 
 
+def _app_env() -> dict[str, str]:
+    """Safe app-bundled runtime env to persist into service managers.
+
+    The app wrapper uses these to keep LaunchAgent/LaunchDaemon jobs pointed at
+    the bundled CLI/runtime and pinned sing-box. Relative paths would be
+    interpreted from a service-manager cwd, so omit them rather than writing an
+    ambiguous unit.
+    """
+    out: dict[str, str] = {}
+    for key in _APP_ENV_PATHS:
+        value = os.environ.get(key)
+        if value and os.path.isabs(value):
+            out[key] = value
+    owner = os.environ.get("ALLE_SERVICE_OWNER")
+    if owner and "\n" not in owner and "\r" not in owner:
+        out["ALLE_SERVICE_OWNER"] = owner
+    return out
+
+
 def _service_env(command: list[str] | None = None) -> dict[str, str]:
     """Environment the unit must carry: the supervised marker, and ALLE_HOME
     when overridden, plus a safe PATH that preserves package-manager ownership.
@@ -71,6 +91,10 @@ def _service_env(command: list[str] | None = None) -> dict[str, str]:
     install flow supplies uv's bin directory in that PATH; retaining absolute
     entries lets the Web UI find uv/pipx later without adding ambient current-
     directory lookup through empty or relative components.
+
+    App-bundled runtime vars (:func:`_app_env`) are carried through too, so a
+    job installed from the macOS app keeps pointing at the bundled CLI/runtime
+    and pinned sing-box instead of falling back to a different install.
     """
     command = command or _service_exec()
     shim_dir = os.path.dirname(os.path.abspath(command[0]))
@@ -79,6 +103,7 @@ def _service_env(command: list[str] | None = None) -> dict[str, str]:
         if entry and os.path.isabs(entry) and entry not in entries:
             entries.append(entry)
     env = {"ALLE_SERVICE": "1", "PATH": os.pathsep.join(entries)}
+    env.update(_app_env())
     if os.environ.get("ALLE_HOME"):
         env["ALLE_HOME"] = str(paths.state_dir())
     return env

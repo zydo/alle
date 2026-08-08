@@ -49,7 +49,7 @@ def stub_binary(monkeypatch):
 
 def test_launchd_plist_execs_the_stable_shim(fake_home):
     plist = plistlib.loads(daemonctl.LaunchdManager()._plist_bytes())
-    assert plist["Label"] == "com.github.zydo.alle"
+    assert plist["Label"] == "io.github.zydo.alle"
     assert plist["ProgramArguments"][-1] == "applier"  # `<alle> applier`
     assert plist["EnvironmentVariables"]["ALLE_SERVICE"] == "1"
     assert plist["EnvironmentVariables"]["PATH"].split(daemonctl.os.pathsep)[0] == str(
@@ -264,6 +264,37 @@ def test_service_env_leads_with_shim_dir_and_drops_unsafe_path_entries(monkeypat
         "/home/user/.local/bin",
         "/usr/bin",
     ]
+
+
+def test_service_env_preserves_safe_app_bundle_env(monkeypatch, tmp_path):
+    executable = tmp_path / "Alle.app" / "Contents" / "Resources" / "bin" / "alle"
+    singbox = tmp_path / "Alle.app" / "Contents" / "Resources" / "sing-box" / "sing-box"
+    prefix = tmp_path / "Alle.app" / "Contents" / "Resources"
+    monkeypatch.setenv("ALLE_EXECUTABLE", str(executable))
+    monkeypatch.setenv("ALLE_SINGBOX", str(singbox))
+    monkeypatch.setenv("ALLE_SERVICE_PREFIX", str(prefix))
+    monkeypatch.setenv("ALLE_SERVICE_OWNER", "macos-app")
+
+    env = daemonctl._service_env([str(executable), "applier"])
+
+    assert env["ALLE_EXECUTABLE"] == str(executable)
+    assert env["ALLE_SINGBOX"] == str(singbox)
+    assert env["ALLE_SERVICE_PREFIX"] == str(prefix)
+    assert env["ALLE_SERVICE_OWNER"] == "macos-app"
+
+
+def test_service_env_omits_unsafe_app_bundle_env(monkeypatch):
+    monkeypatch.setenv("ALLE_EXECUTABLE", "relative/alle")
+    monkeypatch.setenv("ALLE_SINGBOX", "sing-box")
+    monkeypatch.setenv("ALLE_SERVICE_PREFIX", "relative/prefix")
+    monkeypatch.setenv("ALLE_SERVICE_OWNER", "bad\nowner")
+
+    env = daemonctl._service_env(["/usr/bin/alle", "applier"])
+
+    assert "ALLE_EXECUTABLE" not in env
+    assert "ALLE_SINGBOX" not in env
+    assert "ALLE_SERVICE_PREFIX" not in env
+    assert "ALLE_SERVICE_OWNER" not in env
 
 
 # ---- platform dispatch ---------------------------------------------------------

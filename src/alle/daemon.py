@@ -65,10 +65,11 @@ CRASH_RESET = 60.0  # this long alive after a crash forgets the crash history
 # every upgrade until the next login.
 UPGRADE_EXIT_CODE = 3
 
-# What the applier's command line looks like: ensure_running() spawns
-# ``<python> -m alle applier``; a supervised or hand-run ``alle applier`` shows
-# as ``.../bin/alle applier``; the foreground form (a container's PID 1) as
-# ``.../bin/alle run``. Used to reject recycled PIDs.
+# What the applier's command line looks like: ensure_running() spawns either
+# ``<python> -m alle applier`` in source/PyPI installs, or ``<alle> applier``
+# when a frozen/app-bundled executable owns the runtime. A supervised or hand-run
+# ``alle applier`` shows as ``.../bin/alle applier``; the foreground form (a
+# container's PID 1) as ``.../bin/alle run``. Used to reject recycled PIDs.
 _MARKERS = ("-m alle", "alle applier", "alle run")
 
 # A Web API upgrade replaces the package before its handler can serialize and
@@ -266,6 +267,33 @@ def _state_stamp() -> tuple[int, int]:
     return (st.st_mtime_ns, st.st_size)
 
 
+def _self_command(*args: str) -> list[str]:
+    """Command for spawning this installed alle runtime.
+
+    Source/PyPI installs need ``python -m alle`` so the child imports the same
+    environment. Frozen/app-bundled installs cannot use ``-m`` or ``-c`` because
+    ``sys.executable`` is the bundled console executable, not a Python
+    interpreter; the app wrapper publishes ``ALLE_EXECUTABLE`` as the stable
+    command to re-enter.
+    """
+    exe = os.environ.get("ALLE_EXECUTABLE")
+    if exe:
+        return [exe, *args]
+    if getattr(sys, "frozen", False):
+        return [sys.executable, *args]
+    return [sys.executable, "-m", "alle", *args]
+
+
+def _lifecycle_run(action: str, delay: float) -> None:
+    """Hidden CLI target used by frozen/app-bundled delayed lifecycle work."""
+    if action not in {"stop", "restart"}:
+        raise ValueError(f"unsupported lifecycle action {action!r}")
+    time.sleep(max(0.0, delay))
+    from alle import service
+
+    getattr(service, action)()
+
+
 def running_pid() -> int | None:
     # PID-recycling guard: believe the pidfile only if the process behind the
     # number matches the identity recorded at spawn (kernel start time; see
@@ -285,10 +313,10 @@ def in_daemon_process() -> bool:
     return running_pid() == os.getpid()
 
 
-def spawn_detached(code: str) -> None:
-    """Run ``code`` in a detached interpreter: its own session, output to the
-    applier log, daemon markers scrubbed — so the child outlives its spawner
-    and never mistakes itself for (or recurses into) the daemon."""
+def spawn_detached(command: list[str]) -> None:
+    """Run ``command`` detached: its own session, output to the applier log,
+    daemon markers scrubbed — so the child outlives its spawner and never
+    mistakes itself for (or recurses into) the daemon."""
     env = dict(os.environ)
     env.pop("ALLE_APPLIER", None)
     env.pop("ALLE_SERVICE", None)
@@ -298,7 +326,7 @@ def spawn_detached(code: str) -> None:
     applog.rotate_if_needed(log, applog.MAX_LOG_BYTES)
     with open(log, "ab") as lf:
         subprocess.Popen(
-            [sys.executable, "-c", code],
+            command,
             stdout=lf,
             stderr=lf,
             stdin=subprocess.DEVNULL,
@@ -309,12 +337,7 @@ def spawn_detached(code: str) -> None:
 
 def _spawn_lifecycle(action: str, delay: float) -> None:
     """Spawn one delayed lifecycle action outside response bookkeeping."""
-    spawn_detached(
-        "import time\n"
-        f"time.sleep({delay!r})\n"
-        "from alle import service\n"
-        f"service.{action}()\n"
-    )
+    spawn_detached(_self_command("lifecycle-run", action, "--delay", str(delay)))
 
 
 def schedule_lifecycle(action: str, delay: float = 0.35) -> None:
@@ -355,7 +378,7 @@ def ensure_running() -> None:
     applog.rotate_if_needed(log, applog.MAX_LOG_BYTES)
     with open(log, "ab") as lf:
         child = subprocess.Popen(
-            [sys.executable, "-m", "alle", "applier"],
+            _self_command("applier"),
             stdout=lf,
             stderr=lf,
             stdin=subprocess.DEVNULL,

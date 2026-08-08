@@ -137,7 +137,7 @@ def test_cli_daemon_status_human_and_json(capsys, monkeypatch):
             "manager": "launchd",
             "installed": True,
             "active": True,
-            "unit_path": "/Users/x/Library/LaunchAgents/com.github.zydo.alle.plist",
+            "unit_path": "/Users/x/Library/LaunchAgents/io.github.zydo.alle.plist",
         },
     )
     monkeypatch.setattr(daemon, "daemon_info", lambda: {"pid": 9, "version": "0.1.0"})

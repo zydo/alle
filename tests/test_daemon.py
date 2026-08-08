@@ -615,6 +615,69 @@ def test_ensure_running_defers_to_service_manager(monkeypatch, background_runtim
     assert started == [1] and spawned == []  # supervisor asked, no self-spawn
 
 
+def test_self_command_uses_python_module_in_source_mode(monkeypatch):
+    monkeypatch.delenv("ALLE_EXECUTABLE", raising=False)
+    monkeypatch.setattr(daemon.sys, "frozen", False, raising=False)
+    assert daemon._self_command("applier") == [
+        daemon.sys.executable,
+        "-m",
+        "alle",
+        "applier",
+    ]
+
+
+def test_self_command_uses_app_executable_in_bundled_mode(monkeypatch):
+    monkeypatch.setenv(
+        "ALLE_EXECUTABLE", "/Applications/Alle.app/Contents/Resources/bin/alle"
+    )
+    assert daemon._self_command("applier") == [
+        "/Applications/Alle.app/Contents/Resources/bin/alle",
+        "applier",
+    ]
+
+
+def test_spawn_lifecycle_uses_hidden_cli_command(monkeypatch):
+    spawned = []
+    monkeypatch.setattr(
+        daemon, "spawn_detached", lambda command: spawned.append(command)
+    )
+    monkeypatch.setenv("ALLE_EXECUTABLE", "/tmp/Alle.app/Contents/Resources/bin/alle")
+
+    daemon.schedule_lifecycle("restart", delay=0.25)
+
+    assert spawned == [
+        [
+            "/tmp/Alle.app/Contents/Resources/bin/alle",
+            "lifecycle-run",
+            "restart",
+            "--delay",
+            "0.25",
+        ]
+    ]
+
+
+def test_tun_trial_watchdog_uses_hidden_cli_command(monkeypatch):
+    from alle import service
+
+    spawned = []
+    monkeypatch.setattr(
+        daemon, "spawn_detached", lambda command: spawned.append(command)
+    )
+    monkeypatch.setenv("ALLE_EXECUTABLE", "/tmp/Alle.app/Contents/Resources/bin/alle")
+
+    service._spawn_tun_watchdog(12, "abc123")
+
+    assert spawned == [
+        [
+            "/tmp/Alle.app/Contents/Resources/bin/alle",
+            "tun-trial-expire",
+            "abc123",
+            "--delay",
+            "12",
+        ]
+    ]
+
+
 def test_stop_routes_through_service_manager(monkeypatch):
     from alle import daemonctl
 

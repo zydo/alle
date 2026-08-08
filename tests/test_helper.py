@@ -343,6 +343,58 @@ def test_plist_carries_allowed_uid_socket_and_home(tmp_path):
     assert pl["ProgramArguments"][-1] == "helper-run"
 
 
+def test_plist_carries_bundled_singbox_when_present(tmp_path, monkeypatch):
+    bundled = tmp_path / "Alle.app" / "Contents" / "Resources" / "sing-box" / "sing-box"
+    monkeypatch.setenv("ALLE_SINGBOX", str(bundled))
+    raw = helperctl._plist_bytes(4242, str(tmp_path))
+    env = plistlib.loads(raw)["EnvironmentVariables"]
+
+    assert env["ALLE_SINGBOX"] == str(bundled)
+
+
+def test_plist_omits_relative_bundled_singbox(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALLE_SINGBOX", "relative/sing-box")
+    raw = helperctl._plist_bytes(4242, str(tmp_path))
+    env = plistlib.loads(raw)["EnvironmentVariables"]
+
+    assert "ALLE_SINGBOX" not in env
+
+
+def test_service_exec_prefers_the_bundled_executable(monkeypatch, tmp_path):
+    """An app-installed helper must exec the bundled core, not a PATH shim.
+
+    `sudo` replaces PATH with secure_path, so without this the root helper
+    would exec a brew/uv `alle` against the app's ALLE_HOME.
+    """
+    bundled = tmp_path / "Alle.app" / "Contents" / "Resources" / "bin" / "alle"
+    monkeypatch.setenv("ALLE_EXECUTABLE", str(bundled))
+    monkeypatch.setattr(
+        helperctl.shutil, "which", lambda name: "/opt/homebrew/bin/alle"
+    )
+
+    assert helperctl._service_exec() == [str(bundled), "helper-run"]
+
+
+def test_service_exec_ignores_a_relative_executable(monkeypatch):
+    monkeypatch.setenv("ALLE_EXECUTABLE", "relative/alle")
+    monkeypatch.setattr(helperctl.shutil, "which", lambda name: "/usr/local/bin/alle")
+
+    assert helperctl._service_exec() == ["/usr/local/bin/alle", "helper-run"]
+
+
+def test_plist_execs_the_bundled_core_under_sudo_path(monkeypatch, tmp_path):
+    bundled = tmp_path / "Alle.app" / "Contents" / "Resources" / "bin" / "alle"
+    monkeypatch.setenv("ALLE_EXECUTABLE", str(bundled))
+    # a decoy CLI install, first on sudo's secure_path
+    monkeypatch.setattr(
+        helperctl.shutil, "which", lambda name: "/opt/homebrew/bin/alle"
+    )
+
+    pl = plistlib.loads(helperctl._plist_bytes(4242, str(tmp_path)))
+
+    assert pl["ProgramArguments"] == [str(bundled), "helper-run"]
+
+
 def test_install_requires_root(monkeypatch):
     monkeypatch.setattr(os, "geteuid", lambda: 501)
     monkeypatch.setattr(helperctl, "_supported", lambda: True)

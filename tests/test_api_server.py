@@ -1715,7 +1715,7 @@ def test_upgrade_post_defers_native_restart_until_response_flush(live, monkeypat
     while not spawned and time.monotonic() < deadline:
         time.sleep(0.01)
     assert len(spawned) == 1
-    assert "service.restart()" in spawned[0]
+    assert spawned[0][-4:] == ["lifecycle-run", "restart", "--delay", "0.0"]
 
 
 def test_upgrade_post_maps_cross_process_lock_contention_to_503(
