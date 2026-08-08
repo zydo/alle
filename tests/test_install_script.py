@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-INSTALLER = ROOT / "scripts" / "install.sh"
+INSTALLER = ROOT / "packaging" / "bootstrap" / "install.sh"
 
 # The release version the installer pins (and verifies after install). The
 # fake `alle` fixture must report the same string, so read it from the script

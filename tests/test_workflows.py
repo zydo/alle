@@ -115,7 +115,7 @@ def test_ci_gates_match_the_publish_gate():
         assert needle in runs, f"ci missing gate step: {needle!r}"
     assert "xargs -0 uv run shellcheck" in runs
     assert "xargs -0 uv run shfmt -d" in runs
-    assert "sh -n scripts/install.sh" in runs
+    assert "sh -n packaging/bootstrap/install.sh" in runs
 
 
 def test_publish_reuses_the_one_built_artifact():
@@ -262,7 +262,9 @@ def test_stable_release_stages_and_verifies_the_pinned_installer():
     wf = _load("publish.yml")
     steps = wf["jobs"]["github-release"]["steps"]
     runs = "\n".join(step.get("run", "") for step in steps)
-    assert 'grep -qx "ALLE_VERSION=\\"$version\\"" scripts/install.sh' in runs
+    assert (
+        'grep -qx "ALLE_VERSION=\\"$version\\"" packaging/bootstrap/install.sh' in runs
+    )
     assert "sha256sum install.sh > install.sh.sha256" in runs
     assert "gh release create" in runs and "--draft" in runs
     assert "gh release download" in runs
@@ -289,7 +291,7 @@ def test_release_smokes_staged_bootstrap_on_macos_and_real_systemd():
     assert macos["runs-on"].startswith("macos-")
     mac_runs = "\n".join(step.get("run", "") for step in macos["steps"])
     linux_runs = "\n".join(step.get("run", "") for step in linux["steps"])
-    assert "sh scripts/install.sh" in mac_runs
+    assert "sh packaging/bootstrap/install.sh" in mac_runs
     assert "leaving the tool unchanged" in mac_runs
     assert "scripts/install-systemd-smoke.sh" in linux_runs
 

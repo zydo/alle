@@ -45,13 +45,13 @@ run_as_tester() {
 }
 
 test "$(run_as_tester id -u)" = 1001
-run_as_tester sh /src/scripts/install.sh | tee "$work/first.log"
-run_as_tester sh /src/scripts/install.sh | tee "$work/second.log"
+run_as_tester sh /src/packaging/bootstrap/install.sh | tee "$work/first.log"
+run_as_tester sh /src/packaging/bootstrap/install.sh | tee "$work/second.log"
 grep -q "leaving the tool unchanged" "$work/second.log"
 run_as_tester /home/tester/.local/bin/alle daemon status --json |
 	grep -q '"active"[[:space:]]*:[[:space:]]*true'
 run_as_tester /home/tester/.local/bin/alle health
-run_as_tester sh /src/scripts/install.sh --uninstall
+run_as_tester sh /src/packaging/bootstrap/install.sh --uninstall
 run_as_tester test ! -e /home/tester/.alle
 run_as_tester test ! -e /home/tester/.local/bin/alle
 run_as_tester test ! -e /home/tester/.local/state/alle/bootstrap-receipt

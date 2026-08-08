@@ -30,7 +30,7 @@ LABEL org.opencontainers.image.alle-wheel-sha256=$ALLE_WHEEL_SHA256
 RUN useradd --uid 1000 --user-group --home-dir /var/lib/alle --create-home \
     --shell /usr/sbin/nologin alle \
     && mkdir -p /etc/alle
-COPY docker/requirements.lock /tmp/requirements.lock
+COPY packaging/docker/requirements.lock /tmp/requirements.lock
 COPY dist/*.whl /tmp/
 RUN set -eu; \
     wheel=$(find /tmp -maxdepth 1 -name 'alle_proxy-*.whl' -type f); \
@@ -42,7 +42,7 @@ RUN set -eu; \
     python -c 'import importlib.metadata as m; assert m.version("pycountry") == "26.2.16"'; \
     python -c 'import importlib.metadata as m; assert m.version("pyyaml") == "6.0.3"'; \
     rm /tmp/*.whl /tmp/requirements.lock
-COPY docker/entrypoint.sh /usr/local/bin/alle-entrypoint
+COPY packaging/docker/entrypoint.sh /usr/local/bin/alle-entrypoint
 RUN chmod 0755 /usr/local/bin/alle-entrypoint
 
 # The container profile knobs (each opt-in in core; the image opts in):
