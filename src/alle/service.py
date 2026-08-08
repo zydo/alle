@@ -2897,16 +2897,18 @@ def upgrade_check(*, prerelease: bool = False) -> dict:
 # ---- privileged tun helper (macOS root LaunchDaemon) -------------------------
 
 
-def helper_install() -> dict:
+def helper_install(takeover: bool = False) -> dict:
     """Install the root tun helper (``sudo alle helper install``).
 
     The thin service wrapper: the privilege/root checks live in
     :mod:`alle.helperctl` so they are testable without going through the CLI.
+    ``takeover`` forces a rebind of the machine's single helper away from
+    another install's ``ALLE_HOME`` (and past a live tun).
     """
     from alle import helperctl
 
     try:
-        return helperctl.install()
+        return helperctl.install(takeover=takeover)
     except helperctl.HelperCtlError as e:
         raise ServiceError(str(e)) from e
 

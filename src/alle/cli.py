@@ -1381,9 +1381,12 @@ def cmd_run(args):
 
 
 def cmd_helper_install(args):
-    result = service.helper_install()
+    result = service.helper_install(takeover=args.takeover)
     verb = "Reinstalled" if result.get("reinstalled") else "Installed"
     print(f"{verb} the privileged tun helper (root LaunchDaemon).")
+    if result.get("rebound_from"):
+        print(f"  Took the helper over from {result['rebound_from']}.")
+        print("  That install can no longer use tun until it reinstalls.")
     print(f"  Plist: {result['plist']}")
     print(f"  Serves uid {result['serves_uid']} over {result['socket']}.")
     print(
@@ -2023,9 +2026,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hp.set_defaults(func=_show_help(hp))
     hp_sub = hp.add_subparsers(dest="helper_command")
-    hp_sub.add_parser(
-        "install", help="install the root helper (run under sudo)"
-    ).set_defaults(func=cmd_helper_install)
+    hi = hp_sub.add_parser("install", help="install the root helper (run under sudo)")
+    hi.add_argument(
+        "--takeover",
+        action="store_true",
+        help="rebind the machine's single helper to this install even if it "
+        "serves another ALLE_HOME or is currently holding tun up",
+    )
+    hi.set_defaults(func=cmd_helper_install)
     hp_sub.add_parser(
         "uninstall", help="remove the root helper (run under sudo)"
     ).set_defaults(func=cmd_helper_uninstall)

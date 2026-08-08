@@ -1301,7 +1301,16 @@ sudo alle helper uninstall   # remove it (tun on then needs the sudo fallback)
 - One helper serves one `ALLE_HOME` — the one active at install time
   (`alle helper status` reports it as `serves_home`). Commands from a
   different home are refused; to move the helper to another home, rerun
-  `sudo alle helper install` from that home.
+  `sudo alle helper install --takeover` from that home.
+- There is **one helper per machine** (one label, one plist, one socket), so a
+  second install — a second `ALLE_HOME`, or a GUI app alongside a CLI install —
+  shares it rather than getting its own. Installing from a second home is
+  therefore refused by default: it would silently take TUN away from the first.
+  `--takeover` is the explicit opt-in, and the command reports which home it
+  rebound from.
+- Reinstalling is also refused while the installed helper is **currently
+  running sing-box**, because the reinstall stops it and drops a live TUN
+  session. Turn TUN off first, or pass `--takeover` to accept the interruption.
 - The helper is deliberately minimal — it only launches/stops/reloads sing-box
   against the fixed config path; it never parses state or sees credentials. See
   `docs/security.md` for the trust model.

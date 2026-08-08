@@ -339,8 +339,19 @@ def _config_path() -> Path:
     return paths.state_dir() / "singbox.json"
 
 
+def pid_path_for(home: str | Path) -> Path:
+    """The sing-box pidfile under an arbitrary ``ALLE_HOME``.
+
+    Split out of :func:`_pid_path` so a privileged caller can inspect *another*
+    home's sing-box without adopting that home — :mod:`alle.helperctl` needs it
+    to tell whether the helper it is about to unload is holding tun up for a
+    different install.
+    """
+    return Path(home) / "singbox.pid"
+
+
 def _pid_path() -> Path:
-    return paths.state_dir() / "singbox.pid"
+    return pid_path_for(paths.state_dir())
 
 
 def _started_path() -> Path:

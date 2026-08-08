@@ -24,7 +24,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from alle import applog, paths
+from alle import applog, paths, proc
 from alle.helper import HELPER_LABEL, HELPER_SOCKET_DEFAULT
 
 LAUNCHD_PLIST = f"/Library/LaunchDaemons/{HELPER_LABEL}.plist"
@@ -118,13 +118,57 @@ def _plist_bytes(uid: int, alle_home: str) -> bytes:
     return plistlib.dumps(plist)
 
 
-def install() -> dict:
-    """Write + load the system LaunchDaemon. Must run as root (via sudo)."""
+def _serving_singbox_pid(served_home: str) -> int | None:
+    """The live sing-box PID the installed helper owns, or ``None``.
+
+    Read straight from the served home's pidfile rather than over the socket:
+    a helper bound to a *different* home refuses ``status`` (that is the whole
+    point of home scoping), so the protocol cannot answer this question. We run
+    as root here, so the other home's pidfile is readable.
+    """
+    from alle import singbox
+
+    try:
+        return proc.read_pidfile(singbox.pid_path_for(served_home), ("sing-box",))
+    except OSError:
+        return None
+
+
+def install(takeover: bool = False) -> dict:
+    """Write + load the system LaunchDaemon. Must run as root (via sudo).
+
+    There is one helper per machine (one label, one plist, one socket) bound to
+    one ``ALLE_HOME``, so installing from a second install — e.g. the macOS app
+    alongside a CLI install — *rebinds* the shared helper and leaves the first
+    install unable to use tun. Worse, the unload below stops a helper that may
+    currently own a running sing-box, dropping a live VPN as a side effect.
+    Both are refused unless ``takeover`` says that is intended.
+    """
     _require_darwin()
     _require_root("install")
     uid = _real_uid()
     alle_home = str(paths.state_dir())
     already = is_installed()
+    if already and not takeover:
+        current_home = _installed_home()
+        if current_home and current_home != alle_home:
+            raise HelperCtlError(
+                f"the installed helper is bound to ALLE_HOME {current_home}, "
+                f"not {alle_home}. There is one helper per machine, so "
+                f"installing from here would take tun away from that install. "
+                f"To move it, re-run with --takeover."
+            )
+        held = _serving_singbox_pid(current_home or alle_home)
+        if held is not None:
+            raise HelperCtlError(
+                f"the installed helper is currently running sing-box "
+                f"(pid {held}) for {current_home or alle_home} — reinstalling "
+                f"would stop it and drop tun. Turn tun off first, or re-run "
+                f"with --takeover to accept the interruption."
+            )
+    rebound_from = _installed_home() if already else None
+    if rebound_from == alle_home:
+        rebound_from = None
     p = Path(LAUNCHD_PLIST)
     # Unload any prior generation first so the new plist's env takes effect
     # cleanly (launchctl keeps a stale job definition otherwise).
@@ -143,10 +187,12 @@ def install() -> dict:
     applog.log(
         f"privileged helper {'reinstalled' if already else 'installed'} "
         f"(serves uid {uid})"
+        + (f", rebound from {rebound_from}" if rebound_from else "")
     )
     return {
         "installed": True,
         "reinstalled": already,
+        "rebound_from": rebound_from,
         "plist": LAUNCHD_PLIST,
         "serves_uid": uid,
         "serves_home": alle_home,

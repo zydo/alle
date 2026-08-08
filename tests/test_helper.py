@@ -10,9 +10,11 @@ import plistlib
 import socket
 import threading
 
+from pathlib import Path
+
 import pytest
 
-from alle import helper, helperctl
+from alle import helper, helperctl, paths
 
 
 # ---- protocol: a real socket, a faked sing-box runner ----------------------
@@ -363,3 +365,80 @@ def test_unsupported_platform_refused(monkeypatch):
     with pytest.raises(helperctl.HelperCtlError, match="macOS-only"):
         helperctl.install()
     assert helperctl.status()["supported"] is False
+
+
+# ---- one helper per machine: foreign-home and live-tun guards ---------------
+
+
+class _Ok:
+    returncode = 0
+    stderr = ""
+
+
+@pytest.fixture
+def rooted_install(monkeypatch, tmp_path):
+    """A root install that stops just short of touching launchd."""
+    monkeypatch.setattr(helperctl, "_supported", lambda: True)
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setenv("SUDO_UID", "501")
+    monkeypatch.setenv("ALLE_HOME", str(tmp_path))
+    monkeypatch.setattr(helperctl, "is_installed", lambda: True)
+    ran: list[list[str]] = []
+    monkeypatch.setattr(helperctl, "_run", lambda cmd: ran.append(cmd) or _Ok())
+    return ran
+
+
+def test_install_refuses_to_rebind_a_foreign_home(monkeypatch, rooted_install):
+    monkeypatch.setattr(helperctl, "_installed_home", lambda: "/other/home")
+    monkeypatch.setattr(helperctl, "_serving_singbox_pid", lambda home: None)
+
+    with pytest.raises(helperctl.HelperCtlError, match="--takeover"):
+        helperctl.install()
+
+    assert rooted_install == []  # never unloaded the other install's helper
+
+
+def test_install_refuses_while_the_helper_holds_tun(monkeypatch, rooted_install):
+    monkeypatch.setattr(helperctl, "_installed_home", lambda: str(paths.state_dir()))
+    monkeypatch.setattr(helperctl, "_serving_singbox_pid", lambda home: 4321)
+
+    with pytest.raises(helperctl.HelperCtlError, match="pid 4321"):
+        helperctl.install()
+
+    assert rooted_install == []
+
+
+def test_takeover_rebinds_and_reports_the_previous_home(monkeypatch, rooted_install):
+    monkeypatch.setattr(helperctl, "_installed_home", lambda: "/other/home")
+    monkeypatch.setattr(helperctl, "_serving_singbox_pid", lambda home: 4321)
+    monkeypatch.setattr(Path, "write_bytes", lambda self, data: len(data))
+
+    result = helperctl.install(takeover=True)
+
+    assert result["rebound_from"] == "/other/home"
+    assert ["launchctl", "unload", "-w", helperctl.LAUNCHD_PLIST] in rooted_install
+
+
+def test_plain_reinstall_of_own_idle_helper_needs_no_takeover(
+    monkeypatch, rooted_install
+):
+    monkeypatch.setattr(helperctl, "_installed_home", lambda: str(paths.state_dir()))
+    monkeypatch.setattr(helperctl, "_serving_singbox_pid", lambda home: None)
+    monkeypatch.setattr(Path, "write_bytes", lambda self, data: len(data))
+
+    result = helperctl.install()
+
+    assert result["reinstalled"] is True and result["rebound_from"] is None
+
+
+def test_serving_singbox_pid_reads_the_served_homes_pidfile(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_read(path, markers):
+        seen["path"] = path
+        return 99
+
+    monkeypatch.setattr(helperctl.proc, "read_pidfile", fake_read)
+
+    assert helperctl._serving_singbox_pid(str(tmp_path)) == 99
+    assert seen["path"] == tmp_path / "singbox.pid"
