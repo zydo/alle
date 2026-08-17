@@ -4,7 +4,17 @@ import importlib.util
 import os
 import plistlib
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
+
+# The packaging scripts import tomllib (3.11+); they only ever run on a macOS
+# dev machine — the test-macos job still exercises them on 3.14 — so skip the
+# module wholesale on older interpreters instead of carrying a fallback the
+# scripts would never use.
+if sys.version_info < (3, 11):
+    pytest.skip("macOS packaging scripts need Python 3.11+", allow_module_level=True)
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -63,9 +73,7 @@ def test_tray_status_icons_present():
     # The Swift tray loads status-{stopped,running,tun}.pdf as template glyphs.
     # build_app.copy_tray_status_icons copies these into the .app, so the source
     # PDFs must exist alongside their SVG sources under the SPM target.
-    resources = (
-        build_app.ROOT / "macos" / "Alle" / "Sources" / "Alle" / "Resources"
-    )
+    resources = build_app.ROOT / "macos" / "Alle" / "Sources" / "Alle" / "Resources"
     for kind in ("stopped", "running", "tun"):
         assert (resources / f"status-{kind}.pdf").is_file(), (
             f"missing status-{kind}.pdf"
