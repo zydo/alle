@@ -39,7 +39,7 @@ jobs:
       # upload this job doesn't need; the SHA pin freezes the sub-action's
       # behavior anyway.
       - name: OSV scan (uv.lock)
-        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        uses: google/osv-scanner-action/osv-scanner-action@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
         with:
           scan-args: |-
             --lockfile=uv.lock
@@ -50,6 +50,8 @@ jobs:
   # base image doesn't stop advisories from being published *after* the pin.
   # ignore-unfixed keeps the gate actionable (Debian carries many no-fix CVEs);
   # severity CRITICAL/HIGH with a hard exit code fails the run on real ones.
+  # Narrow, reviewed exceptions live in .trivyignore — each entry carries its
+  # own drop condition, and the weekly sweep is the review point.
   image:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -72,7 +74,8 @@ jobs:
           sha=$(sha256sum dist/*.whl | awk '{print $1}')
           docker buildx build --load --build-arg ALLE_WHEEL_SHA256="$sha" \
             --cache-from type=gha,scope=supply-chain-image \
-            --cache-to type=gha,mode=max,scope=supply-chain-image -t alle:scan .
+            --cache-to type=gha,mode=max,scope=supply-chain-image \
+            -f packaging/docker/Dockerfile -t alle:scan .
       - name: Trivy scan (image layers)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -80,6 +83,7 @@ jobs:
           format: table
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+          ignorefile: .trivyignore
           exit-code: "1"
 
   gitleaks:

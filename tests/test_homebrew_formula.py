@@ -156,7 +156,7 @@ def test_updater_rewrites_only_the_source_url_and_sha(formula_text):
     # ...and the resource pins are untouched.
     assert "d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f" in out
     assert "5b6027d453fcd6060112b951dd010f01f168b51b4bf8a1f1fc8c95c8d94a0801" in out
-    assert "ff452ff5a3e828ce110190feff1178bb1f2ea2281fa2075aadb987c2fb221661" in out
+    assert "94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79" in out
     # Exactly one url/sha256 changed: the resources still hold their own values.
     assert out.count(f'sha256 "{sha}"') == 1
 

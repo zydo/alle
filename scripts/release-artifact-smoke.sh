@@ -15,7 +15,7 @@ cleanup() {
 trap cleanup EXIT
 
 python3 -m venv "$work/venv"
-"$work/venv/bin/pip" install --require-hashes -r "$root/docker/requirements.lock"
+"$work/venv/bin/pip" install --require-hashes -r "$root/packaging/docker/requirements.lock"
 "$work/venv/bin/pip" install --no-deps "$artifact"
 
 export ALLE_HOME="$work/state"

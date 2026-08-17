@@ -7,7 +7,9 @@
 !README.md
 !LICENSE
 !THIRD_PARTY_NOTICES.md
-!docker
+!packaging
+packaging/*
+!packaging/docker
 dist/*
 !dist/*.whl
 src/**/__pycache__
