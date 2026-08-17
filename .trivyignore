@@ -1,0 +1,27 @@
+# Findings reviewed and knowingly accepted. Every entry names its drop
+# condition; the weekly supply-chain sweep is the review point. No bare
+# catch-alls — the gate stays actionable for anything not listed here.
+
+# util-linux / libblkid integer overflow (HIGH). Fixed in Debian trixie as
+# 2.41.5-0+deb13u1, but no python:3.14-slim rebuild carries the fix yet and
+# the base digest is pinned. The container never parses block-device
+# partition tables, so the libblkid path is unreachable here.
+# Added: 2026-08-17. Drop when: a python:3.14-slim digest bump clears it
+# (dependabot tracks the slim tag and will open the PR).
+CVE-2026-53615
+
+# msgpack 1.1.2 vendored inside pip (GHSA-6v7p-g79w-8964, HIGH): unpacker
+# out-of-bounds read on untrusted data. The image's only pip runs happen at
+# build time, against the hash-pinned requirements.lock and the
+# checksum-verified wheel — pip never unpacks untrusted msgpack in the
+# running container.
+# Added: 2026-08-17. Drop when: the base ships pip with vendored
+# msgpack >= 1.2.1.
+GHSA-6v7p-g79w-8964
+
+# setuptools 70.3.0 bundled in the base image (CVE-2025-47273, HIGH):
+# PackageIndex path traversal. setuptools is never invoked at runtime —
+# PID 1 is `alle run`; nothing imports it or shells out to it.
+# Added: 2026-08-17. Drop when: the base ships setuptools >= 78.1.1 or
+# stops bundling it.
+CVE-2025-47273

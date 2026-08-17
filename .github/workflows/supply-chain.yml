@@ -50,6 +50,8 @@ jobs:
   # base image doesn't stop advisories from being published *after* the pin.
   # ignore-unfixed keeps the gate actionable (Debian carries many no-fix CVEs);
   # severity CRITICAL/HIGH with a hard exit code fails the run on real ones.
+  # Narrow, reviewed exceptions live in .trivyignore — each entry carries its
+  # own drop condition, and the weekly sweep is the review point.
   image:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -81,6 +83,7 @@ jobs:
           format: table
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+          ignorefile: .trivyignore
           exit-code: "1"
 
   gitleaks:
