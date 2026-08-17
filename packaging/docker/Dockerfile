@@ -21,10 +21,11 @@
 #   override, where the entrypoint repairs only wrong-owned entries.
 
 # Base images pinned by immutable digest — same discipline as the SHA-pinned
-# CI Actions; the trailing comment records the tag each digest was resolved
-# from (2026-07-20). The digests are the multi-arch manifest lists.
-# python 3.14-slim
-FROM python@sha256:cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6
+# CI Actions. The tag rides in the reference, not a trailing comment: with a
+# digest-only `python@sha256:…` dependabot tracked the default `python` tag
+# and offered the full (non-slim) image. Resolved 2026-08-17; the digest is
+# the multi-arch manifest list.
+FROM python:3.14-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4
 ARG ALLE_WHEEL_SHA256
 LABEL org.opencontainers.image.alle-wheel-sha256=$ALLE_WHEEL_SHA256
 RUN useradd --uid 1000 --user-group --home-dir /var/lib/alle --create-home \
