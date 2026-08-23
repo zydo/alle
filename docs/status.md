@@ -31,14 +31,14 @@ Which providers can come next, and why some cannot, is in
 | Web UI            | Dashboard (channels, probe/speed, routes, kill-switch) + Bundle + Logs pages                                     |
 | REST API          | Everything the CLI does over `/api/v1` (Bearer auth) — for scripts and compose siblings                          |
 | Docker            | Container profile: proxy hub for compose networks, VPN gateway container (tun), declarative boot config          |
-| Desktop companion | Planned                                                                                                          |
-| Distribution      | PyPI, one-command uv bootstrap, Homebrew, and Docker Hub                                                         |
+| Desktop companion | Native macOS menu-bar app packageable as a sideloaded app/DMG; Developer ID signing/notarization still planned   |
+| Distribution      | PyPI, one-command uv bootstrap, Homebrew, Docker Hub, and a hermetic macOS app `.pkg`                          |
 
 ## Planned next
 
 - More VPN providers, WireGuard now and OpenVPN once sing-box 1.14 stabilizes —
   see [VPN provider research](vpn-provider-research.md).
-- Desktop companion with OS-level VPN integration.
+- Signed/notarized desktop companion distribution and Homebrew cask.
 - Windows support and broader distribution.
 
 ## Non-goals
