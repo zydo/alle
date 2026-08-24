@@ -83,7 +83,9 @@ jobs:
           format: table
           severity: CRITICAL,HIGH
           ignore-unfixed: true
-          ignorefile: .trivyignore
+          # `trivyignores` (repo-relative path) since trivy-action v0.36;
+          # the old `ignorefile` input is dropped, not warned-into-working.
+          trivyignores: .trivyignore
           exit-code: "1"
 
   gitleaks:

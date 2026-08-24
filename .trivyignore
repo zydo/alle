@@ -10,6 +10,24 @@
 # (dependabot tracks the slim tag and will open the PR).
 CVE-2026-53615
 
+# Three more advisories against the same util-linux 2.41-5 in the pinned
+# base (HIGH), all in the mount program: CVE-2026-53612 and CVE-2026-53613
+# (TOCTOU via ancestor-directory swap) and CVE-2026-53614 (SUID mount(8)
+# nosuid/noexec bypass via LIBMOUNT_FORCE_MOUNT2) — nine binary packages
+# in the image share the source. Same situation as CVE-2026-53615 above:
+# fixed in Debian trixie as 2.41.5-0+deb13u1, but no python:3.14-slim
+# rebuild carries the fix (tag last moved 2026-08-12) and the digest is
+# pinned. Nothing in the container executes mount(8) — PID 1 is `alle
+# run` as uid 1000, and the root gateway path drives TUN with ip(8) — so
+# the TOCTOU/SUID paths need an attacker already inside the container
+# running mount themselves.
+# Added: 2026-08-24. Drop when: a python:3.14-slim digest bump clears it
+# (same bump drops CVE-2026-53615; dependabot tracks the slim tag and
+# will open the PR).
+CVE-2026-53612
+CVE-2026-53613
+CVE-2026-53614
+
 # msgpack 1.1.2 vendored inside pip (GHSA-6v7p-g79w-8964, HIGH): unpacker
 # out-of-bounds read on untrusted data. The image's only pip runs happen at
 # build time, against the hash-pinned requirements.lock and the
