@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  alle menu-bar template icon — RUNNING WITH TUN (system-wide VPN).
+
+  Template image: pure black ink + alpha (NSImage.isTemplate = true). The
+  running glyph plus a rounded base plate under the apex: the whole machine
+  rides the tunnel (system-wide capture), versus per-app routing. The A occupies
+  the same coordinates as the other states; the plate sits in the lower margin.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="alle — running (system VPN)">
+  <title>alle — running (system VPN)</title>
+  <g fill="none" stroke="#000000" stroke-width="152"
+     stroke-linecap="round" stroke-linejoin="round">
+    <!-- the ∀ A: apex (client) at the bottom, two exit tips at the top -->
+    <path d="M512 807 L243 243"/>
+    <path d="M512 807 L781 243"/>
+    <path d="M322 408 L702 408"/>
+  </g>
+  <!-- exit nodes: solid -->
+  <g fill="#000000">
+    <circle cx="243" cy="243" r="79"/>
+    <circle cx="781" cy="243" r="79"/>
+    <circle cx="512" cy="807" r="79"/>
+  </g>
+  <!-- TUN base plate: all system traffic rides the tunnel -->
+  <rect x="252" y="902" width="520" height="48" rx="24" fill="#000000"/>
+</svg>

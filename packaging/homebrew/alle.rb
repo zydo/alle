@@ -9,8 +9,8 @@
 #
 # Product boundary: this channel is deliberately headless. It installs the CLI,
 # background daemon, loopback control API, and the version-locked bundled Web UI
-# — no GUI surface of any kind. The base wheel enforces that boundary for every
-# native distribution channel.
+# — never `rumps`, an `alle-tray` launcher, `alle.tray`, or `alle.companion`.
+# The base wheel enforces that boundary for every native distribution channel.
 class Alle < Formula
   include Language::Python::Virtualenv
 
@@ -64,7 +64,7 @@ class Alle < Formula
   def caveats
     <<~EOS
       This is the headless alle channel: CLI, background daemon, loopback
-      control API, and the bundled Web UI.
+      control API, and the bundled Web UI — no menu-bar app or tray.
 
       Manage the background daemon with brew services rather than
       `alle daemon install` (which would register a competing launchd/systemd
@@ -84,5 +84,11 @@ class Alle < Formula
 
     # The bundled Web UI is present and version-locked to the CLI package.
     assert_path_exists "#{site}/assets/index.html"
+
+    # Product boundary: no GUI/tray/companion surface ships in this channel.
+    refute_path_exists "#{site}/tray.py"
+    refute_path_exists "#{site}/companion.py"
+    refute_path_exists bin/"alle-tray"
+    refute_path_exists libexec/"bin/alle-tray"
   end
 end

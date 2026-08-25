@@ -1,0 +1,52 @@
+#!/bin/bash
+# Uninstall the hermetic alle macOS app install.
+#
+# Removes: the daemon (user LaunchAgent), the per-user tray/login items, alle
+# state, and /Applications/Alle.app itself. Also removes the privileged TUN
+# helper (a root LaunchDaemon) IF it is present AND this script is run as root.
+#
+# Usage:
+#   /Applications/Alle.app/Contents/Resources/uninstall.sh         # no TUN helper
+#   sudo /Applications/Alle.app/Contents/Resources/uninstall.sh    # if TUN was enabled
+#
+# Run BEFORE trashing the app — it uses the bundled `alle` to stop/unregister
+# the daemon and helper cleanly, then deletes the app last.
+
+set -u
+
+APP="/Applications/Alle.app"
+ALLE="$APP/Contents/Resources/bin/alle"
+STATE="$HOME/Library/Application Support/Alle"
+HELPER_PLIST="/Library/LaunchDaemons/io.github.zydo.alle.helper.plist"
+
+run() { "$@" >/dev/null 2>&1 || true; }
+
+# 1) Stop + unregister the user-level daemon.
+if [ -x "$ALLE" ]; then
+    run "$ALLE" stop
+    run "$ALLE" daemon uninstall
+fi
+# 2) Per-user tray/login LaunchAgents (any alle label).
+rm -f "$HOME"/Library/LaunchAgents/*alle*.plist 2>/dev/null || true
+
+# 3) Privileged TUN helper (root). Only installed if TUN was enabled.
+if [ -e "$HELPER_PLIST" ]; then
+    if [ "$(id -u)" = 0 ]; then
+        if [ -x "$ALLE" ]; then run "$ALLE" helper uninstall; fi
+        rm -f "$HELPER_PLIST" 2>/dev/null || true
+    else
+        echo "alle: the TUN helper is installed ($HELPER_PLIST);" >&2
+        echo "      re-run with sudo to remove it: sudo $0" >&2
+    fi
+fi
+
+# 4) State.
+rm -rf "$STATE" 2>/dev/null || true
+
+# 5) The app itself.
+rm -rf "$APP" 2>/dev/null || true
+if [ -e "$APP" ]; then
+    echo "alle: could not remove $APP (need sudo?)." >&2
+else
+    echo "alle: removed. (TUN helper needs sudo only if listed above.)"
+fi

@@ -453,10 +453,11 @@ def _api_secret(api: dict) -> str:
 
 def effective_api() -> dict:
     """The client-facing endpoint after env overrides: ``{"address", "secret",
-    "host", "net"}`` — what same-machine tools (``alle ui``) use.
+    "host", "net"}`` — what same-machine tools (``alle ui``, the tray) use.
 
-    May generate the loopback contract file; read-only callers compose
-    :func:`_listen_config`/:func:`_api_secret` over their own read instead.
+    May generate the loopback contract file; read-only callers (the
+    companion) compose :func:`_listen_config`/:func:`_api_secret` over their
+    own read instead.
     """
     api = control_api()
     lc = _listen_config(api)
