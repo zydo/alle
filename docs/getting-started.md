@@ -88,7 +88,7 @@ brew services start alle
 ```
 
 The Homebrew channel is deliberately headless — CLI, daemon, control API, and
-bundled Web UI, with no menu-bar/tray app. On this channel let `brew services`
+bundled Web UI. On this channel let `brew services`
 own the daemon rather than `alle daemon install` (they would register competing
 launchd/`systemd --user` units for the same user). `alle upgrade` recognizes a
 brew-owned install and delegates to `brew upgrade`.

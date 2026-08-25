@@ -60,7 +60,6 @@ nav:
       - VPN provider research: vpn-provider-research.md
   - Interfaces:
       - Web UI: web-ui.md
-      - macOS app: macos-app.md
       - CLI reference: cli-reference.md
       - REST API: api.md
       - Declarative setup: declarative-config.md

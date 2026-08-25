@@ -1251,7 +1251,7 @@ alle daemon install --linger      # Linux: survive logout
 ```
 
 (**Homebrew:** the `alle` formula in the `zydo/tap` tap ships only the CLI and
-bundled Web UI — no tray/companion. On that channel let `brew services` own
+bundled Web UI. On that channel let `brew services` own
 registration instead of `alle daemon install`: `brew services start alle`.
 `alle upgrade` recognizes a brew-owned install and delegates to `brew upgrade`.)
 
