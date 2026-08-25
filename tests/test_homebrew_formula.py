@@ -15,10 +15,6 @@ from __future__ import annotations
 
 import importlib.util
 import re
-import shutil
-import subprocess
-import tempfile
-import zipfile
 from pathlib import Path
 
 import pytest
@@ -26,10 +22,6 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 FORMULA = ROOT / "packaging" / "homebrew" / "alle.rb"
 UPDATER = ROOT / "scripts" / "update-homebrew-formula.py"
-UV = shutil.which("uv") or ""
-
-GUI_MODULES = {"tray.py", "companion.py"}
-GUI_SCRIPT = "alle-tray"
 
 
 @pytest.fixture(scope="module")
@@ -74,22 +66,9 @@ def test_formula_relies_on_the_shared_headless_wheel(formula_text):
     install = formula_text.split("def install", 1)[1].split("service do", 1)[0]
     assert "virtualenv_install_with_resources" in install
     assert "rm " not in install
-    # The formula test still proves the installed keg is headless.
+    # The formula test still proves the bundled Web UI landed in the keg.
     test_block = formula_text.split("test do", 1)[1]
-    assert 'refute_path_exists "#{site}/tray.py"' in test_block
-    assert 'refute_path_exists "#{site}/companion.py"' in test_block
-    assert 'refute_path_exists bin/"alle-tray"' in test_block
-
-
-def test_formula_never_installs_the_tray_extra(formula_text):
-    # No `[tray]` extra and no rumps resource in the directives — the header
-    # comment names them only to explain the boundary, so ignore comment lines.
-    directives = "\n".join(
-        line for line in formula_text.splitlines() if not line.lstrip().startswith("#")
-    )
-    assert "[tray]" not in directives
-    assert "rumps" not in directives.lower()
-    assert 'resource "rumps"' not in formula_text
+    assert 'assert_path_exists "#{site}/assets/index.html"' in test_block
 
 
 def test_pinned_resources_match_the_lockfile(formula_text):
@@ -110,35 +89,6 @@ def test_pinned_resources_match_the_lockfile(formula_text):
         )
         assert block, f"{name} not found in uv.lock"
         assert block.group(1) == sha, f"{name} sha256 drifted from uv.lock"
-
-
-# ---- artifact assertion: shared base wheel is headless ----------------------
-
-
-@pytest.mark.skipif(not UV, reason="uv not installed")
-def test_base_wheel_is_headless(formula_text):
-    """The uv, pipx, and Homebrew channels share one headless artifact."""
-    tmp = Path(tempfile.mkdtemp(prefix="alle-brew-"))
-    try:
-        subprocess.run(
-            [UV, "build", "--wheel", "--out-dir", str(tmp)],
-            cwd=ROOT,
-            check=True,
-            capture_output=True,
-        )
-        wheel = next(tmp.glob("*.whl"))
-        with zipfile.ZipFile(wheel) as zf:
-            names = zf.namelist()
-            entry_points = zf.read(
-                next(n for n in names if n.endswith("entry_points.txt"))
-            ).decode()
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-    top_modules = {Path(n).name for n in names if re.fullmatch(r"alle/[^/]+\.py", n)}
-    assert GUI_MODULES.isdisjoint(top_modules)
-    assert GUI_SCRIPT not in entry_points
-    assert "rumps" not in entry_points.lower()
 
 
 # ---- the release updater ----------------------------------------------------

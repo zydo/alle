@@ -36,15 +36,9 @@ exclude = [".localonly"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/alle"]
-# Distribution channels are deliberately headless. Keep the future desktop
-# companion sources available to the in-tree test suite and sdist, but never
-# put them (or anything under assets/readme/, which exists only for the
-# README and the PyPI project page) in an installed wheel.
-exclude = [
-    "src/alle/assets/readme",
-    "src/alle/companion.py",
-    "src/alle/tray.py",
-]
+# assets/readme/ exists only for the README and the PyPI project page — never
+# ship it in an installed wheel.
+exclude = ["src/alle/assets/readme"]
 
 [tool.ruff]
 line-length = 88
@@ -78,7 +72,6 @@ dev = [
     "shfmt-py>=3",
 ]
 docs = ["mkdocs>=1.6", "mkdocs-material>=9.5"]
-macos = ["pyinstaller>=6.0"]
 
 [tool.mypy]
 # Permissive baseline, enforced at zero errors in CI; strictness is ratcheted
