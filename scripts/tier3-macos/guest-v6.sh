@@ -34,7 +34,7 @@ CAP_LOG=/tmp/tier3-v6.pcap.txt
 # ---- start from a known-clean state ------------------------------------------
 # A tun left up by an earlier run routes ::/0 into a dead sing-box, which would
 # make the baseline below silently measure nothing. Note the binary is
-# version-suffixed (sing-box@1.13.13), so `pkill -x sing-box` does not match it.
+# version-suffixed (sing-box@1.13.19), so `pkill -x sing-box` does not match it.
 sudo ALLE_HOME="$HOME/.alle" alle tun off >/dev/null 2>&1 || true
 alle stop >/dev/null 2>&1 || true
 # Root writes preserve file owners (fsio._preserve_owner) but cannot restore an

@@ -7,7 +7,7 @@ sing-box version, extracts each ``sing-box`` binary, and prints the
 ``singbox.ensure_binary`` verifies them) to paste into ``src/alle/constants.py``.
 Run on a version bump; mainstream-only by design (see the README platform decision).
 
-    python scripts/gen_singbox_checksums.py 1.13.13
+    python scripts/gen_singbox_checksums.py 1.13.19
 """
 
 from __future__ import annotations
@@ -41,5 +41,5 @@ def main(version: str) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        sys.exit("usage: gen_singbox_checksums.py <version>  (e.g. 1.13.13)")
+        sys.exit("usage: gen_singbox_checksums.py <version>  (e.g. 1.13.19)")
     main(sys.argv[1])
