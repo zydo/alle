@@ -1,0 +1,9 @@
+<svg role="img" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><title>Terminal</title>
+  <rect x="1.75" y="3" width="20.5" height="17.5" rx="2.75" fill="#23272E" stroke="#59636F" stroke-width="1"/>
+  <line x1="1.75" y1="8.25" x2="22.25" y2="8.25" stroke="#3A414B" stroke-width="1"/>
+  <circle cx="5" cy="5.6" r="0.95" fill="#FF5F57"/>
+  <circle cx="8" cy="5.6" r="0.95" fill="#FEBC2E"/>
+  <circle cx="11" cy="5.6" r="0.95" fill="#28C840"/>
+  <path d="M5.4 11.6 8.5 14.1 5.4 16.6" fill="none" stroke="#3FB950" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="10.5" y="15.2" width="6" height="1.8" rx="0.9" fill="#3FB950"/>
+</svg>

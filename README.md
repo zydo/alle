@@ -16,7 +16,37 @@
 
 A universal VPN client that manages multiple VPN connections with rule-based routing, with interfaces for human (Web UI and CLI) and programs (REST API and Docker image).
 
-**Supported**
+## Platforms
+
+### Supported
+
+<table>
+  <tr>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/platforms/docker.svg" alt="" height="56"><br>Docker</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/platforms/terminal.svg" alt="" height="56"><br>CLI</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/platforms/browser.svg" alt="" height="56"><br>Web UI</td>
+  </tr>
+</table>
+
+### Planned
+
+<table>
+  <tr>
+    <td align="center" width="112">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/platforms/apple-dark.svg">
+        <img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/platforms/apple.svg" alt="" height="56">
+      </picture>
+      <br>macOS
+    </td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/platforms/tux.svg" alt="" height="56"><br>Linux</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/platforms/windows.svg" alt="" height="56"><br>Windows</td>
+  </tr>
+</table>
+
+## VPN Providers
+
+### Supported
 
 <table>
   <tr>
@@ -25,7 +55,7 @@ A universal VPN client that manages multiple VPN connections with rule-based rou
   </tr>
 </table>
 
-**Planned**
+### Planned
 
 <table>
   <tr>

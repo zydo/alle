@@ -1,0 +1,11 @@
+<svg role="img" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><title>Browser</title>
+  <rect x="1.75" y="3" width="20.5" height="17.5" rx="2.75" fill="#FFFFFF" stroke="#59636F" stroke-width="1"/>
+  <line x1="1.75" y1="8.25" x2="22.25" y2="8.25" stroke="#C8CED6" stroke-width="1"/>
+  <circle cx="5" cy="5.6" r="0.95" fill="#FF5F57"/>
+  <circle cx="8" cy="5.6" r="0.95" fill="#FEBC2E"/>
+  <circle cx="11" cy="5.6" r="0.95" fill="#28C840"/>
+  <rect x="13.2" y="4.7" width="7" height="1.9" rx="0.95" fill="#E4E7EB"/>
+  <circle cx="12" cy="14.5" r="4.3" fill="#DDF0FF" stroke="#2F80ED" stroke-width="1.4"/>
+  <ellipse cx="12" cy="14.5" rx="1.9" ry="4.3" fill="none" stroke="#2F80ED" stroke-width="1.1"/>
+  <line x1="7.7" y1="14.5" x2="16.3" y2="14.5" stroke="#2F80ED" stroke-width="1.1"/>
+</svg>
