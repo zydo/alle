@@ -23,3 +23,15 @@ CVE-2026-14456
 # Added: 2026-08-17. Drop when: the base ships pip with vendored
 # msgpack >= 1.2.1.
 GHSA-6v7p-g79w-8964
+
+# setuptools 70.3.0 attributed to the pinned base (CVE-2025-47273, HIGH):
+# PackageIndex path traversal. Pathless: it exists only in the official
+# image's embedded SBOM ("AnalyzedBy: sbom", no file), not in the image
+# filesystem — no layer, pip/_vendor, or ensurepip entry carries it, so
+# filesystem checks cannot see this finding; only the scan can. setuptools
+# is never invoked at runtime anyway — PID 1 is `alle run`, and pip itself
+# only runs at build time against the hash-pinned lock.
+# Added: 2026-08-17; re-added 2026-08-26 after removal on a filesystem
+# check that could not see SBOM attributions (see above). Drop when: the
+# base SBOM stops claiming setuptools 70.3.0 or claims >= 78.1.1.
+CVE-2025-47273
