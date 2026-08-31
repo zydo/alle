@@ -31,7 +31,7 @@ same time.
 | Concurrent VPN locations | One per container                              | Many in one process                                                            |
 | Choosing the exit        | Which container you attach to                  | A rule table matched per request                                               |
 | Providers                | 23, OpenVPN for all of them                    | 2 (growing — [22 planned](vpn-provider-research.md), close to gluetun's list)  |
-| Protocols                | OpenVPN + WireGuard                            | WireGuard ([OpenVPN planned](vpn-provider-research.md), pending sing-box 1.14) |
+| Protocols                | OpenVPN + WireGuard                            | WireGuard ([OpenVPN planned](vpn-provider-research.md) — sing-box 1.14 ready, provider path not yet built) |
 | Kill switch              | Firewall rules in the container                | Route rules; unmatched traffic blocked                                         |
 | Control API              | Status, start/stop, port forwarding, public IP | Status, start/stop, route rules, connection lifecycles, via CLI and REST API   |
 | Runs on                  | Docker                                         | Docker, or as a host service (launchd / `systemd --user`)                      |
@@ -120,8 +120,9 @@ the next section exists.
 - Your provider is one of the 23 it supports and not one of alle's two. This is
   the common case today, and it is a real reason to stop reading here.
 - You need OpenVPN today, or a provider that only offers WireGuard through
-  gluetun's custom-provider path. (alle's OpenVPN support is only
-  [planned](vpn-provider-research.md), gated on sing-box 1.14 stabilizing.)
+  gluetun's custom-provider path. (alle's OpenVPN support is still only
+  [planned](vpn-provider-research.md): sing-box 1.14 provides the OpenVPN
+  client, but alle has not built the provider path on top of it yet.)
 - One exit is all you want, and "every container in this stack goes through
   Sweden" is the whole requirement.
 - You want provider-side port forwarding for a torrent client — alle has no

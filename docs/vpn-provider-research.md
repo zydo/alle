@@ -4,14 +4,15 @@ Reference for which providers `alle` can support and how, given that the engine
 is **sing-box**, verified against provider documentation.
 
 sing-box speaks **WireGuard** today (what `alle` uses for every implemented and
-planned provider below) and gains an [OpenVPN Client
+planned provider below) and, since **v1.14.0** (released 2026-08-30, the version
+`alle` now pins), also ships an [OpenVPN Client
 endpoint](https://sing-box.sagernet.org/configuration/endpoint/openvpn-client/)
-in **v1.14** (currently a prerelease/beta; stable is still v1.13.x), compatible
-with standard OpenVPN servers (TLS mode, username/password or certificate auth,
-`tls-auth`/`tls-crypt` control-channel wrapping — the same fields a provider's
-`.ovpn` file carries). Once that release stabilizes and alle integrates an
-OpenVPN provider archetype (not yet started — new engine-integration work), the
-**OpenVPN-only providers** section below becomes buildable too. See
+compatible with standard OpenVPN servers (TLS mode, username/password or
+certificate auth, `tls-auth`/`tls-crypt` control-channel wrapping — the same
+fields a provider's `.ovpn` file carries), plus an OpenConnect client for
+enterprise VPNs. The upstream blocker is gone: the **OpenVPN-only providers**
+section below becomes buildable once `alle` integrates an OpenVPN provider
+archetype (not yet started — new engine-integration work). See
 `.localonly/Backlog.md` (item 9's exclusion list and the "non-WireGuard
 protocols out of scope" guardrail) for the implementation-side status — this
 document is research, not a shipped feature.
@@ -91,15 +92,15 @@ offer standard WireGuard config download/generation from their portal:
 | PureVPN    | Portal generates WireGuard configs, but they **expire** ("activate within 30 minutes… or redownload") — hostile to alle's stored-config model; expect frequent re-imports |
 | FastestVPN | WireGuard `.conf` provided **only via support email** — no self-service generator; provisioning is manual and slow                                                        |
 
-## OpenVPN-only providers (planned, gated on sing-box 1.14)
+## OpenVPN-only providers (planned)
 
 These providers have no exportable WireGuard (apps-only, or no WireGuard at all),
 which is why the "Excluded providers" section below used to rule them out
 entirely. Each does, however, publish a genuinely self-service OpenVPN
 username/password + config outside their own app — no app-only lockdown, the
-same disqualifier the WireGuard providers above are held to. They become
-supportable once sing-box 1.14 stabilizes and alle adds an OpenVPN provider
-archetype:
+same disqualifier the WireGuard providers above are held to. sing-box 1.14.0
+ships the OpenVPN client, so the only thing left is `alle` adding an OpenVPN
+provider archetype:
 
 | Provider        | Credential shape                                     | Config source                                                                                                  | Notes                                                                                                                                                         |
 | --------------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -135,9 +136,10 @@ the two that aren't real, distinct, live providers: Perfect Privacy (defunct) an
 Giganews (a VyprVPN white-label, tracked under VyprVPN). Every provider gluetun
 supports that is still an operating, independent business is on alle's plan too
 — alle additionally plans VPN.ac, which gluetun does not support. Getting there
-still requires: shipping the post-MVP WireGuard providers (Backlog item 2/9),
-sing-box 1.14 reaching a stable release, and alle adding an OpenVPN provider
-archetype (not started — see `.localonly/Backlog.md`).
+still requires: shipping the post-MVP WireGuard providers (Backlog item 2/9) and
+alle adding an OpenVPN provider archetype (not started — see
+`.localonly/Backlog.md`; sing-box 1.14.0 has shipped the OpenVPN client this
+depended on).
 
 ## IPv6 support (planned providers)
 

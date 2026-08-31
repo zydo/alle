@@ -32,7 +32,7 @@ different one, with no relaunch.
 | Choosing the exit           | Which namespace you launch the app into                                                                                                        | A rule table matched per request                                               |
 | Splitting one app's traffic | Not possible — the whole namespace shares one tunnel                                                                                           | Yes — different domains from the same app can exit differently                 |
 | Providers                   | 9 direct integrations, plus any config via `--custom`                                                                                          | 2 today ([22 planned](vpn-provider-research.md), close to gluetun's list)      |
-| Protocols                   | WireGuard + OpenVPN, plus OpenConnect/OpenFortiVPN via `--custom`                                                                              | WireGuard ([OpenVPN planned](vpn-provider-research.md), pending sing-box 1.14) |
+| Protocols                   | WireGuard + OpenVPN, plus OpenConnect/OpenFortiVPN via `--custom`                                                                              | WireGuard ([OpenVPN planned](vpn-provider-research.md) — sing-box 1.14 ready, provider path not yet built) |
 | Kill switch                 | Per-namespace firewall rules (WireGuard and OpenVPN); applied when the namespace is created, not refreshed for apps launched into it afterward | Route rules; unmatched traffic blocked                                         |
 | Control                     | CLI (`vopono exec`/`sync`), optional systemd daemon mode                                                                                       | CLI, REST API, Web UI                                                          |
 | Credential storage          | OpenVPN credentials stored in plaintext (documented upstream limitation)                                                                       | Provider credentials in `credentials.yaml`, `0600`                             |
@@ -99,7 +99,9 @@ separate profile.
   WireGuard or OpenVPN config — vopono's `--custom` flag takes it directly, no
   per-provider integration work needed on either side.
 - You need OpenVPN, OpenConnect, or OpenFortiVPN today. alle speaks WireGuard
-  only; OpenVPN is [planned](vpn-provider-research.md) but not shipped.
+  only; its engine (sing-box 1.14) can now do OpenVPN and OpenConnect, but
+  alle's provider path for them is [planned](vpn-provider-research.md), not
+  shipped.
 - Launching each app fresh into its target VPN fits your workflow — a one-off
   job, a throwaway browser profile — rather than steering an app that's
   already running.

@@ -35,8 +35,9 @@ Which providers can come next, and why some cannot, is in
 
 ## Planned next
 
-- More VPN providers, WireGuard now and OpenVPN once sing-box 1.14 stabilizes —
-  see [VPN provider research](vpn-provider-research.md).
+- More VPN providers: WireGuard now, and OpenVPN-only providers once `alle` adds
+  an OpenVPN provider archetype (sing-box 1.14.0 has shipped the OpenVPN client
+  this was waiting on) — see [VPN provider research](vpn-provider-research.md).
 - A macOS native app, built as an independent project on top of the public
   REST API — not bundled with this CLI core or the Web UI.
 - Windows support and broader distribution.
@@ -44,8 +45,8 @@ Which providers can come next, and why some cannot, is in
 ## Non-goals
 
 - IKEv2/IPsec support.
-- VPN providers without a usable WireGuard or (once supported) OpenVPN
-  credential path — the excluded list and the reasoning for each is in
-  [VPN provider research](vpn-provider-research.md).
+- VPN providers without a usable WireGuard or (once `alle` ships the OpenVPN
+  path) OpenVPN credential path — the excluded list and the reasoning for each
+  is in [VPN provider research](vpn-provider-research.md).
 - SOCKS5-only or unencrypted proxy providers.
 - Bundling `sing-box` inside the Python package.

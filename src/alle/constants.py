@@ -5,7 +5,7 @@ from __future__ import annotations
 # Pinned sing-box release. alle always uses exactly this build, downloaded
 # from upstream into ~/.alle/bin/sing-box@<version> and verified against the
 # checksums below — never any other sing-box that happens to be on PATH.
-SINGBOX_VERSION = "1.13.19"
+SINGBOX_VERSION = "1.14.0"
 
 # SHA256 of the *extracted sing-box binary* (not the tarball) for each supported
 # platform. Upstream publishes no checksum file, so we pin the bytes ourselves
@@ -13,10 +13,10 @@ SINGBOX_VERSION = "1.13.19"
 # download and the on-disk file on every start. Regenerate on a version bump with
 # scripts/gen_singbox_checksums.py.
 SINGBOX_SHA256 = {
-    "darwin-amd64": "078164e43464f2282ae526151411320582c3e60a0294cec24a627edf205305a6",
-    "darwin-arm64": "5b75c1dec19488675f725adc7a6e3a7301a553117af835dc47669b1fa918976b",
-    "linux-amd64": "7e9dcd7239c49478a576d79f272751e5ed1c2aba7cc08ab1b2bd69c00c904ba1",
-    "linux-arm64": "0bd9f22cd677d7fe70324944b3dfaf967971607ac3f713d1b754248d8b0d702d",
+    "darwin-amd64": "5e82b33aac689e9a645f5ce8eaf02f0bbd196e265df6b4894c5c91d18c0f1cde",
+    "darwin-arm64": "973388c3f720e918fc64dff7fd75dde14b31cc1aa6fc15855e2f00c5291dd4f4",
+    "linux-amd64": "57b3da14e264b6e05e8f46aee027c02d7dd7f1594d19aa39e2f4d2b9459bbd04",
+    "linux-arm64": "4393306b90bb05502fce3b8f1754280f531c0f3ff47df9b1997b7831e3e543d0",
 }
 
 # The Clash API address/secret are not constants: they are generated per
