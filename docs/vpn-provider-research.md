@@ -12,10 +12,10 @@ certificate auth, `tls-auth`/`tls-crypt` control-channel wrapping — the same
 fields a provider's `.ovpn` file carries), plus an OpenConnect client for
 enterprise VPNs. The upstream blocker is gone: the **OpenVPN-only providers**
 section below becomes buildable once `alle` integrates an OpenVPN provider
-archetype (not yet started — new engine-integration work). See
-`.localonly/Backlog.md` (item 9's exclusion list and the "non-WireGuard
-protocols out of scope" guardrail) for the implementation-side status — this
-document is research, not a shipped feature.
+archetype (not yet started — new engine-integration work). This document is
+provider research — what `alle` *could* support and how — not a description of
+shipped features; non-WireGuard protocol support is not yet on the
+implementation track.
 
 ## Key conclusions
 
@@ -136,10 +136,9 @@ the two that aren't real, distinct, live providers: Perfect Privacy (defunct) an
 Giganews (a VyprVPN white-label, tracked under VyprVPN). Every provider gluetun
 supports that is still an operating, independent business is on alle's plan too
 — alle additionally plans VPN.ac, which gluetun does not support. Getting there
-still requires: shipping the post-MVP WireGuard providers (Backlog item 2/9) and
-alle adding an OpenVPN provider archetype (not started — see
-`.localonly/Backlog.md`; sing-box 1.14.0 has shipped the OpenVPN client this
-depended on).
+still requires shipping the post-MVP WireGuard providers listed above and adding
+an OpenVPN provider archetype to `alle` (not started — sing-box 1.14.0 has
+shipped the OpenVPN client this depended on).
 
 ## IPv6 support (planned providers)
 
