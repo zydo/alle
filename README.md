@@ -41,6 +41,7 @@ A universal VPN client that manages multiple VPN connections with rule-based rou
     </td>
     <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/platforms/tux.svg" alt="" height="56"><br>Linux</td>
     <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/platforms/windows.svg" alt="" height="56"><br>Windows</td>
+    <td align="center" width="112"><img src="https://raw.githubusercontent.com/zydo/alle/main/src/alle/assets/readme/platforms/openwrt.svg" alt="" height="56"><br>OpenWrt (LuCI)</td>
   </tr>
 </table>
 
